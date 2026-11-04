@@ -95,3 +95,6 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 .source-form label.wide { flex: 1 1 100%; }
 .source-form input, .source-form select { padding: 4px 6px; background: var(--bg); color: var(--fg);
   border: 1px solid var(--border); border-radius: 4px; }
+#graph { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.graph-filters { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 13px; margin: 8px 0; }
+.graph-filters .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 2px; }

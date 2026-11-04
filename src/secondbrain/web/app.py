@@ -15,7 +15,7 @@ from pathlib import Path
 
 import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -34,6 +34,7 @@ from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import source_stats
 from secondbrain.sources import FETCHERS
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
+from secondbrain.wiki.graph import build_graph
 from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
 from secondbrain.wiki.loop import wiki_refresh_link
@@ -661,6 +662,18 @@ def create_app() -> FastAPI:
             request,
             "wiki.html",
             {"index_html": index_html, "due": due, "grades": GRADES, "count": len(wiki.pages)},
+        )
+
+    @app.get("/wiki/graph.json")
+    def wiki_graph_json() -> JSONResponse:
+        return JSONResponse(build_graph(_wiki(), datetime.now().date()))
+
+    @app.get("/wiki/graph", response_class=HTMLResponse)
+    def wiki_graph(request: Request) -> HTMLResponse:
+        wiki = _wiki()
+        types = sorted({p.type for p in wiki.pages.values()})
+        return templates.TemplateResponse(
+            request, "wiki_graph.html", {"count": len(wiki.pages), "types": types}
         )
 
     @app.post("/wiki/lint", response_class=HTMLResponse)

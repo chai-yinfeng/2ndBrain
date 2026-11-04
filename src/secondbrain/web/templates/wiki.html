@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Wiki · Second Brain{% endblock %}
 {% block content %}
-<h1>Wiki <small class="meta">{{ count }} 个页面</small></h1>
+<h1>Wiki <small class="meta">{{ count }} 个页面 · <a href="/wiki/graph">知识图谱</a></small></h1>
 <section class="entry">
   <h2>体检</h2>
   <button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查 wiki</button>
