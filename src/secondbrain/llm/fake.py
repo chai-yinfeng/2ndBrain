@@ -12,7 +12,13 @@ import json
 import re
 
 from secondbrain.llm.base import LLMError, T, Tier, Usage
-from secondbrain.llm.schemas import REFRESHER_TYPES, L1Response, L2Response, ProfileProposal
+from secondbrain.llm.schemas import (
+    REFRESHER_TYPES,
+    ChunkNotes,
+    L1Response,
+    L2Response,
+    ProfileProposal,
+)
 
 DEFAULT_KEYWORDS = (
     "inference",
@@ -52,6 +58,8 @@ _TYPE_PATTERNS = (
 _HASH_TYPES = {0: "explainer", 1: "survey", 2: "opinion"}
 
 L1_COMPARABLE_CHARS = 4000
+
+_STAMPED_LINE = re.compile(r"^(?:- )?\[(?:\d{1,2}:)?\d{1,2}:\d{2}\][^\n]*", re.M)
 
 _PROFILE_RE = re.compile(r"<profile>(.*?)</profile>", re.S)
 
@@ -117,6 +125,9 @@ class FakeBackend:
             sentences = [
                 s.strip() for s in re.split(r"(?<=[.!?。])\s+", it.get("text", "")) if s.strip()
             ]
+            stamped = [m.group(0) for m in _STAMPED_LINE.finditer(it.get("text", ""))]
+            if stamped:  # 视频 / 逐段提要：要点带时间戳
+                sentences = [line.removeprefix("- ").strip() for line in stamped]
             # 粗略估时：约 3000 字符 / 分钟，论文 ×1.5，限制在 5–45 分钟
             minutes = it.get("full_length_chars", 0) / 3000 * (1.5 if it.get("is_paper") else 1)
             obj = {
@@ -127,6 +138,8 @@ class FakeBackend:
                 "prerequisites": a["topics"][:2],
                 "scores": {k: a[k] for k in ("relevance", "novelty", "quality", "refresher_value")},
             }
+        elif schema is ChunkNotes:
+            obj = _chunk_notes(payload)
         elif schema is ProfileProposal:
             obj = _profile_proposal(payload)
         else:
@@ -195,3 +208,15 @@ def _profile_proposal(payload: dict) -> dict:
         "mastery_changes": list(changes.values()),
         "section_edits": edits,
     }
+
+
+def _chunk_notes(payload: dict) -> dict:
+    """逐段提要：视频取前几段带时间戳的字幕，其余取前几行。"""
+    points = []
+    for line in payload.get("text", "").splitlines()[:4]:
+        m = re.match(r"\[((?:\d{1,2}:)?\d{1,2}:\d{2})\]\s*(.*)", line)
+        if m:
+            points.append({"t": m.group(1), "text": m.group(2)[:100]})
+        elif line.strip():
+            points.append({"t": None, "text": line.strip()[:100]})
+    return {"summary": f"（fake）第 {payload.get('part', '?')} 段", "points": points}

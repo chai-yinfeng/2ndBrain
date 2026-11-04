@@ -93,7 +93,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 
 **未经 L2 的阅读时间估计**：`正文字符数 / estimate.chars_per_minute`，论文 × `paper_multiplier`，限制在 `[min_minutes, max_minutes]`。
 
-**items.status**：`new → l0_rejected | l1 → l2 → tiered | deferred`。
+**items.status**：`new → l0_rejected | l1 → l2 → tiered | deferred`；回补条目 `new → backfill_l1 → l2 → tiered | deferred`（没排上的回到 `backfill_l1`）。
 
 ## Web UI（M3）
 
@@ -110,6 +110,13 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 - `sb profile update`（与 Web `/profile` 共用 `profile/rewrite.py`）：strong 模型输出结构化提案（掌握度表的 update / add / remove，段落的 append / remove，每条带反馈 id 证据）→ 代码按规则校验（升级需 已扎实 / 学了，降级需 需要回炉，每次一级；有 已扎实 证据可直接到"扎实"）→ 生成新文本与 unified diff；`--apply` 前备份到 `data/profile_history/`。反馈不足时不调用 LLM。LLM 用量记为 stage = PROFILE。
 - `sb sources tune`（`profile/tune.py`）：每个条目取最新一次 👍 / 👎 / 学了，按信源统计正向比例，样本足够时建议 trust ±1；`--apply` 对 `config/sources.yaml` 做行级替换（不存在时从 example 复制）。
 
+## 视频、长内容与回补（M5，见 ADR 0009）
+
+- YouTube：频道 RSS → 字幕（youtube-transcript-api，失败退回 yt-dlp，只取字幕）→ 每约 30 秒一段、段首 `[mm:ss]` 的文本存入 `content`；时长取字幕末尾，存 `duration_seconds`。L0 排除 Shorts 与过短视频；无字幕视频只经 L1、不进 L2。视频要点带时间戳，展示时生成 `watch?v=ID&t=秒` 链接。
+- 长内容：待读文本 > `filter.l2.mapreduce_threshold_chars` 时分块 → cheap 模型逐块提要（stage L2_MAP，prompt `l2_map_system.md`）→ strong 模型汇总（stage L2）。
+- 按需精读：`sb deep` / Web "精读"按钮（`pipeline.run.deep_one`），只写 L2 评估、不改 digest。
+- 回补：`backfill: true` 信源在 fetch 时把时间窗外的历史条目存为 `is_backfill = 1`；每次 run 在常规 L2 之后，从回补池（L1 粗筛后状态 `backfill_l1`）按优先级挑 `backfill.daily_limit` 条做 L2，分级时只能进温故栏，没排上的回到池中。
+
 ## 数据模型草案
 
 存储：SQLite 单文件 `data/brain.db`；wiki 为 `data/wiki/` 下的 Markdown。字段为草案，以实现时的 `db.py` 为准（M1 实现 `sources`、`items`，M2 实现 `assessments`、`digests`、`llm_calls`，M3 实现 `feedback` 与 `items.read_at`；schema 版本记录在 `PRAGMA user_version`）。
@@ -117,11 +124,11 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | 表 | 主要字段 | 引入 |
 |---|---|---|
 | `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill` | M1 |
-| `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill` | M1（`read_at` M3，`is_backfill` M5） |
+| `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2 |
 | `feedback` | `id`, `item_id`, `kind`（up / down / read / later / learned / needs_refresh / mastered）, `note`, `ts`；`kind = read` 时同时写 `items.read_at` | M3 |
-| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / PROFILE）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
+| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
 
 Wiki 概念页 frontmatter（M6）：`mastery`、`last_reviewed`、`interval_days`、`ease`（SM-2 简化版）、`sources`（来源条目）。
 

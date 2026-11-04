@@ -31,6 +31,7 @@
       <a href="/item/{{ e.item_id }}">{{ e.title }}</a>
       <span class="meta">（{{ e.source_id }} · {{ e.est_minutes }} 分钟）</span>
       <span class="reason">{{ e.reason }}</span>
+      {% if not e.has_l2 %}{% with item_id=e.item_id, no_transcript=e.no_transcript %}{% include "_deep_button.html" %}{% endwith %}{% endif %}
     </div>
     {% else %}<p class="empty">（空）</p>{% endfor %}
   </details>

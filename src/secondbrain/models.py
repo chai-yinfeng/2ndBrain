@@ -52,6 +52,10 @@ class FetchSettings(BaseModel):
     content_max_chars: int = Field(default=200_000, ge=1)
     pdf_max_pages: int = Field(default=30, ge=1)
     pdf_max_bytes: int = Field(default=20_000_000, ge=1)
+    transcript_interval_seconds: float = Field(default=3.0, ge=0)  # 两次字幕请求的最小间隔
+    transcript_retries: int = Field(default=2, ge=0)  # 字幕请求遇到 HTTP 错误时的重试次数
+    transcript_paragraph_seconds: int = Field(default=30, ge=5)  # 字幕按约 N 秒合并为一段
+    backfill_max_per_source: int = Field(default=100, ge=0)  # 每次 fetch 每源最多回补条数
 
 
 @dataclass
@@ -65,6 +69,7 @@ class RawEntry:
     feed_content: str | None = None  # feed 自带的正文（HTML 或纯文本）
     published_at: datetime | None = None
     arxiv_id: str | None = None
+    video_id: str | None = None  # YouTube 视频 id
 
 
 # ---------- M2：LLM 与过滤 / 分级设置 ----------
@@ -103,6 +108,7 @@ class L0Settings(BaseModel):
     min_content_chars: int = Field(default=300, ge=0)
     include_keywords: list[str] = Field(default_factory=list)  # 非空时标题/摘要须至少命中一个
     exclude_keywords: list[str] = Field(default_factory=list)  # 标题/摘要命中任一即排除
+    min_video_minutes: float = Field(default=5, ge=0)  # 短于该时长的视频排除（Shorts 一律排除）
 
 
 class L1Settings(BaseModel):
@@ -114,6 +120,11 @@ class L1Settings(BaseModel):
 class L2Settings(BaseModel):
     max_input_chars: int = Field(default=96_000, ge=1000)  # 约 24k token
     section_max_chars: int = Field(default=24_000, ge=500)  # 论文单个章节的上限
+    # 长内容 map-reduce：待读文本超过阈值时分块，cheap 模型逐块提要，strong 模型汇总
+    mapreduce_threshold_chars: int = Field(default=96_000, ge=1000)
+    chunk_chars: int = Field(default=12_000, ge=1000)
+    chunk_overlap_chars: int = Field(default=500, ge=0)
+    max_chunks: int = Field(default=20, ge=1)
 
 
 class ScoreSettings(BaseModel):
@@ -170,6 +181,13 @@ class PersonalizeSettings(BaseModel):
     tune_lower_ratio: float = Field(default=0.3, ge=0, le=1)  # 正向比例 ≤ 该值建议 trust −1
 
 
+class BackfillSettings(BaseModel):
+    """经典回补（ADR 0004 / 0009）：每天从回补池选少量条目进温故栏。"""
+
+    daily_limit: int = Field(default=1, ge=0)
+    screen_size: int = Field(default=10, ge=1)  # 回补池中保持多少条已粗筛的候选
+
+
 class FilterSettings(BaseModel):
     """settings 中与流水线相关的全部配置（由 config.pipeline_settings 组装）。"""
 
@@ -192,3 +210,4 @@ class FilterSettings(BaseModel):
     thresholds: Thresholds = Field(default_factory=Thresholds)
     estimate: EstimateSettings = Field(default_factory=EstimateSettings)
     personalize: PersonalizeSettings = Field(default_factory=PersonalizeSettings)
+    backfill: BackfillSettings = Field(default_factory=BackfillSettings)

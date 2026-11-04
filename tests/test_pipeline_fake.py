@@ -93,6 +93,9 @@ def _row(**kw) -> dict:
         "fetched_at": "2026-11-04T00:00:00Z",
         "source_id": "a",
         "trust": 3,
+        "url": "https://example.com/a",
+        "extract_method": "feed",
+        "duration_seconds": None,
     }
     return base | kw
 

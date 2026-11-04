@@ -102,6 +102,12 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_feedback_item ON feedback(item_id);
     ALTER TABLE items ADD COLUMN read_at TEXT;
     """,
+    # v4（M5）：经典回补标记、视频时长（秒，来自字幕的最后时间戳）。
+    """
+    ALTER TABLE items ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE items ADD COLUMN duration_seconds INTEGER;
+    CREATE INDEX idx_items_backfill_status ON items(is_backfill, status);
+    """,
 ]
 
 # 反馈类型 → 按钮文字（顺序即页面上的按钮顺序）
@@ -116,7 +122,8 @@ FEEDBACK_KINDS = {
 }
 
 # items.status：new（待处理）→ l0_rejected | l1（已粗筛）→ l2（已精读）→ tiered | deferred
-ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred")
+# 回补条目（is_backfill = 1）：new → backfill_l1（已粗筛、留在回补池）→ l2 → tiered | deferred
+ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred", "backfill_l1")
 
 
 def format_time(dt: datetime) -> str:
@@ -184,6 +191,8 @@ class NewItem:
     content: str
     extract_method: str
     published_at: datetime | None
+    is_backfill: bool = False
+    duration_seconds: int | None = None
 
 
 def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -> bool:
@@ -196,8 +205,9 @@ def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -
     cur = conn.execute(
         """
         INSERT INTO items (source_id, url, url_canonical, content_hash, title, author, summary,
-                           content, extract_method, published_at, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           content, extract_method, published_at, fetched_at, is_backfill,
+                           duration_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(url_canonical) DO NOTHING
         """,
         (
@@ -212,6 +222,8 @@ def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -
             item.extract_method,
             format_time(item.published_at) if item.published_at else None,
             format_time(fetched_at),
+            int(item.is_backfill),
+            item.duration_seconds,
         ),
     )
     return cur.rowcount == 1
@@ -242,20 +254,35 @@ def list_items(
 ITEM_COLUMNS = """
     i.id, i.source_id, i.url, i.title, i.summary, i.content, i.extract_method,
     i.published_at, i.fetched_at, i.status, length(i.content) AS content_len,
-    s.trust, s.role
+    i.is_backfill, i.duration_seconds, s.trust, s.role
 """
 
 
-def items_by_status(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> list[sqlite3.Row]:
+def items_by_status(
+    conn: sqlite3.Connection, statuses: tuple[str, ...], backfill: bool | None = None
+) -> list[sqlite3.Row]:
+    """backfill：None 不区分；False 只要常规条目；True 只要回补池条目。"""
     marks = ",".join("?" * len(statuses))
+    extra = "" if backfill is None else f" AND i.is_backfill = {int(backfill)}"
     return conn.execute(
         f"""
         SELECT {ITEM_COLUMNS} FROM items i JOIN sources s ON s.id = i.source_id
-        WHERE i.status IN ({marks})
+        WHERE i.status IN ({marks}){extra}
         ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
         """,
         statuses,
     ).fetchall()
+
+
+def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
+    """某天 digest 中已放入温故栏（或顺延）的回补条目数。"""
+    return conn.execute(
+        """
+        SELECT COUNT(*) FROM digests d JOIN items i ON i.id = d.item_id
+        WHERE d.date = ? AND i.is_backfill = 1 AND d.lane IN ('refresher', 'deferred')
+        """,
+        (day,),
+    ).fetchone()[0]
 
 
 def set_status(conn: sqlite3.Connection, item_ids: list[int], status: str) -> None:
@@ -370,7 +397,8 @@ def demote_must_reads(conn: sqlite3.Connection, item_ids: list[int], before_day:
 def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT d.*, i.title, i.url, i.source_id FROM digests d JOIN items i ON i.id = d.item_id
+        SELECT d.*, i.title, i.url, i.source_id, i.extract_method, i.is_backfill
+        FROM digests d JOIN items i ON i.id = d.item_id
         WHERE d.date = ? ORDER BY d.lane, d.rank
         """,
         (day,),

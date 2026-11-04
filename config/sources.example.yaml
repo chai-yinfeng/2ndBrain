@@ -1,9 +1,9 @@
 # 信源清单（种子）。复制为 config/sources.yaml 后按需修改。
-# rss / arxiv / hf_papers 的 URL 已于 2026-11 实测可用；标注 "# TODO verify" 的（youtube）待 M5 确认。
+# 所有 URL（含 YouTube 频道 RSS 的 channel_id）已于 2026-11 实测可用。
 #
 # 每个条目字段：
 #   id:            唯一标识（小写、短横线）
-#   type:          rss | arxiv | hf_papers | youtube（youtube 在 M5 实现）
+#   type:          rss | arxiv | hf_papers | youtube
 #   url:           rss / hf_papers / youtube 使用的地址
 #   query:         arxiv 使用的检索式（分类 + 关键词）
 #   trust:         1–5，信源可信度，参与排序加权
@@ -12,7 +12,7 @@
 #   tags:          标签列表
 #   max_age_days:  只采集该天数内发布的内容
 #   enabled:       是否启用
-#   backfill:      是否回补历史归档中的经典文章（默认 false；M5 实现，ADR 0004）
+#   backfill:      是否把 feed 中时间窗以外的历史条目放进回补池（默认 false；ADR 0004 / 0009）
 #   needs_scraper: 站点没有可用 RSS，需要页面抓取支持（默认 false；M1 记录为待支持，不阻塞）
 
 sources:
@@ -137,7 +137,7 @@ sources:
     tags: [llm, deep-learning]
     max_age_days: 90
     enabled: true
-    backfill: false  # 经典博客，M5 实现后可改为 true
+    backfill: true  # 经典博客：历史文章进入回补池
 
   - id: karpathy-bearblog
     type: rss
@@ -156,7 +156,7 @@ sources:
     tags: [llm, research, survey]
     max_age_days: 90
     enabled: true
-    backfill: false  # 经典综述，M5 实现后可改为 true
+    backfill: true  # 经典综述：历史文章进入回补池
 
   - id: sebastian-raschka
     type: rss
@@ -184,7 +184,7 @@ sources:
     tags: [deep-learning, explainer]
     max_age_days: 365
     enabled: true
-    backfill: false  # 经典讲解，M5 实现后可改为 true
+    backfill: true  # 经典讲解：历史文章进入回补池
 
   - id: interconnects
     type: rss
@@ -402,21 +402,21 @@ sources:
     max_age_days: 60
     enabled: true
 
-  # ---------- 视频（M5 才启用）----------
-  # 频道 RSS：https://www.youtube.com/feeds/videos.xml?channel_id=<id>；channel_id 待 M5 确认。
+  # ---------- 视频 ----------
+  # 频道 RSS 只包含最近 15 个视频；Shorts 与过短的视频在 L0 排除（filter.l0.min_video_minutes）。
   - id: karpathy-youtube
     type: youtube
-    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXUPKJO5MZQN11PqgIvyuvQ  # TODO verify
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXUPKJO5MZQN11PqgIvyuvQ
     trust: 5
     role: core
     tags: [video, llm]
-    max_age_days: 90
-    enabled: false
+    max_age_days: 730  # 更新很少，放宽时间窗
+    enabled: true
 
   - id: stanford-online
     # CS25（Transformers United）、CS336（Language Modeling from Scratch）等课程
     type: youtube
-    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCBa5G_ESCn8Yd4vw5U-gIcg  # TODO verify
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCBa5G_ESCn8Yd4vw5U-gIcg
     trust: 4
     role: core
     tags: [video, course]
@@ -425,16 +425,16 @@ sources:
 
   - id: gpu-mode
     type: youtube
-    url: https://www.youtube.com/feeds/videos.xml?channel_id=TODO  # TODO verify
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCJgIbYl6C5no72a0NUAPcTA
     trust: 5
     role: core
     tags: [video, gpu, kernels]
     max_age_days: 30
-    enabled: false
+    enabled: true
 
   - id: dwarkesh-podcast
     type: youtube
-    url: https://www.youtube.com/feeds/videos.xml?channel_id=TODO  # TODO verify
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXl4i9dYBrFOabk0xGmbkRA
     trust: 3
     role: core
     tags: [video, podcast]
@@ -443,7 +443,7 @@ sources:
 
   - id: adam-neely
     type: youtube
-    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCnkp4xDOwqqJD7sSM3xdUiQ  # TODO verify
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCnkp4xDOwqqJD7sSM3xdUiQ
     trust: 3
     role: expansion
     tags: [video, music-theory]

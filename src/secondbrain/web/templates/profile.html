@@ -23,6 +23,7 @@
   <p class="meta">读取近期 👍 / 👎 / 学了 / 需要回炉 / 已扎实，由 strong 模型提出修改；每条都带反馈证据，代码按规则校验。应用前会自动备份。</p>
   <button type="button" class="fb" hx-post="/profile/propose" hx-target="#proposal" hx-swap="innerHTML"
           hx-indicator="#proposal-loading">生成修改提案</button>
+  <span class="meta">将调用 strong 模型（约几美分）</span>
   <span id="proposal-loading" class="htmx-indicator meta">生成中…</span>
   <div id="proposal"></div>
 </section>

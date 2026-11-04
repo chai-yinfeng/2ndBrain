@@ -5,6 +5,8 @@
     {% if e.is_deep_read %}<span class="tag deep">深读</span>{% endif %}
     {% if e.deferred_from %}<span class="tag">顺延自 {{ e.deferred_from }}</span>{% endif %}
     {% if e.content_type %}<span class="tag">{{ e.content_type }}</span>{% endif %}
+    {% if e.is_backfill %}<span class="tag">经典回补</span>{% endif %}
+    {% if e.no_transcript %}<span class="tag">无字幕</span>{% endif %}
     · <a href="/item/{{ e.item_id }}">详情</a>
   </p>
   {% if e.tldr %}<p class="tldr"><b>TL;DR</b> {{ e.tldr }}</p>{% endif %}
