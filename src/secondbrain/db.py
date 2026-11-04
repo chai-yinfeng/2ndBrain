@@ -90,7 +90,30 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_llm_calls_ts ON llm_calls(ts);
     """,
+    # v3（M3）：用户反馈；items.read_at 记录"已读"时间，积压只统计未读的必读。
+    """
+    CREATE TABLE feedback (
+        id      INTEGER PRIMARY KEY,
+        item_id INTEGER NOT NULL REFERENCES items(id),
+        kind    TEXT NOT NULL,  -- 见 FEEDBACK_KINDS
+        note    TEXT,
+        ts      TEXT NOT NULL
+    );
+    CREATE INDEX idx_feedback_item ON feedback(item_id);
+    ALTER TABLE items ADD COLUMN read_at TEXT;
+    """,
 ]
+
+# 反馈类型 → 按钮文字（顺序即页面上的按钮顺序）
+FEEDBACK_KINDS = {
+    "up": "👍",
+    "down": "👎",
+    "read": "已读",
+    "later": "稍后读",
+    "learned": "学了",
+    "needs_refresh": "需要回炉",
+    "mastered": "已扎实",
+}
 
 # items.status：new（待处理）→ l0_rejected | l1（已粗筛）→ l2（已精读）→ tiered | deferred
 ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred")
@@ -326,9 +349,13 @@ def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -
 
 
 def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int, str]]:
-    """此前各日的必读条目（M2 尚无反馈，全部视为未读）。"""
+    """此前各日仍未读（items.read_at 为空）的必读条目。"""
     rows = conn.execute(
-        "SELECT item_id, date FROM digests WHERE lane = 'must_read' AND date < ?", (before_day,)
+        """
+        SELECT d.item_id, d.date FROM digests d JOIN items i ON i.id = d.item_id
+        WHERE d.lane = 'must_read' AND d.date < ? AND i.read_at IS NULL
+        """,
+        (before_day,),
     ).fetchall()
     return [(r["item_id"], r["date"]) for r in rows]
 
@@ -353,3 +380,81 @@ def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
 def latest_digest_date(conn: sqlite3.Connection) -> str | None:
     row = conn.execute("SELECT MAX(date) FROM digests").fetchone()
     return row[0] if row else None
+
+
+# ---------- M3：反馈 ----------
+
+
+def item_exists(conn: sqlite3.Connection, item_id: int) -> bool:
+    return conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone() is not None
+
+
+def add_feedback(
+    conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
+) -> None:
+    """写一条反馈；kind 为 read 时同时记录 items.read_at（首次已读时间）。"""
+    assert kind in FEEDBACK_KINDS
+    conn.execute(
+        "INSERT INTO feedback (item_id, kind, note, ts) VALUES (?, ?, ?, ?)",
+        (item_id, kind, note or None, format_time(ts)),
+    )
+    if kind == "read":
+        conn.execute(
+            "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+            (format_time(ts), item_id),
+        )
+    conn.commit()
+
+
+def feedback_for(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT id, kind, note, ts FROM feedback WHERE item_id = ? ORDER BY id", (item_id,)
+    ).fetchall()
+
+
+def feedback_kinds(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, set[str]]:
+    """各条目当前生效的反馈：👍 / 👎 只保留最后一次，其余类型出现过即生效。"""
+    result: dict[int, set[str]] = {i: set() for i in item_ids}
+    if not item_ids:
+        return result
+    marks = ",".join("?" * len(item_ids))
+    rows = conn.execute(
+        f"SELECT item_id, kind FROM feedback WHERE item_id IN ({marks}) ORDER BY id", item_ids
+    ).fetchall()
+    for r in rows:
+        kinds = result[r["item_id"]]
+        if r["kind"] in ("up", "down"):
+            kinds.discard("down" if r["kind"] == "up" else "up")
+        kinds.add(r["kind"])
+    return result
+
+
+def digest_dates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT date,
+               SUM(lane = 'must_read') AS must_read, SUM(lane = 'worth_it') AS worth_it,
+               SUM(lane = 'refresher') AS refresher, SUM(lane = 'serendipity') AS serendipity,
+               SUM(lane = 'deferred') AS deferred, SUM(lane = 'fyi') AS fyi, COUNT(*) AS total
+        FROM digests GROUP BY date ORDER BY date DESC
+        """
+    ).fetchall()
+
+
+def item_detail(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT {ITEM_COLUMNS}, i.author, i.read_at FROM items i"
+        " JOIN sources s ON s.id = i.source_id WHERE i.id = ?",
+        (item_id,),
+    ).fetchone()
+
+
+def item_assessment(conn: sqlite3.Connection, item_id: int, stage: str) -> dict | None:
+    row = conn.execute(
+        "SELECT data, score, model FROM assessments WHERE item_id = ? AND stage = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (item_id, stage),
+    ).fetchone()
+    if row is None:
+        return None
+    return {**json.loads(row["data"]), "_score": row["score"], "_model": row["model"]}

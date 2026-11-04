@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Digest {{ day or "" }} · Second Brain{% endblock %}
+{% block content %}
+{% if not day %}
+  <p class="empty">还没有 digest，先运行 <code>uv run sb run</code>。</p>
+{% else %}
+  <section class="summary">
+    <h1>Digest {{ day }}</h1>
+    <div class="budget" data-budget="{{ used }}/{{ budget }}">
+      <progress value="{{ [used, budget] | min }}" max="{{ budget or 1 }}"></progress>
+      <span>今日已排 {{ used }} / {{ budget }} 分钟</span>
+    </div>
+    <p class="backlog">此前未读的必读积压：<b>{{ backlog }}</b> 条</p>
+  </section>
+
+  {% for lane, title in page_lanes %}
+    {% set entries = lanes.get(lane, []) %}
+    {% if entries or lane != "deferred" %}
+    <section class="lane" id="lane-{{ lane }}">
+      <h2>{{ title }} <small>{{ entries | length }}</small></h2>
+      {% for e in entries %}{% include "_entry.html" %}{% else %}<p class="empty">（空）</p>{% endfor %}
+    </section>
+    {% endif %}
+  {% endfor %}
+
+  {% set fyi = lanes.get("fyi", []) %}
+  <details class="lane" id="lane-fyi">
+    <summary><h2>速览 <small>{{ fyi | length }}</small></h2></summary>
+    {% for e in fyi %}
+    <div class="fyi" data-item-id="{{ e.item_id }}">
+      <a href="/item/{{ e.item_id }}">{{ e.title }}</a>
+      <span class="meta">（{{ e.source_id }} · {{ e.est_minutes }} 分钟）</span>
+      <span class="reason">{{ e.reason }}</span>
+    </div>
+    {% else %}<p class="empty">（空）</p>{% endfor %}
+  </details>
+  <p class="meta">归档 {{ archived }} 条</p>
+{% endif %}
+{% endblock %}

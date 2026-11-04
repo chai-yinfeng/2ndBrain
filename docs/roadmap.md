@@ -92,15 +92,15 @@ uv run sb usage --since 1d        # 本次 token 与估算费用
 
 ## M3 — 本地 Web UI + 反馈采集 + 定时运行
 
-- [ ] `web/app.py`（FastAPI + Jinja2 + uvicorn，新增依赖；HTMX 固定版本 vendored 到 static）
-- [ ] `/` 今日 digest（按 lane 分组：TL;DR、理由、信源、原文链接、est_minutes、"深读"标记）
-- [ ] 页面显示今日预算进度条（已选条目总 est_minutes / `daily_budget_minutes`）与积压数量
-- [ ] 前置知识提示：L2 `prerequisites[]` 命中用户不扎实的领域 / 概念时显示"建议先回炉：[[概念]]"
-- [ ] `/item/{id}` 详情（key points、L1 / L2 评分、prerequisites、原文）
-- [ ] `/history` 按日期浏览
-- [ ] HTMX 反馈按钮：👍 / 👎 / 已读 / 稍后读 / 学了 / 需要回炉 / 已扎实 → `POST /feedback`，写 `feedback` 表（item_id, kind, ts, note）
-- [ ] `sb serve [--port 8000]`
-- [ ] `sb schedule install`（macOS launchd plist，每日跑 `sb run`，默认 DeepSeek 非高峰时段）/ `sb schedule uninstall`；文档说明 cron 替代方案
+- [x] `web/app.py`（FastAPI + Jinja2 + uvicorn，新增依赖；HTMX 固定版本 vendored 到 static）
+- [x] `/` 今日 digest（按 lane 分组：TL;DR、理由、信源、原文链接、est_minutes、"深读"标记）
+- [x] 页面显示今日预算进度条（已选条目总 est_minutes / `daily_budget_minutes`）与积压数量
+- [x] 前置知识提示：L2 `prerequisites[]` 命中用户不扎实的领域 / 概念时显示"建议先回炉：[[概念]]"
+- [x] `/item/{id}` 详情（key points、L1 / L2 评分、prerequisites、原文）
+- [x] `/history` 按日期浏览
+- [x] HTMX 反馈按钮：👍 / 👎 / 已读 / 稍后读 / 学了 / 需要回炉 / 已扎实 → `POST /feedback`，写 `feedback` 表（item_id, kind, ts, note）
+- [x] `sb serve [--port 8000]`
+- [x] `sb schedule install`（macOS launchd plist，每日跑 `sb run`，默认 DeepSeek 非高峰时段）/ `sb schedule uninstall`；文档说明 cron 替代方案
 
 **模块**：`web/`、`db.py`（feedback 表）、`cli.py`
 

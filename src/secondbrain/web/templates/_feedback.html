@@ -1,0 +1,18 @@
+{# 反馈按钮组；POST /feedback 返回本片段，HTMX 原地替换。 #}
+<div class="feedback" id="feedback-{{ item_id }}">
+  {% if with_note %}
+  <input type="text" name="note" placeholder="备注（可选）" maxlength="500">
+  <input type="hidden" name="with_note" value="1">
+  {% endif %}
+  {% for kind, label in feedback_kinds.items() %}
+  <button type="button"
+          class="fb{% if kind in kinds %} active{% endif %}"
+          hx-post="/feedback"
+          hx-vals='{"item_id": "{{ item_id }}", "kind": "{{ kind }}"}'
+          {% if with_note %}hx-include="#feedback-{{ item_id }} [name]"{% endif %}
+          hx-target="#feedback-{{ item_id }}"
+          hx-swap="outerHTML"
+          aria-pressed="{{ 'true' if kind in kinds else 'false' }}">{{ label }}</button>
+  {% endfor %}
+  {% if saved %}<span class="saved">已记录：{{ feedback_kinds[saved] }}</span>{% endif %}
+</div>

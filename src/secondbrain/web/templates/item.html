@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} · Second Brain{% endblock %}
+{% block content %}
+<article class="detail" data-item-id="{{ item.id }}">
+  <h1><a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.title }}</a></h1>
+  <p class="meta">
+    {{ item.source_id }}（trust {{ item.trust }} · {{ item.role }}）
+    {% if item.author %}· {{ item.author }}{% endif %}
+    · 发布 {{ item.published_at or "未知" }} · 正文 {{ item.content_len }} 字符
+    {% if item.read_at %}· <span class="tag">已读 {{ item.read_at }}</span>{% endif %}
+  </p>
+  <p><a href="{{ item.url }}" target="_blank" rel="noopener">原文链接</a></p>
+
+  {% if l2 %}
+  <section>
+    <h2>精读（L2）</h2>
+    <p class="tldr"><b>TL;DR</b> {{ l2.tldr }}</p>
+    <ul>{% for p in l2.key_points %}<li>{{ p }}</li>{% endfor %}</ul>
+    <p class="reason"><b>为什么推荐</b> {{ l2.why_for_you }}</p>
+    <p class="meta">预计 {{ l2.est_minutes }} 分钟</p>
+    {% if refresh_first %}<p class="refresh"><b>建议先回炉：</b>{{ refresh_first | join("、") }}</p>{% endif %}
+    {% if l2.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ l2.prerequisites | join("、") }}</p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>评分</h2>
+    <table class="scores">
+      <tr><th></th><th>relevance</th><th>novelty</th><th>quality</th><th>refresher_value</th><th>排序分</th></tr>
+      {% if l1 %}<tr><th>L1</th><td>{{ l1.relevance }}</td><td>{{ l1.novelty }}</td><td>{{ l1.quality }}</td><td>{{ l1.refresher_value }}</td><td>{{ l1._score }}</td></tr>{% endif %}
+      {% if l2 %}<tr><th>L2</th><td>{{ l2.scores.relevance }}</td><td>{{ l2.scores.novelty }}</td><td>{{ l2.scores.quality }}</td><td>{{ l2.scores.refresher_value }}</td><td>{{ l2._score }}</td></tr>{% endif %}
+    </table>
+    {% if l1 %}
+    <p class="meta">content_type：{{ l1.content_type }}{% if l1.topics %} · topics：{{ l1.topics | join(", ") }}{% endif %}</p>
+    <p class="reason"><b>粗筛理由</b> {{ l1.one_line_reason }}</p>
+    {% else %}
+    <p class="empty">尚未评估。</p>
+    {% endif %}
+  </section>
+
+  {% if digests %}
+  <section>
+    <h2>出现在</h2>
+    <ul>{% for d in digests %}<li><a href="/?date={{ d.date }}">{{ d.date }}</a> · {{ lane_titles.get(d.lane, d.lane) }} · {{ d.est_minutes }} 分钟{% if d.is_deep_read %} · 深读{% endif %}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>反馈</h2>
+    {% with item_id=item.id, with_note=True, saved=None %}{% include "_feedback.html" %}{% endwith %}
+    {% if history %}
+    <ul class="history">{% for f in history %}<li>{{ f.ts }} · {{ feedback_kinds.get(f.kind, f.kind) }}{% if f.note %} · {{ f.note }}{% endif %}</li>{% endfor %}</ul>
+    {% else %}<p class="empty">还没有反馈。</p>{% endif %}
+  </section>
+</article>
+{% endblock %}

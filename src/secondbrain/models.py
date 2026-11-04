@@ -165,6 +165,10 @@ class FilterSettings(BaseModel):
     pricing_schedule: PricingSchedule = Field(default_factory=PricingSchedule)
     daily_budget_minutes: int = 105
     lanes: LaneCaps = Field(default_factory=LaneCaps)
+    # 为温故 / 意外栏保留的预算（分钟），其他 lane 不能占用；无合格候选时释放（ADR 0007）
+    lane_budget_reserve: dict[str, int] = Field(
+        default_factory=lambda: {"refresher": 15, "serendipity": 10}
+    )
     deep_read_ratio: float = 0.6
     backlog_max_days: int = 3
     run: RunSettings = Field(default_factory=RunSettings)

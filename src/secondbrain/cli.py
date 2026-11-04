@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import typer
 
-from secondbrain import __version__, config, db, ingest
+from secondbrain import __version__, config, db, ingest, schedule
 from secondbrain.llm.base import LLMError, make_backend
 from secondbrain.llm.usage import summarize
 from secondbrain.net import HttpClient
@@ -21,9 +22,11 @@ app = typer.Typer(help="Second Brain：知识过滤 + 分级推荐 + 知识 wiki
 sources_app = typer.Typer(help="信源管理。", no_args_is_help=True)
 items_app = typer.Typer(help="已采集条目。", no_args_is_help=True)
 digest_app = typer.Typer(help="每日分级推荐。", no_args_is_help=True)
+schedule_app = typer.Typer(help="macOS launchd 定时运行 sb run。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
+app.add_typer(schedule_app, name="schedule")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -402,3 +405,82 @@ def usage(
             f"{r['cache_hit_tokens']:>10} {r['completion_tokens']:>10} {r['cost_usd']:>10.4f}"
         )
     typer.echo(f"合计估算费用：${total:.4f}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（默认只监听本机）"),
+    port: int = typer.Option(8000, "--port", help="端口"),
+) -> None:
+    """启动本地 Web UI。"""
+    import uvicorn
+
+    from secondbrain.web.app import create_app
+
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        typer.echo(f"{WARN} 监听 {host}：局域网内其他设备也能访问，且没有登录保护")
+    typer.echo(f"Second Brain：http://{host}:{port}/  （Ctrl+C 退出）")
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+
+
+def _peak_note(local, fs) -> list[str]:
+    lines = []
+    for check in schedule.utc_checks(local, fs.pricing_schedule):
+        status = "高峰时段（全价）" if check.peak else "非高峰（半价）"
+        lines.append(f"  {check.label}：本地 {local:%H:%M} = UTC {check.utc:%H:%M}，{status}")
+    return lines
+
+
+@schedule_app.command("install")
+def schedule_install(
+    at: str = typer.Option(schedule.DEFAULT_TIME, "--time", help="每天运行的本地时间 HH:MM"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印将写入的 plist 与命令，不做改动"),
+) -> None:
+    """生成 LaunchAgent，每天在指定本地时间运行 `uv run sb run`。"""
+    try:
+        local = schedule.parse_time(at)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _, fs, _ = _load_pipeline_settings()
+    log_dir = config.data_dir() / "logs"
+    plist = schedule.build_plist(local, config.PROJECT_ROOT, log_dir, schedule.find_uv())
+    target = schedule.plist_path()
+    notes = _peak_note(local, fs)
+    tz = datetime.now().astimezone().tzname()
+    typer.echo(f"每天本地 {local:%H:%M}（本机时区 {tz}）运行 `uv run sb run`；高峰按 UTC 判断：")
+    for line in notes:
+        typer.echo(line)
+    if any("高峰时段" in line for line in notes):
+        typer.echo(f"{WARN} 该时间落在 DeepSeek 高峰时段（UTC 周一至周五 01–04、06–10），费用翻倍")
+    typer.echo(f"日志：{log_dir}/run.log、run.err.log")
+    command = ["launchctl", "load", "-w", str(target)]
+    if dry_run:
+        typer.echo(f"\n[dry-run] 将写入 {target}：\n")
+        typer.echo(plist.decode())
+        typer.echo(f"[dry-run] 将执行：{' '.join(command)}")
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(plist)
+    subprocess.run(command, check=True)
+    typer.echo(f"{OK} 已安装 {target}")
+
+
+@schedule_app.command("uninstall")
+def schedule_uninstall(
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印将执行的操作，不做改动"),
+) -> None:
+    """卸载 LaunchAgent。"""
+    target = schedule.plist_path()
+    command = ["launchctl", "unload", "-w", str(target)]
+    if dry_run:
+        exists = "存在" if target.exists() else "不存在"
+        typer.echo(f"[dry-run] 将执行：{' '.join(command)}")
+        typer.echo(f"[dry-run] 将删除：{target}（当前{exists}）")
+        return
+    if not target.exists():
+        typer.echo(f"{WARN} 未安装：{target} 不存在")
+        return
+    subprocess.run(command, check=False)
+    target.unlink()
+    typer.echo(f"{OK} 已卸载 {target}")

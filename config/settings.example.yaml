@@ -44,6 +44,12 @@ lanes:
   refresher: 2      # 温故：讲得好的 explainer / survey 或到期复习概念，不占 must_read 名额
   serendipity: 1    # 意外：高质量但与 profile 相关性较低，或来自 role: expansion 信源
 
+# 为温故 / 意外栏保留的预算（分钟，ADR 0007）：必读 / 值得读不能占用；
+# 该栏当天没有合格候选时不保留，分配结束后未用完的部分释放回总预算。
+lane_budget_reserve:
+  refresher: 15
+  serendipity: 10
+
 # 单条 est_minutes 超过 daily_budget_minutes × deep_read_ratio 时标记"深读"，可顺延。
 deep_read_ratio: 0.6
 
