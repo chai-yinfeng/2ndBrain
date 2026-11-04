@@ -1,0 +1,37 @@
+# 信源清单示例。复制为 config/sources.yaml 后修改。
+# 完整的预置清单在 M1 补充；这里只给出 schema 与少量示例。
+#
+# 每个条目字段：
+#   id:           唯一标识（小写、短横线）
+#   type:         rss | arxiv | hf_papers（M5 起支持 youtube）
+#   url:          rss / hf_papers 使用的地址
+#   query:        arxiv 使用的检索式（分类 + 关键词）
+#   trust:        1–5，信源可信度，参与排序加权
+#   tags:         标签列表
+#   max_age_days: 只采集该天数内发布的内容
+#   enabled:      是否启用
+
+sources:
+  - id: simon-willison
+    type: rss
+    url: https://simonwillison.net/atom/everything/
+    trust: 4
+    tags: [llm, tools]
+    max_age_days: 7
+    enabled: true
+
+  - id: lilian-weng
+    type: rss
+    url: https://lilianweng.github.io/index.xml
+    trust: 5
+    tags: [ml, research]
+    max_age_days: 30
+    enabled: true
+
+  - id: arxiv-cs-cl
+    type: arxiv
+    query: "cat:cs.CL AND (abs:agent OR abs:reasoning)"
+    trust: 3
+    tags: [paper, nlp]
+    max_age_days: 3
+    enabled: true

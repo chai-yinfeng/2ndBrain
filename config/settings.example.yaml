@@ -1,0 +1,34 @@
+# Second Brain 全局设置示例。
+# 复制为 config/settings.yaml 后修改；settings.yaml 不存在时程序使用本文件。
+# 密钥不要写在这里，放在 .env（DEEPSEEK_API_KEY）。
+
+llm:
+  # 可被环境变量 SB_LLM_BACKEND 覆盖。可选：deepseek | fake（离线测试）
+  backend: deepseek
+  base_url: https://api.deepseek.com
+  models:
+    cheap: deepseek-flash      # L1 粗筛
+    strong: deepseek-v4-pro    # L2 精读
+
+# 价格表：USD / 1M tokens，均为高峰价。
+# 非高峰时段半价。高峰时段（UTC）：周一至周五 01:00–04:00 与 06:00–10:00。
+pricing:
+  deepseek-flash:
+    input_cache_hit: 0.006
+    input_cache_miss: 0.3
+    output: 1.2
+  deepseek-v4-pro:
+    input_cache_hit: 0.044
+    input_cache_miss: 1.32
+    output: 3.96
+
+# 每日 digest 各层级的条目上限（允许为空）。
+tiers:
+  must_read: 3
+  worth_it: 10
+
+# "意外"名额：高质量但与 profile 相关性较低的条目。
+serendipity_slots: 1
+
+# 输出语言：中文，术语和原文标题保留英文。
+output_language: zh
