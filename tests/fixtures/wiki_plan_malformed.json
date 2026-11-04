@@ -1,0 +1,10 @@
+{
+  "summary": "结构有偏差的计划（脱敏样例）",
+  "creates": [
+    {"slug": "concept-a", "type": "Concept ", "title": "Concept A", "summary": "示例", "aliases": "concept a", "body": "## 是什么\n\n示例"},
+    {"title": "Concept B", "type": "concept", "body": "## 是什么\n\n缺 slug 与 summary"},
+    {"slug": "no-body", "type": "concept", "title": "No body", "summary": "缺正文"},
+    {"slug": "bad-type", "type": "tutorial", "title": "Bad type", "summary": "s", "body": "b"}
+  ],
+  "updates": {"slug": "concept-a", "action": "ADD_LINKS", "links": "concept-b"}
+}

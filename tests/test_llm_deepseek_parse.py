@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import yaml
+from conftest import FIXTURES
 
 from secondbrain import config
 from secondbrain.llm.base import LLMError
@@ -188,3 +189,86 @@ def test_prompts_mention_json():
         text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
         assert "json" in text
         assert "{profile}" in text and "{mastery}" in text
+
+
+# ---------- 截断与校验失败的重试（ADR 0011） ----------
+
+
+def completion_with(content: str, finish_reason: str = "stop") -> httpx.Response:
+    resp = completion(content)
+    body = json.loads(resp.content)
+    body["choices"][0]["finish_reason"] = finish_reason
+    return httpx.Response(200, json=body)
+
+
+def test_truncated_output_retries_with_more_tokens_and_hint():
+    from secondbrain.llm.schemas import WikiPlan
+
+    truncated = (FIXTURES / "wiki_plan_truncated.json").read_text(encoding="utf-8")
+    ok = json.dumps({"summary": "s", "creates": [], "updates": []})
+    be, requests = backend([completion_with(truncated, "length"), completion_with(ok)])
+    plan, usage = be.complete_json(MESSAGES, WikiPlan, "strong")
+    assert plan.summary == "s"
+    first, second = (json.loads(r.content) for r in requests)
+    assert first["max_tokens"] == 8192 and second["max_tokens"] == 16384
+    assert "被截断" in second["messages"][-1]["content"]
+    assert second["messages"][: len(MESSAGES)] == MESSAGES  # 原始消息保持不变（缓存前缀）
+
+
+def test_truncation_is_reported_after_retries():
+    from secondbrain.llm.schemas import WikiPlan
+
+    truncated = (FIXTURES / "wiki_plan_truncated.json").read_text(encoding="utf-8")
+    settings = LLMSettings(
+        max_retries=0, max_tokens={"cheap": 100, "strong": 100}, max_tokens_cap=150
+    )
+    requests = []
+    queue = [completion_with(truncated, "length"), completion_with(truncated, "length")]
+
+    def handler(request):
+        requests.append(request)
+        return queue.pop(0)
+
+    be = DeepSeekBackend(
+        settings, SECRET, http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    with pytest.raises(LLMError) as info:
+        be.complete_json(MESSAGES, WikiPlan, "strong")
+    message = str(info.value)
+    assert "finish_reason=length" in message and "max_tokens=150" in message  # 翻倍受上限约束
+    assert "json_invalid" in message or "EOF" in message or "Invalid JSON" in message
+    assert [json.loads(r.content)["max_tokens"] for r in requests] == [100, 150]
+
+
+def test_validation_error_is_fed_back_with_field_paths():
+    bad = json.dumps(
+        {
+            "items": [
+                {
+                    "id": 7,
+                    "relevance": 8,
+                    "novelty": 6,
+                    "quality": 7,
+                    "refresher_value": 2,
+                    "one_line_reason": "r",
+                }
+            ]
+        }
+    )
+    be, requests = backend([completion_with(bad), completion_with(json.dumps(L1_OK))])
+    obj, _ = be.complete_json(MESSAGES, L1Response, "cheap")
+    assert obj.items[0].id == 7
+    hint = json.loads(requests[1].content)["messages"][-1]["content"]
+    assert "items.0.content_type: Field required" in hint
+    assert json.loads(requests[1].content)["max_tokens"] == 4096  # 非截断：不加 token
+
+
+def test_final_error_lists_field_paths():
+    bad = json.dumps({"items": [{"id": "x"}]})
+    be, _ = backend([completion_with(bad), completion_with(bad)])
+    with pytest.raises(LLMError) as info:
+        be.complete_json(MESSAGES, L1Response, "cheap")
+    message = str(info.value)
+    assert "items.0.relevance: Field required" in message
+    assert "items.0.id: Input should be a valid integer" in message
+    assert "另有 2 处" in message  # 只列前 5 处，其余汇总

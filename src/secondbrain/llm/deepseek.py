@@ -6,7 +6,7 @@ import httpx
 import openai
 from pydantic import ValidationError
 
-from secondbrain.llm.base import LLMError, T, Tier, Usage
+from secondbrain.llm.base import LLMError, T, Tier, Usage, format_validation_error
 from secondbrain.models import LLMSettings
 
 # 模型输出未通过 schema 校验时的总尝试次数（首次 + 重试一次）。
@@ -69,13 +69,15 @@ class DeepSeekBackend:
         model = self.model_name(tier)
         total = Usage(model)
         last_error = ""
+        max_tokens = self.settings.max_tokens[tier]
+        attempt_messages = list(messages)
         for _ in range(VALIDATION_ATTEMPTS):
             try:
                 resp = self._client.chat.completions.create(
                     model=model,
-                    messages=messages,
+                    messages=attempt_messages,
                     response_format={"type": "json_object"},
-                    max_tokens=self.settings.max_tokens[tier],
+                    max_tokens=max_tokens,
                 )
             except openai.APIStatusError as exc:
                 detail = self._redact(str(exc))[:300]
@@ -86,9 +88,27 @@ class DeepSeekBackend:
                     f"DeepSeek 调用失败（{type(exc).__name__}）：{detail}", total
                 ) from None
             total.add(parse_usage(resp.usage, model))
-            content = resp.choices[0].message.content if resp.choices else None
+            choice = resp.choices[0] if resp.choices else None
+            content = choice.message.content if choice else None
             try:
                 return schema.model_validate_json(content or ""), total
             except ValidationError as exc:
-                last_error = self._redact(str(exc).splitlines()[0])
+                detail = self._redact(format_validation_error(exc))
+            # 重试：把失败原因反馈给模型；被截断时同时提高 max_tokens（ADR 0011）
+            if choice is not None and choice.finish_reason == "length":
+                last_error = (
+                    f"输出被截断（finish_reason=length，max_tokens={max_tokens}）：{detail}"
+                )
+                max_tokens = min(max_tokens * 2, self.settings.max_tokens_cap)
+                hint = (
+                    "上一次输出超过长度上限被截断，json 不完整。请重新输出，"
+                    "保持内容更精简（减少条目、缩短文字），并确保 json 完整闭合。"
+                )
+            else:
+                last_error = detail
+                hint = (
+                    f"上一次输出未通过 schema 校验：{detail}。"
+                    "请修正这些问题，只输出完整、合法的 json。"
+                )
+            attempt_messages = [*messages, {"role": "user", "content": hint}]
         raise LLMError(f"模型输出 {VALIDATION_ATTEMPTS} 次未通过 schema 校验：{last_error}", total)

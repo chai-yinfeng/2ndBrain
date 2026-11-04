@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+from secondbrain.llm.base import format_validation_error
 
 ContentType = Literal["frontier", "explainer", "survey", "tutorial", "opinion"]
 REFRESHER_TYPES = ("explainer", "survey", "tutorial")
@@ -109,10 +111,69 @@ class PageUpdate(BaseModel):
     aliases: list[str] = Field(default_factory=list)  # add_aliases
 
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return value
+
+
+def _coerce_op(op):
+    """可安全修正的偏差：类型 / 动作大小写与空白、别名 / 链接写成字符串、缺 slug 时用标题、
+    缺一行摘要时留空。其余问题交给 schema 校验。"""
+    if not isinstance(op, dict):
+        return op
+    op = dict(op)
+    for key in ("type", "action"):
+        if isinstance(op.get(key), str):
+            op[key] = op[key].strip().lower()
+    for key in ("aliases", "links"):
+        if key in op:
+            op[key] = _as_list(op[key])
+    if not op.get("slug") and op.get("title"):
+        op["slug"] = op["title"]
+    if "title" in op and op.get("summary") is None:
+        op["summary"] = ""
+    return op
+
+
 class WikiPlan(BaseModel):
+    """ingest 的编辑计划。宽容解析（ADR 0011）：单个操作不合法时只丢弃该操作，
+    原因记在 dropped 中（由 apply_plan 报告），不让整份计划作废。"""
+
     summary: str = ""
     creates: list[PageCreate] = Field(default_factory=list)
     updates: list[PageUpdate] = Field(default_factory=list)
+    dropped: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lenient(cls, data):
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        dropped = list(_as_list(data.get("dropped")))
+        if not isinstance(data.get("summary", ""), str):
+            data["summary"] = str(data["summary"])
+        for key, model in (("creates", PageCreate), ("updates", PageUpdate)):
+            ops = data.get(key)
+            if isinstance(ops, dict):
+                ops = [ops]
+            if ops is None:
+                ops = []
+            if not isinstance(ops, list):
+                dropped.append(f"{key}：应为列表，已忽略")
+                ops = []
+            kept = []
+            for i, op in enumerate(ops):
+                try:
+                    kept.append(model.model_validate(_coerce_op(op)))
+                except ValidationError as exc:
+                    dropped.append(f"{key}[{i}]：{format_validation_error(exc)}")
+            data[key] = kept
+        data["dropped"] = dropped
+        return data
 
 
 class LintIssue(BaseModel):

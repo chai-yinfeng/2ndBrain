@@ -260,3 +260,28 @@
 **遗留问题**
 - 名字匹配是子串匹配（"已知知识"、相关页面、前置知识），可能漏配或误配。
 - 受限编辑无法删除段落，需要手动在 Obsidian 或编辑器里改。
+
+## M6 修复 — wiki ingest 的 schema 校验失败（2026-11-04，分支 `m6-wiki-ingest-fix`）
+
+**问题**：在 main 上复跑真实 ingest 演示时失败（`模型输出 2 次未通过 schema 校验：1 validation error for WikiPlan`，花费 $0.0172）。
+
+**根因**：
+- 复现时 `finish_reason = length`，`completion_tokens = 4096`，其中 `reasoning_tokens = 3298`。deepseek-v4-pro 是推理模型，推理 token 也计入 `max_tokens`，所以正文 JSON 被截断。
+- 推理长度每次不同，因此结果不稳定。原来的重试参数完全相同，仍会被截断。
+
+**修复**（ADR 0011）：
+- strong 模型的 `max_tokens` 默认提高到 8192。
+- 遇到截断时，重试把 `max_tokens` 翻倍（上限 `max_tokens_cap` 16384），并要求输出更精简。
+- 校验失败重试时，把"字段路径: 原因"反馈给模型；最终错误信息里也带字段路径。
+- WikiPlan 宽容解析：可安全修正的偏差直接修正，单个非法操作只丢弃该操作并在拒绝列表中报告。
+- 测试：
+  - 新增 fixture `wiki_plan_truncated.json`、`wiki_plan_malformed.json`，均为脱敏后只保留结构的失败样例；
+  - `test_llm_deepseek_parse.py` 新增 4 个测试，`test_wiki.py` 新增 3 个测试。
+
+**验收**：
+- `uv run pytest -q`：197 passed；`uv run ruff check .`：通过。
+- 在同一个临时目录 `m6live.D3CQ` 中真实运行 `sb wiki ingest --pending`：
+  - 一次成功，completion 3773 token，没有截断；
+  - 新建 4 个概念页和 1 个 paper 页；
+  - 费用 $0.0076（非高峰）；
+  - `sb wiki lint`：0 项。
