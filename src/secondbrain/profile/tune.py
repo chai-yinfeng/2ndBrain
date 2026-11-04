@@ -1,4 +1,6 @@
-"""信源 trust 调整建议：按每个信源条目的 👍 / 👎 / 学了 统计正向比例。"""
+"""信源 trust 调整建议：按每个信源条目的当前反馈统计正向比例（ADR 0013）。
+
+有收获为正；不感兴趣 / 没价值为负；太浅 / 太难 / 稍后读不计。"""
 
 from __future__ import annotations
 
@@ -10,15 +12,16 @@ from datetime import datetime, timedelta
 from secondbrain import db
 from secondbrain.models import PersonalizeSettings, SourceConfig
 
-TUNE_KINDS = ("up", "down", "learned")
+TUNE_POSITIVE = ("gained",)
+TUNE_NEGATIVE = ("dismiss", "worthless")
 
 
 @dataclass
 class SourceStats:
     source_id: str
     trust: int
-    positive: int = 0  # 最新信号为 👍 / 学了 的条目数
-    negative: int = 0  # 最新信号为 👎 的条目数
+    positive: int = 0  # 当前状态为 有收获 的条目数
+    negative: int = 0  # 当前状态为 不感兴趣 / 没价值 的条目数
     suggested: int | None = None  # 建议的新 trust；None 表示不调整
     reason: str = ""
 
@@ -37,27 +40,24 @@ def source_stats(
     now: datetime,
     s: PersonalizeSettings,
 ) -> list[SourceStats]:
-    """每个条目只看时间窗内最新的一次 👍 / 👎 / 学了，避免重复点击放大权重。"""
+    """每个条目只看当前状态（时间窗内的最新一次反馈），避免重复点击放大权重。"""
     since = db.format_time(now - timedelta(days=s.tune_window_days))
     rows = conn.execute(
-        """
-        SELECT i.source_id, f.item_id, f.kind FROM feedback f JOIN items i ON i.id = f.item_id
-        WHERE f.kind IN ('up', 'down', 'learned') AND f.ts >= ?
-        ORDER BY f.ts, f.id
+        f"""
+        SELECT i.source_id, f.kind FROM ({db.LATEST_FEEDBACK}) f JOIN items i ON i.id = f.item_id
+        WHERE f.ts >= ?
         """,
         (since,),
     ).fetchall()
-    latest: dict[int, tuple[str, str]] = {}
-    for r in rows:
-        latest[r["item_id"]] = (r["source_id"], r["kind"])
     stats = {src.id: SourceStats(src.id, src.trust) for src in sources}
-    for source_id, kind in latest.values():
-        if source_id not in stats:
+    for r in rows:
+        st = stats.get(r["source_id"])
+        if st is None:
             continue
-        if kind == "down":
-            stats[source_id].negative += 1
-        else:
-            stats[source_id].positive += 1
+        if r["kind"] in TUNE_NEGATIVE:
+            st.negative += 1
+        elif r["kind"] in TUNE_POSITIVE:
+            st.positive += 1
     for st in stats.values():
         _suggest(st, s)
     return list(stats.values())

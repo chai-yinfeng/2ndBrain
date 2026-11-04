@@ -537,7 +537,7 @@ def profile_update(
         if len(feedback) < pers.min_feedback_for_update:
             typer.echo(
                 f"无足够反馈，不提议修改（近 {pers.feedback_window_days} 天内 "
-                f"👍 / 👎 / 学了 / 需要回炉 / 已扎实 共 {len(feedback)} 条，"
+                f"不感兴趣 / 太浅 / 有收获 / 太难 / 没价值 共 {len(feedback)} 条，"
                 f"至少需要 {pers.min_feedback_for_update} 条）"
             )
             return
@@ -591,7 +591,7 @@ def profile_update(
 def sources_tune(
     apply: bool = typer.Option(False, "--apply", help="把建议写入 config/sources.yaml"),
 ) -> None:
-    """按信源的 👍 / 👎 / 学了 比例给出 trust 调整建议（±1，限 1–5）。"""
+    """按信源的 有收获 / 不感兴趣 / 没价值 比例给出 trust 调整建议（±1，限 1–5）。"""
     from secondbrain.profile.tune import apply_trust_changes, source_stats
 
     _, fs, _ = _load_pipeline_settings()
@@ -603,7 +603,7 @@ def sources_tune(
     finally:
         conn.close()
     typer.echo(
-        f"近 {pers.tune_window_days} 天；每个条目取最新一次 👍 / 👎 / 学了；"
+        f"近 {pers.tune_window_days} 天；每个条目取当前反馈（有收获为正，不感兴趣 / 没价值为负）；"
         f"样本 ≥ {pers.tune_min_samples} 才给建议"
     )
     width = max(len(st.source_id) for st in stats) if stats else 0
@@ -611,7 +611,7 @@ def sources_tune(
     for st in shown:
         change = f"trust {st.trust} → {st.suggested}" if st.suggested else f"trust {st.trust}"
         typer.echo(
-            f"{st.source_id.ljust(width)}  👍/学了 {st.positive:>3}  👎 {st.negative:>3}  "
+            f"{st.source_id.ljust(width)}  正 {st.positive:>3}  负 {st.negative:>3}  "
             f"{change:<14}  {st.reason}"
         )
     silent = len(stats) - len(shown)
@@ -696,7 +696,9 @@ def _open_wiki():
 @wiki_app.command("ingest")
 def wiki_ingest(
     item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
-    pending: bool = typer.Option(False, "--pending", help='编入所有已标"学了"但尚未编入的条目'),
+    pending: bool = typer.Option(
+        False, "--pending", help='编入所有当前标为"有收获"但尚未编入的条目'
+    ),
     force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
 ) -> None:
     """把条目编进 wiki：strong 模型输出受限的页面操作，由代码校验后写入 data/wiki。"""
@@ -720,7 +722,7 @@ def wiki_ingest(
             ids = [item_id]
         typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
         if not ids:
-            typer.echo('0 条待 ingest（没有已标"学了"且尚未编入的条目）')
+            typer.echo('0 条待 ingest（没有标为"有收获"且尚未编入的条目）')
             return
         backend_name = config.llm_backend(settings)
         try:
@@ -849,26 +851,32 @@ def wiki_due(
         )
     if due:
         typer.echo(
-            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot（或在 Web /wiki 点按钮）"
+            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered"
+            "（或在 Web /wiki 点按钮）"
         )
 
 
 @wiki_app.command("review")
 def wiki_review(
     slug: str = typer.Argument(..., help="概念页 slug"),
-    grade: str = typer.Argument(..., help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"),
+    grade: str = typer.Argument(
+        ...,
+        help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"
+        "| needs_refresh（需要回炉）| mastered（已扎实）",
+    ),
 ) -> None:
     """记录一次概念复习，按 SM-2 简化版更新间隔、ease 与掌握度。"""
     from secondbrain.wiki.review import GRADES, review
 
     if grade not in GRADES:
-        raise typer.BadParameter("结果应为 remembered / fuzzy / forgot")
+        raise typer.BadParameter("结果应为 " + " / ".join(GRADES))
+    _, fs, _ = _load_pipeline_settings()
     wiki = _open_wiki()
     page = wiki.find(slug)
     if page is None or page.type != "concept":
         typer.echo(f"{FAIL} 找不到概念页：{slug}", err=True)
         raise typer.Exit(code=1)
-    out = review(wiki, page, grade, datetime.now().date())
+    out = review(wiki, page, grade, datetime.now().date(), fs.wiki.mastered_interval_days)
     interval = f"间隔 {out.interval_before} → {out.interval_after} 天"
     mastery = f"掌握度 {out.mastery_before} → {out.mastery_after}"
     typer.echo(

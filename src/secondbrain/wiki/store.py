@@ -219,6 +219,7 @@ def new_meta(
     aliases: list[str] | None = None,
     mastery: str | None = None,
     sources: list[int] | None = None,
+    interval_days: int = 1,
 ) -> dict:
     return {
         "title": title,
@@ -228,7 +229,7 @@ def new_meta(
         "sources": sources or [],
         "mastery": mastery,
         "last_reviewed": today.isoformat(),
-        "interval_days": 1,
+        "interval_days": interval_days,
         "ease": DEFAULT_EASE,
         "created": today.isoformat(),
         "updated": today.isoformat(),

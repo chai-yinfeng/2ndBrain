@@ -16,8 +16,11 @@ from secondbrain.profile.feedback import FeedbackEntry
 from secondbrain.profile.loader import MASTERY_LEVELS, Profile, parse_profile
 
 LEVEL_RANK = {level: i for i, level in enumerate(MASTERY_LEVELS)}  # 陌生 < 接触过 < 想回炉 < 扎实
-UPGRADE_KINDS = {"mastered", "learned"}
-DOWNGRADE_KINDS = {"needs_refresh"}
+# 证据规则（ADR 0013）：升级需要"太浅"；"有收获"只能作为 陌生 → 接触过 的证据；
+# 降级需要"太难"；每次最多升 / 降一级。
+UPGRADE_KINDS = {"too_easy"}
+FIRST_STEP_KINDS = {"gained"}
+DOWNGRADE_KINDS = {"too_hard"}
 
 
 @dataclass
@@ -110,13 +113,16 @@ def _mastery_problem(old: str | None, new: str, evidence_kinds: set[str]) -> str
         return None
     delta = LEVEL_RANK[new] - LEVEL_RANK[old]
     if delta > 0:
-        if not evidence_kinds & UPGRADE_KINDS:
-            return "升级缺少 已扎实 / 学了 证据"
-        if delta > 1 and not (new == "扎实" and "mastered" in evidence_kinds):
-            return "只能升一级（直接改为扎实需要 已扎实 证据）"
+        if delta > 1:
+            return "每次只能升一级"
+        first_step = old == "陌生" and new == "接触过"
+        if not (
+            evidence_kinds & UPGRADE_KINDS or (first_step and evidence_kinds & FIRST_STEP_KINDS)
+        ):
+            return "升级缺少 太浅 证据（有收获 只能作为 陌生 → 接触过 的证据）"
     else:
         if not evidence_kinds & DOWNGRADE_KINDS:
-            return "降级缺少 需要回炉 证据"
+            return "降级缺少 太难 证据"
         if delta < -1:
             return "每次只能降一级"
     return None

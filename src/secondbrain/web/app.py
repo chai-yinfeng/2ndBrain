@@ -23,13 +23,14 @@ from secondbrain import __version__, config, db
 from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, make_backend
 from secondbrain.llm.usage import record_call
+from secondbrain.models import FilterSettings
 from secondbrain.pipeline.run import deep_one
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.wiki.loop import wiki_refresh_link
-from secondbrain.wiki.review import GRADES, due_concepts, due_date, review
+from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
 from secondbrain.wiki.store import WIKILINK_RE, Wiki, open_wiki, slugify_safe
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -48,7 +49,12 @@ LANE_TITLES = dict(PAGE_LANES) | {"fyi": "速览", "archived": "归档"}
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.globals.update(
-    feedback_kinds=db.FEEDBACK_KINDS, lane_titles=LANE_TITLES, version=__version__
+    feedback_kinds=db.FEEDBACK_KINDS,
+    feedback_hints=db.FEEDBACK_HINTS,
+    feedback_groups=(("读之前", db.BEFORE_READ_KINDS), ("读完后", db.AFTER_READ_KINDS)),
+    grade_hints=GRADE_HINTS,
+    lane_titles=LANE_TITLES,
+    version=__version__,
 )
 
 
@@ -64,6 +70,14 @@ def _conn() -> Iterator[sqlite3.Connection]:
 def _profile() -> Profile:
     path = config.profile_path()
     return load_profile(path) if path.exists() else parse_profile("")
+
+
+def _settings() -> FilterSettings:
+    """settings 不可用时退回默认值（页面仍可浏览）。"""
+    try:
+        return config.pipeline_settings(config.load_settings())
+    except (config.ConfigError, OSError, ValueError):
+        return FilterSettings()
 
 
 def _budget() -> int:
@@ -103,7 +117,7 @@ def _entry(
     row: sqlite3.Row,
     l1: dict,
     l2: dict | None,
-    kinds: set[str],
+    state: str | None,
     profile: Profile,
     wiki: Wiki | None = None,
 ) -> dict:
@@ -123,7 +137,7 @@ def _entry(
         "content_type": l1.get("content_type"),
         "refresh_first": refresh,
         "prerequisites": rest,
-        "kinds": kinds,
+        "state": state,
         "has_l2": l2 is not None,
         "no_transcript": row["extract_method"] == "no_transcript",
         "is_backfill": bool(row["is_backfill"]),
@@ -150,15 +164,16 @@ def create_app() -> FastAPI:
             concept_rows = db.digest_concepts(conn, day) if day else []
             l1 = db.latest_assessments(conn, "L1")
             l2 = db.latest_assessments(conn, "L2")
-            kinds = db.feedback_kinds(conn, [r["item_id"] for r in rows])
+            states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
+            later = len(db.items_in_state(conn, "later"))
         lanes: dict[str, list[dict]] = {}
         for row in rows:
             entry = _entry(
                 row,
                 l1.get(row["item_id"], {}),
                 l2.get(row["item_id"]),
-                kinds[row["item_id"]],
+                states[row["item_id"]],
                 profile,
                 wiki,
             )
@@ -175,6 +190,7 @@ def create_app() -> FastAPI:
                 "used": used,
                 "budget": _budget(),
                 "backlog": backlog,
+                "later": later,
                 "archived": len(lanes.get("archived", [])),
                 "concepts": concept_rows,
                 "grades": GRADES,
@@ -191,7 +207,7 @@ def create_app() -> FastAPI:
             l1 = db.item_assessment(conn, item_id, "L1")
             l2 = db.item_assessment(conn, item_id, "L2")
             history = db.feedback_for(conn, item_id)
-            kinds = db.feedback_kinds(conn, [item_id])[item_id]
+            state = db.feedback_state(conn, [item_id])[item_id]
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
@@ -207,7 +223,7 @@ def create_app() -> FastAPI:
                 "l2": l2,
                 "key_points": _key_points(l2, row["url"]),
                 "history": history,
-                "kinds": kinds,
+                "state": state,
                 "digests": lanes,
                 "refresh_first": refresh_hints(prereqs, profile, _wiki())[0],
             },
@@ -218,6 +234,13 @@ def create_app() -> FastAPI:
         with _conn() as conn:
             days = db.digest_dates(conn)
         return templates.TemplateResponse(request, "history.html", {"days": days})
+
+    @app.get("/later", response_class=HTMLResponse)
+    def later(request: Request) -> HTMLResponse:
+        """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
+        with _conn() as conn:
+            rows = db.items_in_state(conn, "later")
+        return templates.TemplateResponse(request, "later.html", {"rows": rows})
 
     @app.post("/feedback", response_class=HTMLResponse)
     def feedback(
@@ -236,12 +259,19 @@ def create_app() -> FastAPI:
         with _conn() as conn:
             if not db.item_exists(conn, item_key):
                 raise HTTPException(404, "条目不存在")
-            db.add_feedback(conn, item_key, kind, (note or "").strip() or None, datetime.now(UTC))
-            kinds = db.feedback_kinds(conn, [item_key])[item_key]
+            state = db.toggle_feedback(
+                conn, item_key, kind, (note or "").strip() or None, datetime.now(UTC)
+            )
         return templates.TemplateResponse(
             request,
             "_feedback.html",
-            {"item_id": item_key, "kinds": kinds, "with_note": bool(with_note), "saved": kind},
+            {
+                "item_id": item_key,
+                "state": state,
+                "with_note": bool(with_note),
+                "saved": kind,
+                "undone": state is None,
+            },
         )
 
     @app.get("/profile", response_class=HTMLResponse)
@@ -405,7 +435,9 @@ def create_app() -> FastAPI:
         page = wiki.pages.get(slug)
         if page is None or page.type != "concept":
             raise HTTPException(404, "概念页不存在")
-        outcome = review(wiki, page, grade, datetime.now().date())
+        outcome = review(
+            wiki, page, grade, datetime.now().date(), _settings().wiki.mastered_interval_days
+        )
         return templates.TemplateResponse(
             request, "_review.html", {"outcome": outcome, "grades": GRADES, "page": page}
         )

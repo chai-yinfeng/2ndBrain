@@ -129,16 +129,27 @@ MIGRATIONS: list[str] = [
     """,
 ]
 
-# 反馈类型 → 按钮文字（顺序即页面上的按钮顺序）
+# 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
+# 每个条目的当前状态 = 最新的一次反馈；CLEAR_KIND 表示撤销（状态回到无）。
+BEFORE_READ_KINDS = ("later", "dismiss")
+AFTER_READ_KINDS = ("too_easy", "gained", "too_hard", "worthless")
 FEEDBACK_KINDS = {
-    "up": "👍",
-    "down": "👎",
-    "read": "已读",
     "later": "稍后读",
-    "learned": "学了",
-    "needs_refresh": "需要回炉",
-    "mastered": "已扎实",
+    "dismiss": "不感兴趣",
+    "too_easy": "太浅",
+    "gained": "有收获",
+    "too_hard": "太难",
+    "worthless": "没价值",
 }
+FEEDBACK_HINTS = {
+    "later": "先放进「稍后再看」列表；不计入积压，没有期限",
+    "dismiss": "不想读：作为负面信号，并移出积压",
+    "too_easy": "读完了，内容对你来说太浅（已掌握）",
+    "gained": "读完了，有收获：作为正面信号，并进入「编进 wiki」队列",
+    "too_hard": "读完了，觉得太难：会提示补哪些前置知识",
+    "worthless": "读完了，没价值：作为负面信号",
+}
+CLEAR_KIND = "clear"
 
 # items.status：new（待处理）→ l0_rejected | l1（已粗筛）→ l2（已精读）→ tiered | deferred
 # 回补条目（is_backfill = 1）：new → backfill_l1（已粗筛、留在回补池）→ l2 → tiered | deferred
@@ -395,11 +406,13 @@ def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -
 
 
 def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int, str]]:
-    """此前各日仍未读（items.read_at 为空）的必读条目。"""
+    """此前各日仍未读（items.read_at 为空）的必读条目；当前状态为稍后读 / 不感兴趣的不算积压。"""
     rows = conn.execute(
-        """
+        f"""
         SELECT d.item_id, d.date FROM digests d JOIN items i ON i.id = d.item_id
+        LEFT JOIN ({LATEST_FEEDBACK}) lf ON lf.item_id = d.item_id
         WHERE d.lane = 'must_read' AND d.date < ? AND i.read_at IS NULL
+          AND COALESCE(lf.kind, '') NOT IN ('later', 'dismiss')
         """,
         (before_day,),
     ).fetchall()
@@ -439,18 +452,31 @@ def item_exists(conn: sqlite3.Connection, item_id: int) -> bool:
 def add_feedback(
     conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
 ) -> None:
-    """写一条反馈；kind 为 read 时同时记录 items.read_at（首次已读时间）。"""
-    assert kind in FEEDBACK_KINDS
+    """写一条反馈（成为该条目的当前状态）。读完后的四种设置 items.read_at（保留最早的时间），
+    读之前的两种与撤销（clear）清空 read_at。"""
+    assert kind in FEEDBACK_KINDS or kind == CLEAR_KIND
     conn.execute(
         "INSERT INTO feedback (item_id, kind, note, ts) VALUES (?, ?, ?, ?)",
         (item_id, kind, note or None, format_time(ts)),
     )
-    if kind == "read":
+    if kind in AFTER_READ_KINDS:
         conn.execute(
             "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?",
             (format_time(ts), item_id),
         )
+    else:
+        conn.execute("UPDATE items SET read_at = NULL WHERE id = ?", (item_id,))
     conn.commit()
+
+
+def toggle_feedback(
+    conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
+) -> str | None:
+    """点击一个反馈按钮：与当前状态相同则撤销（记录 clear），否则记录该反馈。返回新状态。"""
+    current = feedback_state(conn, [item_id])[item_id]
+    new = CLEAR_KIND if current == kind else kind
+    add_feedback(conn, item_id, new, note, ts)
+    return None if new == CLEAR_KIND else new
 
 
 def feedback_for(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
@@ -459,21 +485,38 @@ def feedback_for(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def feedback_kinds(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, set[str]]:
-    """各条目当前生效的反馈：👍 / 👎 只保留最后一次，其余类型出现过即生效。"""
-    result: dict[int, set[str]] = {i: set() for i in item_ids}
+# 每个条目最新的一条反馈（即当前状态；kind 为 clear 时表示无状态）
+LATEST_FEEDBACK = """
+    SELECT f.* FROM feedback f
+    JOIN (SELECT item_id, MAX(id) AS id FROM feedback GROUP BY item_id) m ON m.id = f.id
+"""
+
+
+def feedback_state(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, str | None]:
+    """各条目的当前反馈状态（FEEDBACK_KINDS 之一；无反馈或已撤销为 None）。"""
+    result: dict[int, str | None] = {i: None for i in item_ids}
     if not item_ids:
         return result
     marks = ",".join("?" * len(item_ids))
     rows = conn.execute(
-        f"SELECT item_id, kind FROM feedback WHERE item_id IN ({marks}) ORDER BY id", item_ids
+        f"SELECT item_id, kind FROM ({LATEST_FEEDBACK}) WHERE item_id IN ({marks})", item_ids
     ).fetchall()
     for r in rows:
-        kinds = result[r["item_id"]]
-        if r["kind"] in ("up", "down"):
-            kinds.discard("down" if r["kind"] == "up" else "up")
-        kinds.add(r["kind"])
+        result[r["item_id"]] = None if r["kind"] == CLEAR_KIND else r["kind"]
     return result
+
+
+def items_in_state(conn: sqlite3.Connection, kind: str) -> list[sqlite3.Row]:
+    """当前状态为 kind 的条目，按进入该状态的时间新到旧。"""
+    return conn.execute(
+        f"""
+        SELECT i.id, i.title, i.url, i.source_id, length(i.content) AS content_len,
+               lf.ts AS state_ts
+        FROM ({LATEST_FEEDBACK}) lf JOIN items i ON i.id = lf.item_id
+        WHERE lf.kind = ? ORDER BY lf.id DESC
+        """,
+        (kind,),
+    ).fetchall()
 
 
 def digest_dates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -521,10 +564,10 @@ def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: 
     )
 
 
-def learned_item_ids(conn: sqlite3.Connection) -> list[int]:
+def gained_item_ids(conn: sqlite3.Connection) -> list[int]:
+    """当前状态为"有收获"的条目，按标记时间先后。"""
     rows = conn.execute(
-        "SELECT item_id, MIN(id) AS first FROM feedback WHERE kind = 'learned'"
-        " GROUP BY item_id ORDER BY first"
+        f"SELECT item_id FROM ({LATEST_FEEDBACK}) WHERE kind = 'gained' ORDER BY id"
     ).fetchall()
     return [r[0] for r in rows]
 

@@ -13,5 +13,5 @@
   {% if e.reason %}<p class="reason"><b>理由</b> {{ e.reason }}</p>{% endif %}
   {% if e.refresh_first %}<p class="refresh"><b>建议先回炉：</b>{% for name, link in e.refresh_first %}{% if link %}<a href="{{ link }}">{{ name }}</a>{% else %}{{ name }}{% endif %}{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
   {% if e.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ e.prerequisites | join("、") }}</p>{% endif %}
-  {% with item_id=e.item_id, kinds=e.kinds, with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
+  {% with item_id=e.item_id, state=e.state, with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
 </article>
