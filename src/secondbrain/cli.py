@@ -266,6 +266,9 @@ def _flat(text: str) -> str:
 
 def _lane_line(position: int, row, l1: dict, l2: dict | None) -> list[str]:
     deep = " · 深读" if row["is_deep_read"] else ""
+    minutes = f"{row['est_minutes']} 分钟"
+    if row["budget"] < row["est_minutes"]:
+        minutes = f"速读约 {row['budget']} 分钟 · 全文约 {row['est_minutes']} 分钟"
     deferred = f" · 顺延自 {row['deferred_from']}" if row["deferred_from"] else ""
     if row["extract_method"] == "no_transcript":
         deep += " · 无字幕"
@@ -273,7 +276,7 @@ def _lane_line(position: int, row, l1: dict, l2: dict | None) -> list[str]:
         deep += " · 经典回补"
     lines = [
         f"{position}. {_flat(row['title'])}",
-        f"   {row['source_id']} · {row['est_minutes']} 分钟{deep}{deferred}",
+        f"   {row['source_id']} · {minutes}{deep}{deferred}",
     ]
     if l2:
         lines.append(f"   TL;DR：{_flat(l2['tldr'])}")
@@ -339,7 +342,7 @@ def digest_show(
     if len(fyi) > FYI_SHOWN:
         typer.echo(f"- …… 另有 {len(fyi) - FYI_SHOWN} 条")
     typer.echo(f"\n归档 {len(by_lane.get('archived', []))} 条")
-    used = sum(r["est_minutes"] for r in rows if r["lane"] in TOP_LANES)
+    used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
     used += sum(c["est_minutes"] for c in concept_rows)
     typer.echo(
         f"总耗时 {used} / 预算 {fs.daily_budget_minutes} 分钟；此前未读的必读积压 {len(backlog)} 条"

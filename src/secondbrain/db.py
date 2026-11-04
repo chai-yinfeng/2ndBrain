@@ -134,6 +134,20 @@ MIGRATIONS: list[str] = [
     ALTER TABLE sources ADD COLUMN last_fetch_added INTEGER;
     ALTER TABLE sources ADD COLUMN last_fetch_message TEXT;
     """,
+    # v7（M8）：digest 中条目占用的预算分钟数（深读按速读时间，ADR 0015；旧行取 est_minutes）；
+    # 按需生成的 AI 内容缓存：kind = summary（深度速读）| prereq（补前置的讲解）。
+    """
+    ALTER TABLE digests ADD COLUMN budget_minutes INTEGER;
+    UPDATE digests SET budget_minutes = est_minutes;
+    CREATE TABLE item_ai (
+        item_id    INTEGER NOT NULL REFERENCES items(id),
+        kind       TEXT NOT NULL,
+        data       TEXT NOT NULL,      -- JSON
+        model      TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (item_id, kind)
+    );
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -408,10 +422,15 @@ def day_usage(
     """某天前排 lane 已占用的 (各 lane 条数, 总分钟数)，不含 exclude 中的条目。"""
     counts: dict[str, int] = {}
     minutes = 0
-    for r in conn.execute("SELECT item_id, lane, est_minutes FROM digests WHERE date = ?", (day,)):
+    rows = conn.execute(
+        "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests"
+        " WHERE date = ?",
+        (day,),
+    )
+    for r in rows:
         if r["lane"] in lanes and r["item_id"] not in exclude:
             counts[r["lane"]] = counts.get(r["lane"], 0) + 1
-            minutes += r["est_minutes"]
+            minutes += r["budget"]
     return counts, minutes
 
 
@@ -419,12 +438,12 @@ def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -
     conn.execute(
         """
         INSERT INTO digests (date, item_id, lane, rank, est_minutes, is_deep_read, deferred_from,
-                             created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                             created_at, budget_minutes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(date, item_id) DO UPDATE SET
             lane = excluded.lane, rank = excluded.rank, est_minutes = excluded.est_minutes,
             is_deep_read = excluded.is_deep_read, deferred_from = excluded.deferred_from,
-            created_at = excluded.created_at
+            created_at = excluded.created_at, budget_minutes = excluded.budget_minutes
         """,
         (
             day,
@@ -435,6 +454,7 @@ def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -
             int(placement.is_deep_read),
             placement.deferred_from,
             format_time(ts),
+            getattr(placement, "budget", placement.est_minutes),  # 没有速读时间时按全文计
         ),
     )
 
@@ -463,7 +483,8 @@ def demote_must_reads(conn: sqlite3.Connection, item_ids: list[int], before_day:
 def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT d.*, i.title, i.url, i.source_id, i.extract_method, i.is_backfill
+        SELECT d.*, COALESCE(d.budget_minutes, d.est_minutes) AS budget, i.title, i.url,
+               i.source_id, i.extract_method, i.is_backfill, length(i.content) AS content_len
         FROM digests d JOIN items i ON i.id = d.item_id
         WHERE d.date = ? ORDER BY d.lane, d.rank
         """,

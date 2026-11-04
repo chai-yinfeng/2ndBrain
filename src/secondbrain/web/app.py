@@ -138,6 +138,7 @@ def _entry(
         "source_id": row["source_id"],
         "lane": row["lane"],
         "est_minutes": row["est_minutes"],
+        "budget_minutes": row["budget"],
         "is_deep_read": bool(row["is_deep_read"]),
         "deferred_from": row["deferred_from"],
         "tldr": (l2 or {}).get("tldr"),
@@ -265,7 +266,7 @@ def create_app() -> FastAPI:
                 wiki,
             )
             lanes.setdefault(row["lane"], []).append(entry)
-        used = sum(r["est_minutes"] for r in rows if r["lane"] in TOP_LANES)
+        used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
         used += sum(c["est_minutes"] for c in concept_rows)
         return templates.TemplateResponse(
             request,

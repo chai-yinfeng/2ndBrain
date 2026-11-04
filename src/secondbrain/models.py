@@ -239,6 +239,8 @@ class FilterSettings(BaseModel):
         default_factory=lambda: {"refresher": 15, "serendipity": 10}
     )
     deep_read_ratio: float = 0.6
+    # 深读条目（est > 预算 × deep_read_ratio）按速读时间占用预算（ADR 0015）
+    deep_summary_minutes: int = Field(default=15, ge=1)
     backlog_max_days: int = 3
     run: RunSettings = Field(default_factory=RunSettings)
     l0: L0Settings = Field(default_factory=L0Settings)

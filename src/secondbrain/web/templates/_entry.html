@@ -1,7 +1,7 @@
 <article class="entry lane-{{ e.lane }}" data-item-id="{{ e.item_id }}">
   <h3><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.title }}</a></h3>
   <p class="meta">
-    {{ e.source_id }} · {{ e.est_minutes }} 分钟
+    {{ e.source_id }} · {% if e.budget_minutes < e.est_minutes %}速读约 {{ e.budget_minutes }} 分钟 · 全文约 {{ e.est_minutes }} 分钟{% else %}{{ e.est_minutes }} 分钟{% endif %}
     {% if e.is_deep_read %}<span class="tag deep">深读</span>{% endif %}
     {% if e.deferred_from %}<span class="tag">顺延自 {{ e.deferred_from }}</span>{% endif %}
     {% if e.content_type %}<span class="tag">{{ e.content_type }}</span>{% endif %}

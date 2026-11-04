@@ -160,6 +160,7 @@ def pipeline_settings(settings: dict[str, Any]) -> FilterSettings:
         "lanes",
         "lane_budget_reserve",
         "deep_read_ratio",
+        "deep_summary_minutes",
         "backlog_max_days",
         "run",
         "personalize",
