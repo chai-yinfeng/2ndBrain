@@ -38,7 +38,7 @@ flowchart LR
 | 层 | 职责 | 是否用 LLM |
 |---|---|---|
 | Sources | 读 `config/sources.yaml`：信源类型、地址 / 检索式、trust、role（core / expansion）、标签、时间窗、backfill | 否 |
-| Ingest | 抓取（httpx，超时 / 重试 / 礼貌 UA）、正文提取（HTML / PDF / 字幕）、URL 规范化 + content hash 去重，写入 `items`；backfill 信源抓历史归档进补课池（M5） | 否 |
+| Ingest | 抓取（`net.py`：httpx，超时 / 重试 / 礼貌 UA / 按 host 限速；信源间线程池并发）、正文提取（HTML / PDF / 字幕）、URL 规范化 + content hash 去重（`urls.py`），由 `ingest.py` 编排写入 `items`；backfill 信源抓历史归档进补课池（M5）。见 ADR 0005 | 否 |
 | L0 规则 | 时间窗、include / exclude 关键词、最短长度、已处理跳过 | 否 |
 | L1 粗筛 | cheap 模型批量打分：`relevance / novelty / quality`、`content_type`、`refresher_value`、`topics[]` + 一句理由；结合 profile 掌握度：不扎实领域的好讲解加 refresher_value，扎实领域只推 frontier；分数 × trust 取 top-N | 是（判断） |
 | L2 精读 | strong 模型读截断全文，输出中文 `tldr / key_points / why_for_you / scores`，以及 `est_minutes`（读懂并验证的时间）和 `prerequisites[]` | 是（判断 + 总结） |
@@ -63,12 +63,12 @@ flowchart LR
 
 ## 数据模型草案
 
-存储：SQLite 单文件 `data/brain.db`；wiki 为 `data/wiki/` 下的 Markdown。字段为草案，以实现时的 `db.py` 为准。
+存储：SQLite 单文件 `data/brain.db`；wiki 为 `data/wiki/` 下的 Markdown。字段为草案，以实现时的 `db.py` 为准（M1 已实现 `sources`、`items`，schema 版本记录在 `PRAGMA user_version`）。
 
 | 表 | 主要字段 | 引入 |
 |---|---|---|
 | `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill` | M1 |
-| `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `published_at`, `fetched_at`, `status`, `is_backfill` | M1（`is_backfill` M5） |
+| `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none）, `published_at`, `fetched_at`, `status`, `is_backfill` | M1（`is_backfill` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L1 / L2）, `model`, `relevance`, `novelty`, `quality`, `content_type`, `refresher_value`, `topics`（JSON）, `reason`, `tldr`, `key_points`（JSON）, `why_for_you`, `est_minutes`, `prerequisites`（JSON）, `created_at` | M2 |
 | `digests` | `date`, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived）, `rank`, `est_minutes`, `is_deep_read`, `deferred_from`（顺延来源日期） | M2 |
 | `feedback` | `id`, `item_id`, `kind`（up / down / read / later / learned / needs_refresh / mastered）, `ts`, `note` | M3 |

@@ -1,0 +1,25 @@
+[
+  {
+    "paper": {
+      "id": "2611.01234",
+      "authors": [{"name": "Carol"}, {"name": "Dave"}],
+      "publishedAt": "2026-11-02T18:00:00.000Z",
+      "title": "Speculative Decoding at Scale",
+      "summary": "We study speculative decoding for large-batch serving."
+    },
+    "publishedAt": "2026-11-03T21:00:00.000Z",
+    "title": "Speculative Decoding at Scale",
+    "numComments": 2
+  },
+  {
+    "paper": {
+      "id": "2611.09999",
+      "authors": [{"name": "Frank"}],
+      "publishedAt": "2026-11-01T10:00:00.000Z",
+      "title": "Roofline Models for Attention Kernels",
+      "summary": "We build roofline models for attention."
+    },
+    "publishedAt": "2026-11-03T22:00:00.000Z",
+    "title": "Roofline Models for Attention Kernels"
+  }
+]

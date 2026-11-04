@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Continuous batching in practice</title></head>
+<body>
+  <nav><a href="/">Home</a> <a href="/about">About</a> NAVIGATION-SHOULD-NOT-APPEAR</nav>
+  <main>
+    <article>
+      <h1>Continuous batching in practice</h1>
+      <p>Continuous batching schedules requests at the granularity of a single decoding iteration rather than a whole request.</p>
+      <p>When one sequence finishes, a waiting request immediately takes its slot, so the GPU stays busy and tail latency drops.</p>
+      <p>The scheduler has to balance prefill and decode work, and it must keep the KV cache from overflowing when many long prompts arrive together.</p>
+    </article>
+  </main>
+  <footer>Copyright fixture. FOOTER-SHOULD-NOT-APPEAR</footer>
+</body>
+</html>

@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
+
+from secondbrain.models import FetchSettings, SourceConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -14,6 +17,10 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 DEFAULT_LLM_BACKEND = "deepseek"
 KNOWN_LLM_BACKENDS = ("deepseek", "fake")
+
+
+class ConfigError(Exception):
+    """配置文件缺失或不合法。"""
 
 
 def data_dir() -> Path:
@@ -71,3 +78,43 @@ def llm_backend(settings: dict[str, Any] | None = None) -> str:
         return env
     llm = (settings or {}).get("llm") or {}
     return llm.get("backend") or DEFAULT_LLM_BACKEND
+
+
+def sources_path() -> tuple[Path, bool]:
+    """返回 (sources 文件路径, 是否为 example)。正式文件不存在时退回 example。"""
+    real = CONFIG_DIR / "sources.yaml"
+    if real.is_file():
+        return real, False
+    return CONFIG_DIR / "sources.example.yaml", True
+
+
+def load_sources(path: Path | None = None) -> list[SourceConfig]:
+    """读取并校验信源清单；id 必须唯一。"""
+    path = path or sources_path()[0]
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"无法读取 {path}：{exc}") from exc
+    raw = data.get("sources") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raise ConfigError(f"{path} 需要顶层 `sources:` 列表")
+    sources: list[SourceConfig] = []
+    for index, entry in enumerate(raw):
+        try:
+            sources.append(SourceConfig.model_validate(entry))
+        except ValidationError as exc:
+            label = entry.get("id") if isinstance(entry, dict) else None
+            raise ConfigError(f"{path} 第 {index + 1} 个信源（{label}）不合法：{exc}") from exc
+    seen: set[str] = set()
+    for s in sources:
+        if s.id in seen:
+            raise ConfigError(f"{path} 中信源 id 重复：{s.id}")
+        seen.add(s.id)
+    return sources
+
+
+def fetch_settings(settings: dict[str, Any]) -> FetchSettings:
+    try:
+        return FetchSettings.model_validate(settings.get("fetch") or {})
+    except ValidationError as exc:
+        raise ConfigError(f"settings 中 fetch 段不合法：{exc}") from exc

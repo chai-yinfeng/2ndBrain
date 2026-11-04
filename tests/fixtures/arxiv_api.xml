@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title type="html">ArXiv Query: search_query=cat:cs.DC</title>
+  <id>http://arxiv.org/api/fixture</id>
+  <updated>2026-11-04T00:00:00-05:00</updated>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2611.01234v2</id>
+    <updated>2026-11-03T18:00:00Z</updated>
+    <published>2026-11-02T18:00:00Z</published>
+    <title>Speculative Decoding
+      at Scale</title>
+    <summary>  We study speculative decoding for large-batch serving.
+    </summary>
+    <author><name>Carol</name></author>
+    <author><name>Dave</name></author>
+    <link href="http://arxiv.org/abs/2611.01234v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2611.01234v2" rel="related" type="application/pdf"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2611.05678v1</id>
+    <updated>2026-11-03T12:00:00Z</updated>
+    <published>2026-11-03T12:00:00Z</published>
+    <title>Expert Parallelism Without Tears</title>
+    <summary>A simple scheme for expert parallel inference.</summary>
+    <author><name>Erin</name></author>
+    <link href="http://arxiv.org/abs/2611.05678v1" rel="alternate" type="text/html"/>
+  </entry>
+</feed>

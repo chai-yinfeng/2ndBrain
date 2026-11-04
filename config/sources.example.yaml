@@ -1,5 +1,5 @@
 # 信源清单（种子）。复制为 config/sources.yaml 后按需修改。
-# URL 标注 "# TODO verify" 的尚未实测，由 M1 `sb fetch` 确认；未标注的也只是按已知信息填写。
+# rss / arxiv / hf_papers 的 URL 已于 2026-11 实测可用；标注 "# TODO verify" 的（youtube）待 M5 确认。
 #
 # 每个条目字段：
 #   id:            唯一标识（小写、短横线）
@@ -19,7 +19,7 @@ sources:
   # ---------- core / 推理 infra ----------
   - id: vllm-blog
     type: rss
-    url: https://blog.vllm.ai/feed.xml  # TODO verify
+    url: https://vllm.ai/blog/rss.xml
     trust: 5
     role: core
     tags: [inference, serving]
@@ -28,16 +28,17 @@ sources:
 
   - id: lmsys-sglang-blog
     type: rss
-    url: https://lmsys.org/rss.xml  # TODO verify
+    url: https://www.lmsys.org/blog  # 实测无 RSS（2026-11，常见 feed 路径均 404）
     trust: 5
     role: core
     tags: [inference, serving, sglang]
     max_age_days: 30
     enabled: true
+    needs_scraper: true
 
   - id: pytorch-blog
     type: rss
-    url: https://pytorch.org/feed/  # TODO verify
+    url: https://pytorch.org/feed/
     trust: 5
     role: core
     tags: [pytorch, infra]
@@ -46,7 +47,7 @@ sources:
 
   - id: horace-he
     type: rss
-    url: https://www.thonking.ai/feed  # TODO verify
+    url: https://www.thonking.ai/feed
     trust: 5
     role: core
     tags: [gpu, performance, compilers]
@@ -55,7 +56,7 @@ sources:
 
   - id: tri-dao
     type: rss
-    url: https://tridao.me/feed.xml  # TODO verify
+    url: https://tridao.me/feed.xml
     trust: 5
     role: core
     tags: [attention, kernels]
@@ -64,7 +65,7 @@ sources:
 
   - id: hazy-research
     type: rss
-    url: https://hazyresearch.stanford.edu/blog  # TODO verify（可能无 RSS）
+    url: https://hazyresearch.stanford.edu/blog  # 实测无 RSS（2026-11）
     trust: 5
     role: core
     tags: [systems, kernels, research]
@@ -102,7 +103,7 @@ sources:
 
   - id: murat-demirbas
     type: rss
-    url: https://muratbuffalo.blogspot.com/feeds/posts/default  # TODO verify
+    url: https://muratbuffalo.blogspot.com/feeds/posts/default
     trust: 5
     role: core
     tags: [distributed-systems, consensus]
@@ -111,7 +112,7 @@ sources:
 
   - id: aphyr-jepsen
     type: rss
-    url: https://aphyr.com/posts.atom  # TODO verify
+    url: https://aphyr.com/posts.atom
     trust: 5
     role: core
     tags: [distributed-systems, testing, consistency]
@@ -120,7 +121,7 @@ sources:
 
   - id: martin-kleppmann
     type: rss
-    url: https://martin.kleppmann.com/feed.xml  # TODO verify
+    url: https://martin.kleppmann.com/feed.rss
     trust: 5
     role: core
     tags: [distributed-systems, crdt]
@@ -140,7 +141,7 @@ sources:
 
   - id: karpathy-bearblog
     type: rss
-    url: https://karpathy.bearblog.dev/feed/  # TODO verify
+    url: https://karpathy.bearblog.dev/feed/
     trust: 5
     role: core
     tags: [llm]
@@ -177,7 +178,7 @@ sources:
 
   - id: colah
     type: rss
-    url: https://colah.github.io/rss.xml  # TODO verify
+    url: https://colah.github.io/rss.xml
     trust: 5
     role: core
     tags: [deep-learning, explainer]
@@ -225,7 +226,7 @@ sources:
 
   - id: hamel-husain
     type: rss
-    url: https://hamel.dev/index.xml  # TODO verify
+    url: https://hamel.dev/index.xml
     trust: 5
     role: core
     tags: [evals, harness]
@@ -234,7 +235,7 @@ sources:
 
   - id: eugene-yan
     type: rss
-    url: https://eugeneyan.com/rss/  # TODO verify
+    url: https://eugeneyan.com/rss/
     trust: 5
     role: core
     tags: [evals, ml-systems, harness]
@@ -244,7 +245,7 @@ sources:
   # ---------- core / 实验室官方 ----------
   - id: openai-news
     type: rss
-    url: https://openai.com/news/rss.xml  # TODO verify
+    url: https://openai.com/news/rss.xml
     trust: 4
     role: core
     tags: [lab]
@@ -263,7 +264,7 @@ sources:
 
   - id: google-deepmind
     type: rss
-    url: https://deepmind.google/blog/rss.xml  # TODO verify
+    url: https://deepmind.google/blog/rss.xml
     trust: 4
     role: core
     tags: [lab]
@@ -282,7 +283,7 @@ sources:
 
   - id: qwen-blog
     type: rss
-    url: https://qwenlm.github.io/blog/index.xml  # TODO verify
+    url: https://qwenlm.github.io/blog/index.xml
     trust: 4
     role: core
     tags: [lab, open-weights]
@@ -291,7 +292,7 @@ sources:
 
   - id: deepseek-news
     type: rss
-    url: https://api-docs.deepseek.com/news/  # TODO verify（可能无 RSS）
+    url: https://api-docs.deepseek.com/news/  # 实测无 RSS（2026-11）
     trust: 4
     role: core
     tags: [lab, open-weights]
@@ -302,7 +303,7 @@ sources:
   # ---------- core / 论文 ----------
   - id: hf-daily-papers
     type: hf_papers
-    url: https://huggingface.co/api/daily_papers  # TODO verify
+    url: https://huggingface.co/api/daily_papers
     trust: 4
     role: core
     tags: [paper]
@@ -339,7 +340,7 @@ sources:
   # ---------- core / newsletter ----------
   - id: import-ai
     type: rss
-    url: https://importai.substack.com/feed  # TODO verify
+    url: https://importai.substack.com/feed
     trust: 3
     role: core
     tags: [newsletter]
@@ -358,7 +359,7 @@ sources:
   # ---------- expansion / 工程哲学与理性思考 ----------
   - id: lesswrong-curated
     type: rss
-    url: https://www.lesswrong.com/feed.xml?view=curated-rss  # TODO verify
+    url: https://www.lesswrong.com/feed.xml?view=curated-rss
     trust: 3
     role: expansion
     tags: [rationality]
@@ -367,7 +368,7 @@ sources:
 
   - id: alignment-forum
     type: rss
-    url: https://www.alignmentforum.org/feed.xml?view=curated-rss  # TODO verify
+    url: https://www.alignmentforum.org/feed.xml?view=curated-rss
     trust: 3
     role: expansion
     tags: [alignment]
@@ -376,12 +377,12 @@ sources:
 
   - id: gwern
     type: rss
-    url: https://gwern.substack.com/feed  # TODO verify
+    url: https://gwern.substack.com/feed  # gwern.net 的 feed 指向此处，但 2021-06 后未更新
     trust: 3
     role: expansion
     tags: [essays]
     max_age_days: 60
-    enabled: true
+    enabled: false  # 停更；gwern.net 本身无 RSS，需页面抓取
 
   - id: dan-luu
     type: rss
@@ -394,7 +395,7 @@ sources:
 
   - id: hillel-wayne
     type: rss
-    url: https://www.hillelwayne.com/index.xml  # TODO verify
+    url: https://www.hillelwayne.com/index.xml
     trust: 3
     role: expansion
     tags: [formal-methods, engineering]

@@ -26,11 +26,11 @@ git ls-remote origin main                                       # 已推送
 
 ## M1 — 采集层（博客 RSS/Atom、arXiv、HF Daily Papers）
 
-- [ ] `config/sources.yaml` schema：`id, type(rss|arxiv|hf_papers|youtube), url/query, trust(1–5), role(core|expansion), tags, max_age_days, enabled, backfill(默认 false), needs_scraper(默认 false)`
+- [x] `config/sources.yaml` schema：`id, type(rss|arxiv|hf_papers|youtube), url/query, trust(1–5), role(core|expansion), tags, max_age_days, enabled, backfill(默认 false), needs_scraper(默认 false)`
   - `role: expansion` 的信源只进入"意外"栏（serendipity）候选池
   - `backfill`：经典回补开关，M1 只解析字段，M5 实现（ADR 0004）
   - 无 RSS 的站点标注 `needs_scraper`，M1 记录为待支持，不阻塞
-- [ ] 种子信源清单（`config/sources.example.yaml`，URL 标 `# TODO verify` 的由 M1 实测确认）；trust 建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
+- [x] 种子信源清单（`config/sources.example.yaml`，URL 标 `# TODO verify` 的由 M1 实测确认）；trust 建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
   - core / 推理 infra：vLLM blog、LMSYS / SGLang blog、PyTorch blog、Horace He、Tri Dao、Hazy Research、Tim Dettmers、Chips and Cheese
   - core / 分布式系统：Marc Brooker、Murat Demirbas（metadata blog）、Aphyr / Jepsen、Martin Kleppmann
   - core / LLM 与研究：Karpathy（karpathy.github.io 与 karpathy.bearblog.dev）、Lilian Weng、Sebastian Raschka（Ahead of AI）、Chip Huyen、colah、Nathan Lambert（Interconnects）、HF Blog
@@ -40,11 +40,11 @@ git ls-remote origin main                                       # 已推送
   - core / newsletter：Import AI、Latent Space
   - expansion / 工程哲学与理性思考：LessWrong（curated）、Alignment Forum、Gwern、Dan Luu、Hillel Wayne
   - 视频（M5 才启用，`enabled: false`）：Karpathy YouTube、Stanford CS25 / CS336 等课程、GPU MODE 讲座、Dwarkesh Podcast；expansion：音乐理论频道（如 Adam Neely）
-- [ ] `db.py`：建表 `sources, items`（`url_canonical` 唯一、`content_hash`、`published_at`、`fetched_at`、`title/author/summary/content`、`status`）；简单 schema 版本号迁移
-- [ ] `sources/*`：feedparser（新增依赖）解析 RSS/Atom；arXiv 官方 API（Atom）；HF Daily Papers 公开 API / 页面
-- [ ] `extract/html.py`：trafilatura（新增依赖）正文提取；`extract/pdf.py`：优先 arXiv HTML 版，退回 PDF 文本（pypdf）
-- [ ] 去重：URL 规范化 + content hash；httpx 超时、重试、礼貌 UA（通用客户端名，不含个人邮箱）
-- [ ] CLI：`sb sources list`、`sb fetch [--source ID] [--limit N]`、`sb items list [--since 2d] [--source ID]`
+- [x] `db.py`：建表 `sources, items`（`url_canonical` 唯一、`content_hash`、`published_at`、`fetched_at`、`title/author/summary/content`、`status`）；简单 schema 版本号迁移
+- [x] `sources/*`：feedparser（新增依赖）解析 RSS/Atom；arXiv 官方 API（Atom）；HF Daily Papers 公开 API / 页面
+- [x] `extract/html.py`：trafilatura（新增依赖）正文提取；`extract/pdf.py`：优先 arXiv HTML 版，退回 PDF 文本（pypdf）
+- [x] 去重：URL 规范化 + content hash；httpx 超时、重试、礼貌 UA（通用客户端名，不含个人邮箱）
+- [x] CLI：`sb sources list`、`sb fetch [--source ID] [--limit N]`、`sb items list [--since 2d] [--source ID]`
 
 **模块**：`sources/`、`extract/`、`db.py`、`models.py`、`cli.py`
 

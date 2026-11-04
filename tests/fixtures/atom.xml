@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Distributed Systems Notes</title>
+  <id>https://notes.example.org/</id>
+  <updated>2026-11-03T09:00:00Z</updated>
+  <entry>
+    <title>Why Raft needs leader leases</title>
+    <link href="https://notes.example.org/raft-leases/" rel="alternate"/>
+    <id>https://notes.example.org/raft-leases/</id>
+    <updated>2026-11-03T09:00:00Z</updated>
+    <author><name>Bob</name></author>
+    <summary>Leases make linearizable reads cheap.</summary>
+    <content type="html">&lt;p&gt;Leader leases let a Raft leader serve linearizable reads without a round of heartbeats, provided clocks drift within a bound.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Notes on Paxos</title>
+    <link href="https://notes.example.org/paxos/" rel="alternate"/>
+    <id>https://notes.example.org/paxos/</id>
+    <published>2026-11-01T09:00:00Z</published>
+    <updated>2026-11-02T09:00:00Z</updated>
+    <summary>Single-decree Paxos, step by step.</summary>
+  </entry>
+</feed>
