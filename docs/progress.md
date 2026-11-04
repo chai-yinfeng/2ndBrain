@@ -4,13 +4,19 @@
 
 ## 待决
 
-- **`needs_scraper` 信源的页面抓取支持**：6 个信源（LMSYS、Hazy Research、Anthropic engineering、Anthropic news、Meta AI、DeepSeek）没有可用 RSS，目前跳过。推荐默认：放入 roadmap Backlog，不进 M1–M6。（已加入 Backlog，待用户确认）
 - **默认 data 目录是否重置（M2 遗留）**：推荐默认：不重置，保留已有数据，不做覆盖。（已按默认处理）
 - **温故 / 意外是否预留预算（M2 遗留）**：推荐默认：预留。tiering 新增 `lane_budget_reserve`（默认 refresher 15 分钟、serendipity 10 分钟）；该栏没有合格候选时释放回总预算，must_read 不能占用（ADR 0007）。（已按默认处理）
 - **真实 DeepSeek 下的 profile 提案质量（M4 遗留）**：推荐默认：暂不验证，等用户积累真实反馈后由用户在 UI 中触发。（已按默认处理）
 - **Web"生成修改提案"没有费用确认（M4 遗留）**：推荐默认：保持（单次约几美分），在按钮旁显示"将调用 strong 模型"提示（M5 已加，"精读"按钮同样提示）。（已按默认处理）
 - **超长视频字幕被截断（M5 遗留）**：推荐默认：视频单独使用 `fetch.transcript_max_chars`（默认 40 万字符），由 map-reduce 处理。（已按默认处理，M6 已实现）
-- **发布时间异常的条目（M5 遗留）**：推荐默认：早于 1990 年、晚于当前 + 1 天（如 0001-01-01）的发布时间按未知处理；回补信源中时间未知且正文短于 `fetch.backfill_min_content_chars`（2000）的条目视为非文章页，不入库。（已按默认处理，M6 已实现）默认 data 中已入库的那一条（item 271 "FAQ"，lilian-weng，回补池，正文 1327 字符）没有清理，待用户决定是否删除；保留也只会在回补粗筛时多花一点 L1。
+
+## 已处理（原待决）
+
+- **`needs_scraper` 信源的页面抓取支持**：原 6 个信源没有可用 RSS，放入 roadmap Backlog。2026-11-04：LMSYS 与 Anthropic news 已通过新的 `type: sitemap` 接入（ADR 0012）；Anthropic engineering（sitemap 中文章与 research 混在 `/research/` 下，无法区分）、Hazy Research、Meta AI（均无 sitemap）、DeepSeek 仍在 Backlog。
+- **发布时间异常的条目（M5 遗留）**：早于 1990 年、晚于当前 + 1 天（如 0001-01-01）的发布时间按未知处理；回补信源中时间未知且正文短于 `fetch.backfill_min_content_chars`（2000）的条目视为非文章页，不入库（M6 已实现）。默认 data 中已入库的 item 271（lilian-weng "FAQ"）：用户同意删除，已删除（删前备份 `data/brain.db.bak-before-del271`）。该 feed 每次都包含这一页，但会被上述非文章页规则拦截：临时目录实测新增 52 条，FAQ 被跳过。
+- **"GPU 性能与 kernel"的掌握度**：用户确认为"接触过"，已更新 `data/profile.md`。
+- **定时任务**：用户同意，已安装每日本地 07:00 运行（EST 下为 UTC 12:00，非高峰时段）。
+- **SSH 推送**：用户终端中 SSH 正常，只是 agent 的 shell 无法使用 key；合并改走 `gh` + HTTPS。
 
 ## M0 — 仓库与骨架（2026-11-04）
 
@@ -285,3 +291,28 @@
   - 新建 4 个概念页和 1 个 paper 页；
   - 费用 $0.0076（非高峰）；
   - `sb wiki lint`：0 项。
+
+## Backlog — sitemap 信源（2026-11-04，分支 `backlog-sitemap-source`）
+
+**做了什么**（ADR 0012）
+- `sources/sitemap.py`：新信源类型 `type: sitemap`。用标准库 `xml.etree` 解析 urlset（不支持 sitemap index，遇到时报错）；按 `url_pattern` 正则筛选 URL；发布时间优先级为 URL 中的日期 → 正文页日期 → `<lastmod>`（仅 `use_lastmod: true`），都经过 `plausible()`。
+- `models.py`：`SourceType` 加 `sitemap`；`SourceConfig` 加 `url_pattern`、`use_lastmod`（只允许用于 sitemap，正则在加载时校验）；`RawEntry` 加 `page_meta`。
+- `extract/html.py`：`extract_page_meta`（trafilatura 提取标题 / 作者 / 日期）；`ingest.extract_content` 在 HTML 分支对 sitemap 条目补全标题 / 作者，URL 无日期时用页面日期覆盖 lastmod。其余流程（时间窗、每源最新 N 再去重、已入库 URL 不抓正文页、日期未知条目的非文章页判断）沿用 `ingest.collect`，没有另设规则。
+- `config/sources.example.yaml`：`lmsys-sglang-blog`、`anthropic-news` 改为 `type: sitemap`，去掉 `needs_scraper`。`anthropic-engineering` 保持 `needs_scraper`（见遗留问题）。
+- 测试：`tests/test_sitemap.py`（22 个离线 + 1 个 live），fixture `sitemap_dated.xml`、`sitemap_lastmod.xml`、`sitemap_article.html`。
+
+**实测（2026-11）**
+- LMSYS：sitemap 143 个 URL，`url_pattern` 保留 137 篇带日期的文章（排除首页、`/blog` 列表页、About 等）；lastmod 全部是同一个构建时间。
+- Anthropic：sitemap 589 个 URL。对 lastmod 最新的 14 篇新闻比较页面的 `datePublished`：7 篇一致或差 1–3 天，1 篇差 5 天，6 篇是老文章被刷新（最早实际发布于 2025-09-12）。结论：lastmod 只能用来选候选，不能当发布时间；页面日期（trafilatura 提取，与 JSON-LD 一致）可信。
+- Anthropic engineering 的文章在 sitemap 中只出现在 `/research/<slug>` 下，与研究文章混在一起，sitemap 无法单独接入。
+
+**验收结果**
+- `uv run pytest -q`：219 passed（原 197 + 新增 22）；`uv run ruff check .`、`uv run ruff format --check .`：通过；`uv run pytest -q -m live tests/test_sitemap.py`：1 passed。
+- 临时目录（`SB_LLM_BACKEND=fake`）真实运行 `sb fetch --source <id> --limit 5`：
+  - lmsys-sglang-blog：新增 5（"HiCache Across Multi-Parallelism and Distributed Serving" 2026-11-02 等，标题与日期正确）；再跑一次新增 0、重复 5。
+  - anthropic-news：新增 5（"Expanding our partnership with GSA …" 2026-10-27 等，日期为页面日期而非 lastmod）；再跑一次新增 0、重复 5。`--limit 20` 时再新增 2 条，其中 1 条是 lastmod 被刷新的老文章（页面日期 2026-09-01），之后由 L0 时间窗过滤。
+
+**遗留问题**
+- Anthropic engineering 仍为 `needs_scraper`：可选方案是用 `/research/` 前缀接入（会混入研究文章），或者以后做列表页抓取。
+- Hazy Research、Meta AI（无 sitemap）、DeepSeek 仍在 Backlog。
+- `anthropic-news` 的 `url_pattern` 里排除了 8 个分类页，站点新增分类页时需要更新。

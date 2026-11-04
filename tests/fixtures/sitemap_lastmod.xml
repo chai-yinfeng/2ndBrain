@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://lab.example.com/news</loc><lastmod>2026-11-03T10:00:00.000Z</lastmod></url>
+<url><loc>https://lab.example.com/news/product</loc></url>
+<url><loc>https://lab.example.com/news/new-model</loc><lastmod>2026-11-03T17:09:08.000Z</lastmod></url>
+<url><loc>https://lab.example.com/news/refreshed-old-post</loc><lastmod>2026-11-02T03:29:07.000Z</lastmod></url>
+<url><loc>https://lab.example.com/news/partnership</loc><lastmod>2026-10-30T21:40:46.000Z</lastmod></url>
+<url><loc>https://lab.example.com/news/ancient</loc><lastmod>2025-06-01T00:00:00.000Z</lastmod></url>
+<url><loc>https://lab.example.com/research/interp</loc><lastmod>2026-11-03T00:00:00.000Z</lastmod></url>
+</urlset>

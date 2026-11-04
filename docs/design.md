@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart LR
-    S[Sources<br/>RSS/Atom · arXiv · HF Papers · YouTube<br/>role: core / expansion] --> I[Ingest<br/>抓取 · 正文提取 · 去重]
+    S[Sources<br/>RSS/Atom · arXiv · HF Papers · YouTube · sitemap<br/>role: core / expansion] --> I[Ingest<br/>抓取 · 正文提取 · 去重]
     S -. backfill 经典回补 M5 .-> BF[补课池<br/>每日限额释放]
     I --> L0[L0 规则<br/>零 token]
     L0 --> L1[L1 粗筛<br/>cheap 模型 · 批量<br/>content_type · refresher_value]
@@ -37,7 +37,7 @@ flowchart LR
 
 | 层 | 职责 | 是否用 LLM |
 |---|---|---|
-| Sources | 读 `config/sources.yaml`：信源类型、地址 / 检索式、trust、role（core / expansion）、标签、时间窗、backfill | 否 |
+| Sources | 读 `config/sources.yaml`：信源类型（rss / arxiv / hf_papers / youtube / sitemap，sitemap 见 ADR 0012）、地址 / 检索式、trust、role（core / expansion）、标签、时间窗、backfill | 否 |
 | Ingest | 抓取（`net.py`：httpx，超时 / 重试 / 礼貌 UA / 按 host 限速；信源间线程池并发）、正文提取（HTML / PDF / 字幕）、URL 规范化 + content hash 去重（`urls.py`），由 `ingest.py` 编排写入 `items`；backfill 信源抓历史归档进补课池（M5）。见 ADR 0005 | 否 |
 | L0 规则 | 时间窗、include / exclude 关键词、最短长度、已处理跳过 | 否 |
 | L1 粗筛 | cheap 模型批量打分：`relevance / novelty / quality`、`content_type`、`refresher_value`、`topics[]` + 一句理由；结合 profile 掌握度：不扎实领域的好讲解加 refresher_value，扎实领域只推 frontier；分数 × trust 取 top-N | 是（判断） |
