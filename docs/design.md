@@ -166,9 +166,11 @@ Wiki 概念页 frontmatter（M6）：`mastery`、`last_reviewed`、`interval_day
 
 统一接口（M2）：`complete_json(messages, schema, tier="cheap"|"strong") -> (obj, usage)`。默认 DeepSeek（OpenAI 兼容），`fake` 后端用于离线测试。模型名、价格、预算与配额都写在 `config/settings.yaml`，便于更换。见 ADR 0002。
 
+- 模型分工：cheap 用于 L1 粗筛与长内容分块提要（L2_MAP）；strong 用于 L2 精读、按需精读、wiki ingest、profile 修改提案。两级机制保留，默认两级都用 `deepseek-flash`（ADR 0014）；在 `llm.models.strong` 中可改回 `deepseek-v4-pro`。
+
 - DeepSeek（`llm/deepseek.py`）：openai SDK，`response_format={"type": "json_object"}`，prompt 中含 json 示例；网络错误 / 429 / 5xx 由 SDK 指数退避重试（`llm.max_retries`）；输出用 pydantic 校验，失败重试一次；错误信息中的密钥被替换为 `***`。
 - fake（`llm/fake.py`）：按标题关键词（内置 AI infra 关键词 ∪ profile 中的英文词）与标题哈希确定性打分，离线全链路可产出各 lane。
-- 输出健壮性（ADR 0011）：strong 模型是推理模型，推理 token 计入 `max_tokens`（默认 8192）；校验失败时重试一次，截断（finish_reason = length）时 `max_tokens` 翻倍（上限 `max_tokens_cap`），并把字段路径级的错误反馈给模型；WikiPlan 宽容解析，单个非法操作只丢弃该操作。
+- 输出健壮性（ADR 0011）：推理模型（如 deepseek-v4-pro）的推理 token 计入 `max_tokens`（strong 默认 8192，对 flash 同样适用）；校验失败时重试一次，截断（finish_reason = length）时 `max_tokens` 翻倍（上限 `max_tokens_cap`），并把字段路径级的错误反馈给模型；WikiPlan 宽容解析，单个非法操作只丢弃该操作。
 - prompts 在 `src/secondbrain/llm/prompts/*.md`，`{profile}` 与 `{mastery}` 在运行时替换；掌握度表解析失败时提示模型直接参考画像全文。
 
 ## 借鉴的原则

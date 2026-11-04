@@ -368,3 +368,9 @@
 - `/sources` 写回会丢失 sources.yaml 的注释（已在页面与 README 注明）。
 - `profile/loader.mastery_for` 已无调用方，保留未删；`wiki.ingest.apply_plan` 的 `profile` 参数保留但不再使用。
 - 已有页面中旧的 `../../../raw/<id>.md` 链接在 Obsidian 中会失效（默认 wiki 为空，无影响）。
+
+## 默认模型改为 deepseek-flash（2026-11-04，分支 `flash-default`）
+
+- 用户判断 deepseek-v4-pro 性价比低：贵很多，但没有明显更聪明。因此 cheap / strong 两级默认都改为 `deepseek-flash`（ADR 0014），涉及 `config/settings.example.yaml` 与 `LLMSettings` 的默认值。两级机制和 v4-pro 的价格条目都保留，可在 `config/settings.yaml` 中切回。
+- `max_tokens` 保持不变（cheap 4096 / strong 8192）。`llm_calls` 表不记录 reasoning_tokens，无法从已有数据判断 flash 是否返回推理 token。已有数据中 flash 的最大 completion 为 3771（L2_MAP），v4-pro 的 L2 最大为 7324。8192 的上限和截断后的翻倍重试对 flash 同样适用。
+- 测试：`test_llm_deepseek_parse.py` 的分层测试改为显式配置 strong = v4-pro（默认两级相同，已经无法检验分层），并新增一个默认值测试。

@@ -57,7 +57,9 @@ def completion(content: str, usage: dict | None = None) -> httpx.Response:
     )
 
 
-def backend(responses: list, max_retries: int = 0) -> tuple[DeepSeekBackend, list]:
+def backend(
+    responses: list, max_retries: int = 0, models: dict | None = None
+) -> tuple[DeepSeekBackend, list]:
     requests: list[httpx.Request] = []
     queue = list(responses)
 
@@ -65,7 +67,8 @@ def backend(responses: list, max_retries: int = 0) -> tuple[DeepSeekBackend, lis
         requests.append(request)
         return queue.pop(0)
 
-    settings = LLMSettings(max_retries=max_retries)
+    extra = {"models": models} if models is not None else {}
+    settings = LLMSettings(max_retries=max_retries, **extra)
     client = httpx.Client(transport=httpx.MockTransport(handler))
     return DeepSeekBackend(settings, SECRET, http_client=client), requests
 
@@ -98,10 +101,16 @@ def test_strong_tier_uses_strong_model():
         "prerequisites": [],
         "scores": {"relevance": 8, "novelty": 7, "quality": 8, "refresher_value": 3},
     }
-    be, requests = backend([completion(json.dumps(l2))])
+    # 默认两级都是 flash（ADR 0014），这里显式配置不同模型来检验分层机制
+    models = {"cheap": "deepseek-flash", "strong": "deepseek-v4-pro"}
+    be, requests = backend([completion(json.dumps(l2))], models=models)
     obj, usage = be.complete_json(MESSAGES, L2Response, "strong")
     assert obj.est_minutes == 20
     assert json.loads(requests[0].content)["model"] == "deepseek-v4-pro"
+
+
+def test_default_models_are_flash_for_both_tiers():
+    assert LLMSettings().models == {"cheap": "deepseek-flash", "strong": "deepseek-flash"}
 
 
 def test_invalid_output_is_retried_once():
