@@ -12,7 +12,7 @@ import json
 import re
 
 from secondbrain.llm.base import LLMError, T, Tier, Usage
-from secondbrain.llm.schemas import REFRESHER_TYPES, L1Response, L2Response
+from secondbrain.llm.schemas import REFRESHER_TYPES, L1Response, L2Response, ProfileProposal
 
 DEFAULT_KEYWORDS = (
     "inference",
@@ -127,6 +127,8 @@ class FakeBackend:
                 "prerequisites": a["topics"][:2],
                 "scores": {k: a[k] for k in ("relevance", "novelty", "quality", "refresher_value")},
             }
+        elif schema is ProfileProposal:
+            obj = _profile_proposal(payload)
         else:
             raise LLMError(f"fake 后端不支持的 schema：{schema.__name__}")
         prompt_chars = sum(len(m["content"]) for m in messages)
@@ -137,3 +139,59 @@ class FakeBackend:
             completion_tokens=len(json.dumps(obj, ensure_ascii=False)) // 4,
         )
         return schema.model_validate(obj), usage
+
+
+def _match_row(table: list[dict], fb: dict) -> dict | None:
+    """反馈条目的 topics / 标题词出现在某个领域的名称或说明里时，认为对应该领域。"""
+    terms = [t.lower() for t in fb.get("topics") or []]
+    terms += [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", fb.get("title", ""))]
+    for row in table:
+        text = f"{row['domain']} {row.get('note', '')}".lower()
+        if any(t in text for t in terms):
+            return row
+    return None
+
+
+def _profile_proposal(payload: dict) -> dict:
+    """确定性的 profile 提案：
+    - 已扎实 → 对应领域改为"扎实"（无对应领域则新增一行）；
+    - 需要回炉 → 对应领域若为"扎实"则降为"想回炉"（无对应领域则新增"想回炉"行）；
+    - 👎 → 在含"不想看"的段落末尾追加一行。"""
+    table = payload.get("table", [])
+    sections = [s["section"] for s in payload.get("sections", [])]
+    dislike = next((s for s in sections if "不想看" in s), None)
+    changes: dict[str, dict] = {}
+    edits = []
+    for fb in payload.get("feedback", []):
+        kind, fid = fb["kind"], fb["id"]
+        if kind in ("mastered", "needs_refresh"):
+            target = "扎实" if kind == "mastered" else "想回炉"
+            row = _match_row(table, fb)
+            if row is not None:
+                if kind == "needs_refresh" and not row["mastery"].startswith("扎实"):
+                    continue
+                key = f"row-{row['row']}"
+                change = {"action": "update", "row": row["row"], "mastery": target}
+            else:
+                domain = (fb.get("topics") or [fb["title"][:40]])[0]
+                key = f"add-{domain}"
+                change = {"action": "add", "domain": domain, "mastery": target, "priority": "中"}
+            entry = changes.setdefault(key, {**change, "reason": "（fake）", "evidence": []})
+            entry["evidence"].append(fid)
+            label = "已扎实" if kind == "mastered" else "需要回炉"
+            entry["reason"] = f"（fake）{len(entry['evidence'])} 次标记{label}"
+        elif kind == "down" and dislike:
+            edits.append(
+                {
+                    "section": dislike,
+                    "action": "append",
+                    "text": f"- 类似《{fb['title'][:40]}》的内容",
+                    "reason": "（fake）标记 👎",
+                    "evidence": [fid],
+                }
+            )
+    return {
+        "summary": f"（fake）{len(changes)} 处掌握度修改，{len(edits)} 处段落修改",
+        "mastery_changes": list(changes.values()),
+        "section_edits": edits,
+    }

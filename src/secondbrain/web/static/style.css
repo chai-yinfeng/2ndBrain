@@ -72,3 +72,9 @@ th, td { border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: l
   main { padding: 12px; }
   table { font-size: 12px; }
 }
+.editor { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+pre.diff { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }

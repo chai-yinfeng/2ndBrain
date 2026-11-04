@@ -19,6 +19,7 @@ from secondbrain.pipeline import tiering
 from secondbrain.pipeline.l0_rules import l0_reason
 from secondbrain.pipeline.l1_screen import interleave_by_source, l1_messages, match_results
 from secondbrain.pipeline.l2_deep import is_paper, l2_messages
+from secondbrain.profile.feedback import few_shot_block, recent_feedback
 from secondbrain.profile.loader import Profile, render_mastery
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts"
@@ -51,11 +52,13 @@ class RunReport:
     aborted: str | None = None
 
 
-def system_prompt(name: str, profile: Profile) -> str:
+def system_prompt(name: str, profile: Profile, extra: str = "") -> str:
+    """profile + 规则在最前（同一次 run 内不变，利于缓存）；extra（如反馈样例）接在末尾。"""
     template = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
-    return template.replace("{profile}", profile.text.strip()).replace(
+    text = template.replace("{profile}", profile.text.strip()).replace(
         "{mastery}", render_mastery(profile)
     )
+    return f"{text.rstrip()}\n\n{extra}\n" if extra else text
 
 
 def _scores(data: dict) -> dict:
@@ -101,7 +104,10 @@ def run_pipeline(
     # ---------- L1 ----------
     selected = interleave_by_source(passed, limit)
     report.l1_selected = len(selected)
-    l1_system = system_prompt("l1_system", profile)
+    pers = fs.personalize
+    recent = recent_feedback(conn, now, pers.feedback_window_days, pers.summary_max_items)
+    examples = few_shot_block(recent, pers.few_shot_per_polarity)
+    l1_system = system_prompt("l1_system", profile, examples)
     batches = [
         selected[i : i + fs.l1.batch_size] for i in range(0, len(selected), fs.l1.batch_size)
     ]

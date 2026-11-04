@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,13 +13,17 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from secondbrain import __version__, config, db
+from secondbrain.llm.base import LLMError, make_backend
+from secondbrain.llm.usage import record_call
 from secondbrain.pipeline.tiering import TOP_LANES
+from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
+from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -189,4 +194,104 @@ def create_app() -> FastAPI:
             {"item_id": item_key, "kinds": kinds, "with_note": bool(with_note), "saved": kind},
         )
 
+    @app.get("/profile", response_class=HTMLResponse)
+    def profile_page(request: Request, saved: str | None = None) -> HTMLResponse:
+        path, _ = config.ensure_profile()
+        text = path.read_text(encoding="utf-8")
+        return templates.TemplateResponse(
+            request,
+            "profile.html",
+            {"profile": parse_profile(text), "text": text, "saved": saved, "path": path},
+        )
+
+    @app.post("/profile")
+    def profile_save(text: str = Form(...)) -> RedirectResponse:
+        path, _ = config.ensure_profile()
+        backup = save_profile(path, _normalize_newlines(text), _history_dir(), datetime.now(UTC))
+        return RedirectResponse(f"/profile?saved={backup.name}", status_code=303)
+
+    @app.post("/profile/propose", response_class=HTMLResponse)
+    def profile_propose(request: Request) -> HTMLResponse:
+        path, _ = config.ensure_profile()
+        context: dict = {"error": None, "result": None, "message": None}
+        try:
+            settings = config.load_settings()
+            fs = config.pipeline_settings(settings)
+        except (config.ConfigError, OSError, ValueError) as exc:
+            context["error"] = str(exc)
+            return templates.TemplateResponse(request, "_proposal.html", context)
+        pers, now = fs.personalize, datetime.now(UTC)
+        with _conn() as conn:
+            feedback = recent_feedback(conn, now, pers.feedback_window_days, pers.summary_max_items)
+            if len(feedback) < pers.min_feedback_for_update:
+                days, count = pers.feedback_window_days, len(feedback)
+                context["message"] = f"无足够反馈，不提议修改（近 {days} 天内 {count} 条）"
+                return templates.TemplateResponse(request, "_proposal.html", context)
+            config.load_env()
+            backend_name = config.llm_backend(settings)
+            try:
+                backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
+                text = path.read_text(encoding="utf-8")
+                result = generate_update(backend, text, feedback)
+            except LLMError as exc:
+                if exc.usage:
+                    record_call(
+                        conn,
+                        backend_name,
+                        "PROFILE",
+                        exc.usage,
+                        now,
+                        fs.pricing,
+                        fs.pricing_schedule,
+                    )
+                    conn.commit()
+                context["error"] = str(exc)
+                return templates.TemplateResponse(request, "_proposal.html", context)
+            cost = record_call(
+                conn, backend.name, "PROFILE", result.usage, now, fs.pricing, fs.pricing_schedule
+            )
+            conn.commit()
+        context.update(
+            result=result, diff=result.diff(path.name), base_sha=text_sha(text), cost=cost
+        )
+        return templates.TemplateResponse(request, "_proposal.html", context)
+
+    @app.post("/profile/apply", response_class=HTMLResponse)
+    def profile_apply(
+        request: Request, new_text: str = Form(...), base_sha: str = Form(...)
+    ) -> HTMLResponse:
+        path, _ = config.ensure_profile()
+        if text_sha(path.read_text(encoding="utf-8")) != base_sha:
+            return templates.TemplateResponse(
+                request,
+                "_proposal.html",
+                {
+                    "error": "profile 在生成提案之后被修改过，请重新生成提案",
+                    "result": None,
+                    "message": None,
+                },
+                status_code=409,
+            )
+        backup = save_profile(
+            path, _normalize_newlines(new_text), _history_dir(), datetime.now(UTC)
+        )
+        return templates.TemplateResponse(
+            request,
+            "_proposal.html",
+            {
+                "result": None,
+                "error": None,
+                "message": f"已应用；旧版本备份为 {backup.name}，刷新页面查看",
+            },
+        )
+
     return app
+
+
+def _history_dir() -> Path:
+    return config.data_dir() / "profile_history"
+
+
+def _normalize_newlines(text: str) -> str:
+    """浏览器提交的 textarea 使用 CRLF。"""
+    return text.replace("\r\n", "\n")

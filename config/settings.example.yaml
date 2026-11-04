@@ -116,3 +116,14 @@ filter:
     paper_multiplier: 2.0
     min_minutes: 3
     max_minutes: 180
+
+# 个性化（M4）：反馈汇总、L1 few-shot、profile 修改提案、信源 trust 调整建议。
+personalize:
+  feedback_window_days: 30       # 汇总近 N 天的 👍 / 👎 / 学了 / 需要回炉 / 已扎实
+  summary_max_items: 50          # 送入 profile 修改提案的反馈条数上限
+  few_shot_per_polarity: 5       # L1 prompt 中正 / 负反馈样例各最多几条（0 关闭）
+  min_feedback_for_update: 1     # 反馈少于该数时 sb profile update 不调用 LLM
+  tune_window_days: 90           # sb sources tune 统计的时间窗
+  tune_min_samples: 5            # 信源有反馈的条目数少于该值时不给建议
+  tune_raise_ratio: 0.7          # 正向（👍 / 学了）比例 ≥ 该值建议 trust +1
+  tune_lower_ratio: 0.3          # 正向比例 ≤ 该值建议 trust −1

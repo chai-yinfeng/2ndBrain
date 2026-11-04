@@ -103,6 +103,13 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 - HTMX 2.0.4 vendored 在 `web/static/`，不依赖 CDN。`sb serve` 默认只监听 127.0.0.1。
 - 定时：`sb schedule install` 生成 launchd plist（`uv run sb run`，默认本地 07:00，按 UTC 检查是否高峰）。
 
+## 个性化（M4，见 ADR 0008）
+
+- `profile/feedback.py`：汇总近 `personalize.feedback_window_days` 天的 👍 / 👎 / 学了 / 需要回炉 / 已扎实（含条目标题、信源、content_type、topics）。
+- L1 system prompt = profile + 规则（固定前缀）+ "最近反馈样例"（正 / 负各最多 `few_shot_per_polarity` 条，无反馈时省略）。
+- `sb profile update`（与 Web `/profile` 共用 `profile/rewrite.py`）：strong 模型输出结构化提案（掌握度表的 update / add / remove，段落的 append / remove，每条带反馈 id 证据）→ 代码按规则校验（升级需 已扎实 / 学了，降级需 需要回炉，每次一级；有 已扎实 证据可直接到"扎实"）→ 生成新文本与 unified diff；`--apply` 前备份到 `data/profile_history/`。反馈不足时不调用 LLM。LLM 用量记为 stage = PROFILE。
+- `sb sources tune`（`profile/tune.py`）：每个条目取最新一次 👍 / 👎 / 学了，按信源统计正向比例，样本足够时建议 trust ±1；`--apply` 对 `config/sources.yaml` 做行级替换（不存在时从 example 复制）。
+
 ## 数据模型草案
 
 存储：SQLite 单文件 `data/brain.db`；wiki 为 `data/wiki/` 下的 Markdown。字段为草案，以实现时的 `db.py` 为准（M1 实现 `sources`、`items`，M2 实现 `assessments`、`digests`、`llm_calls`，M3 实现 `feedback` 与 `items.read_at`；schema 版本记录在 `PRAGMA user_version`）。
@@ -114,7 +121,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2 |
 | `feedback` | `id`, `item_id`, `kind`（up / down / read / later / learned / needs_refresh / mastered）, `note`, `ts`；`kind = read` 时同时写 `items.read_at` | M3 |
-| `llm_calls` | `id`, `ts`, `backend`, `stage`, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
+| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / PROFILE）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
 
 Wiki 概念页 frontmatter（M6）：`mastery`、`last_reviewed`、`interval_days`、`ease`（SM-2 简化版）、`sources`（来源条目）。
 
