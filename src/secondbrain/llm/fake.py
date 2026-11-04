@@ -15,9 +15,11 @@ from secondbrain.llm.base import LLMError, T, Tier, Usage
 from secondbrain.llm.schemas import (
     REFRESHER_TYPES,
     ChunkNotes,
+    DeepSummary,
     L1Response,
     L2Response,
     LintFindings,
+    PrereqExplanations,
     ProfileProposal,
     WikiPlan,
 )
@@ -150,6 +152,21 @@ class FakeBackend:
             obj = _wiki_plan(payload)
         elif schema is LintFindings:
             obj = {"issues": []}
+        elif schema is DeepSummary:
+            known = "已知知识" in messages[-1]["content"]
+            obj = _deep_summary(payload["item"], keywords, known)
+        elif schema is PrereqExplanations:
+            title = payload["item"]["title"]
+            obj = {
+                "items": [
+                    {
+                        "name": p["name"],
+                        "explanation": f"（fake）{p['name']}：直觉是……关键公式是……"
+                        f"读懂《{title}》需要它，因为{p.get('why') or '正文用到了它'}。",
+                    }
+                    for p in payload["prerequisites"]
+                ]
+            }
         else:
             raise LLMError(f"fake 后端不支持的 schema：{schema.__name__}")
         prompt_chars = sum(len(m["content"]) for m in messages)
@@ -228,6 +245,24 @@ def _profile_proposal(payload: dict) -> dict:
         "summary": f"（fake）{len(changes)} 处掌握度修改，{len(edits)} 处段落修改",
         "mastery_changes": list(changes.values()),
         "section_edits": edits,
+    }
+
+
+def _deep_summary(it: dict, keywords: set[str], known: bool) -> dict:
+    """确定性的深度速读：取正文句子（视频 / 逐段提要取带时间戳的行）填各栏。"""
+    text = it.get("text", "")
+    stamped = [m.group(0).removeprefix("- ").strip() for m in _STAMPED_LINE.finditer(text)]
+    sentences = stamped or [s.strip() for s in re.split(r"(?<=[.!?。])\s+", text) if s.strip()]
+    topics = _assess(it["title"], text[:L1_COMPARABLE_CHARS], keywords)["topics"]
+    return {
+        "problem": "（fake）" + (sentences[0][:160] if sentences else it["title"]),
+        "method": [s[:120] for s in sentences[1:4]] or [it["title"]],
+        "results": [s[:120] for s in sentences[4:6]] or ["（fake）正文没有给出数字"],
+        "limitations": ["（fake）没有讨论局限"],
+        "relation_to_known": "（fake）"
+        + ("与已知知识中的页面相关。" if known else "与用户 wiki 中的已知知识没有直接关系。"),
+        "sections_to_read": [{"name": "（fake）全文第 1 部分", "reason": "（fake）核心方法在这里"}],
+        "prerequisites": [{"name": t, "why": f"（fake）正文用到 {t}"} for t in topics[:2]],
     }
 
 

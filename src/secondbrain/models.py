@@ -226,6 +226,15 @@ class WikiSettings(BaseModel):
     mastered_interval_days: int = Field(default=30, ge=1)  # 复习时点"已扎实"后的最短间隔
 
 
+class SummarySettings(BaseModel):
+    """M8：深度速读与补前置（ADR 0015）。"""
+
+    single_max_chars: int = Field(default=60_000, ge=1000)  # 全文不超过该值时直接交给 strong
+    max_total_chars: int = Field(default=400_000, ge=1000)  # 速读读取的全文上限（超出截断）
+    max_chunks: int = Field(default=40, ge=1)  # 分块上限（块大小沿用 l2.chunk_chars）
+    explainers_per_prereq: int = Field(default=3, ge=0)  # 每个前置知识列出的已入库讲解类条目
+
+
 class FilterSettings(BaseModel):
     """settings 中与流水线相关的全部配置（由 config.pipeline_settings 组装）。"""
 
@@ -239,6 +248,8 @@ class FilterSettings(BaseModel):
         default_factory=lambda: {"refresher": 15, "serendipity": 10}
     )
     deep_read_ratio: float = 0.6
+    # 深读条目（est > 预算 × deep_read_ratio）按速读时间占用预算（ADR 0015）
+    deep_summary_minutes: int = Field(default=15, ge=1)
     backlog_max_days: int = 3
     run: RunSettings = Field(default_factory=RunSettings)
     l0: L0Settings = Field(default_factory=L0Settings)
@@ -250,3 +261,4 @@ class FilterSettings(BaseModel):
     personalize: PersonalizeSettings = Field(default_factory=PersonalizeSettings)
     backfill: BackfillSettings = Field(default_factory=BackfillSettings)
     wiki: WikiSettings = Field(default_factory=WikiSettings)
+    summary: SummarySettings = Field(default_factory=SummarySettings)

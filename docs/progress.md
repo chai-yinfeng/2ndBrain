@@ -374,3 +374,44 @@
 - 用户判断 deepseek-v4-pro 性价比低：贵很多，但没有明显更聪明。因此 cheap / strong 两级默认都改为 `deepseek-flash`（ADR 0014），涉及 `config/settings.example.yaml` 与 `LLMSettings` 的默认值。两级机制和 v4-pro 的价格条目都保留，可在 `config/settings.yaml` 中切回。
 - `max_tokens` 保持不变（cheap 4096 / strong 8192）。`llm_calls` 表不记录 reasoning_tokens，无法从已有数据判断 flash 是否返回推理 token。已有数据中 flash 的最大 completion 为 3771（L2_MAP），v4-pro 的 L2 最大为 7324。8192 的上限和截断后的翻倍重试对 flash 同样适用。
 - 测试：`test_llm_deepseek_parse.py` 的分层测试改为显式配置 strong = v4-pro（默认两级相同，已经无法检验分层），并新增一个默认值测试。
+
+## M8 — 深度速读与前置知识（2026-11-04，分支 `m8-deep-summary`）
+
+**做了什么**（ADR 0015）
+- 预算：
+  - 深读条目按 `deep_summary_minutes`（15）占用预算，速读时间也放不下才顺延；
+  - schema v7 新增 `digests.budget_minutes`（旧行取 est_minutes）与 `item_ai` 缓存表；
+  - 首页"今日已排"、`sb digest show`、同日多次 run 都按占用预算计算；卡片显示"速读约 15 分钟 · 全文约 90 分钟"。
+- 深度速读：
+  - `pipeline/summary.py` 读全文，长内容 cheap 分块（SUMMARY_MAP）后由 strong 汇总（SUMMARY），视频保留时间戳；
+  - 结果缓存，重新生成需要确认；
+  - 入口：`sb summary`、item 页与深读卡片上的按钮（后台任务）。
+- 补前置：
+  - 有速读时只用速读的前置知识，否则用 L2 的（名字轻量归一后去重；最初的合并做法在真实运行中约一半是近重复，已改）；wiki 已有的给链接与掌握度；
+  - 没有的用一次 strong 调用（PREREQ）生成讲解并缓存，同时列出库中最多 3 条讲解类文章；
+  - "存为概念页"不调用 LLM；
+  - 入口：`sb prereq`、item 页按钮。
+- 费用提示改为按当前模型价格估算的"非高峰 – 高峰"区间（替换按 v4-pro 写的"约几美分"）。
+- 测试：
+  - 新增 `test_summary.py`（12）、`test_budget.py`（3），`test_tiering.py` 新增 2 个；
+  - 因语义变更修改了 `test_tiering.py` 中的 2 个旧测试，以及 `top_minutes` 辅助函数。
+
+**验收结果**
+- `uv run pytest -q`：269 passed；`uv run ruff check .`、`uv run ruff format --check .`：通过。
+- roadmap M8 的验收命令已在 `mktemp -d` 临时目录中全部实际运行（fake LLM，端口 8765）。
+- 默认数据副本的对比（fake 后端，源文件只读复制）：
+  - 今天（2026-11-04）再跑 `sb run --no-fetch`：main 与本分支结果相同，都是顺延 7 条、今日已排 102 / 105。原因是当天先前 run 已排的 2 条必读按旧规则占了 102 分钟（迁移后旧行的 budget_minutes = est_minutes），剩余 3 分钟放不下 15 分钟的速读。
+  - 模拟第二天（2026-11-05，同一份副本）：
+
+    | | 顺延 | 前排 | 今日已排 |
+    |---|---|---|---|
+    | main | 6 | 必读 2 / 温故 2 / 值得读 2 | 103 / 105 |
+    | 本分支 | 1 | 必读 3 / 值得读 3 / 温故 1 / 意外 1 | 103 / 105 |
+
+    本分支中 6 篇 80–110 分钟的论文各按 15 分钟进入前排。
+
+**遗留问题**
+- 升级当天先前 run 已占用的预算按全文计，第二天起才生效。
+- AI 讲解未经人工核对。
+- 深度速读按全文输入，费用高于 L2，但都是按需触发。
+- 补前置在 Web 中是同步请求（一次调用，约半分钟）。

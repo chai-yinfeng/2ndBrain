@@ -62,9 +62,21 @@ class Placement:
     item_id: int
     lane: str  # TOP_LANES | fyi | archived | deferred
     rank: int
-    est_minutes: int
+    est_minutes: int  # 全文阅读时间
     is_deep_read: bool
     deferred_from: str | None = None
+    budget_minutes: int | None = None  # 占用的预算（深读按速读时间，ADR 0015）；None = est_minutes
+
+    @property
+    def budget(self) -> int:
+        return self.est_minutes if self.budget_minutes is None else self.budget_minutes
+
+
+def budget_cost(est_minutes: int, fs: FilterSettings) -> int:
+    """条目占用的预算：深读（est > 预算 × deep_read_ratio）按速读时间 deep_summary_minutes 计。"""
+    if est_minutes > fs.daily_budget_minutes * fs.deep_read_ratio:
+        return min(est_minutes, fs.deep_summary_minutes)
+    return est_minutes
 
 
 def is_refresher(c: Candidate, th: Thresholds) -> bool:
@@ -140,7 +152,8 @@ def tier(
     """按时间预算（主约束）与 lane 条数上限分级。
 
     - 顺延过的深读条目最先考虑；超过 backlog_max_days 仍未排上的不再顺延，降为 fyi。
-    - 单条 est_minutes > 预算 × deep_read_ratio 为"深读"；深读条目放不进剩余预算时标记 deferred。
+    - 单条 est_minutes > 预算 × deep_read_ratio 为"深读"；深读条目按速读时间
+      deep_summary_minutes 占用预算（ADR 0015），速读时间也放不进剩余预算时标记 deferred。
     - 非深读条目放不进预算时落到 fyi。lane 允许为空。
     - already_counts / already_minutes：当天先前 run 已占用的名额与时间（同一天多次 run 共享预算）。
     - lane_budget_reserve（ADR 0007）：温故 / 意外栏各自保留一段预算，其他 lane 不能占用；
@@ -178,16 +191,18 @@ def tier(
         if counts[lane] >= caps[lane]:
             return False
         deep = c.est_minutes > deep_limit
-        if c.est_minutes <= available(lane):
+        cost = budget_cost(c.est_minutes, fs)
+        if cost <= available(lane):
             counts[lane] += 1
-            left -= c.est_minutes
+            left -= cost
             placed[c.item_id] = Placement(
-                c.item_id, lane, counts[lane], c.est_minutes, deep, c.deferred_from
+                c.item_id, lane, counts[lane], c.est_minutes, deep, c.deferred_from, cost
             )
             return True
         if deep:
+            since = c.deferred_from or today.isoformat()
             placed[c.item_id] = Placement(
-                c.item_id, "deferred", 0, c.est_minutes, True, c.deferred_from or today.isoformat()
+                c.item_id, "deferred", 0, c.est_minutes, True, since, cost
             )
             return True
         return False

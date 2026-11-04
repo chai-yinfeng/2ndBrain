@@ -1,0 +1,10 @@
+{# 深度速读按钮：POST /summary/<id> 启动后台任务，结果片段轮询。需要 item_id、hint、has_summary、task。 #}
+<div class="summary-button" id="summary-btn-{{ item_id }}">
+  {% if has_summary %}
+    <a href="/item/{{ item_id }}#summary">查看深度速读</a>
+  {% else %}
+    <button type="button" class="fb" hx-post="/summary/{{ item_id }}" hx-target="#task-summary-{{ item_id }}" hx-swap="outerHTML" title="读全文写一份深入的总结（问题、方法、结果、局限、前置知识），结果缓存">深度速读</button>
+    <span class="meta">读全文，{{ hint }}；不影响分级</span>
+  {% endif %}
+  {% with kind="summary-" ~ item_id, message=None %}{% include "_task.html" %}{% endwith %}
+</div>

@@ -57,6 +57,8 @@ flowchart LR
 
 ## 每日时间预算（ADR 0004）
 
+- M8（ADR 0015）：深读条目（est > 预算 × deep_read_ratio）按速读时间 `deep_summary_minutes`（默认 15）占用预算，全文时间照常显示；速读时间也放不下时才顺延。`digests.budget_minutes` 记录占用的分钟数。
+
 - `daily_budget_minutes`（默认 105）为主约束；`lanes` 中的条数为上限。
 - 单条 `est_minutes` > 预算 × `deep_read_ratio`（默认 0.6）标"深读"，可顺延到预算有余的日子。
 - 未读 must_read 计入积压并在 UI 显示；超过 `backlog_max_days`（默认 3）天降级到 fyi。
@@ -145,6 +147,22 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - `/wiki`：体检按钮；
   - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
 
+## 深度速读与补前置（M8，见 ADR 0015）
+
+- `pipeline/summary.py`：按需的深度速读。
+  - 读全文（论文也不截取章节，上限 `summary.max_total_chars`）；超过 `summary.single_max_chars` 时 cheap 分块提要（SUMMARY_MAP）→ strong 汇总（SUMMARY）。
+  - 输出 `DeepSummary`：问题与动机、核心方法、关键结果、局限、与已有知识的关系（输入为 profile + `known_knowledge`）、值得精读的章节、前置知识。
+  - 缓存在 `item_ai`（kind = summary），不影响分级。
+- 补前置：有深度速读时只用速读的前置知识，否则用 L2 的；名字按小写、去首尾空白、去末尾复数 s 去重。
+  - wiki 已有的给出链接与掌握度；
+  - 没有的用一次 strong 调用（PREREQ）批量生成讲解，缓存为 kind = prereq；
+  - 列出库中讲解类条目；
+  - "存为概念页"不调用 LLM。
+- 入口：
+  - CLI：`sb summary` / `sb prereq`；
+  - Web：item 页与深读卡片上的"深度速读"按钮（后台任务）、item 页的"补前置"按钮（同步）。
+- 编排都在 `ops.py`，CLI 与 Web 共用。按钮旁的费用由 `web/app.CostHints` 按当前模型价格估算。
+
 ## 数据模型草案
 
 存储：SQLite 单文件 `data/brain.db`；wiki 为 `data/wiki/` 下的 Markdown。字段为草案，以实现时的 `db.py` 为准（M1 实现 `sources`、`items`，M2 实现 `assessments`、`digests`、`llm_calls`，M3 实现 `feedback` 与 `items.read_at`；schema 版本记录在 `PRAGMA user_version`）。
@@ -154,11 +172,12 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7） | M1（`last_fetch_*` M7，schema v6） |
 | `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
-| `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2 |
+| `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`（全文）, `budget_minutes`（占用预算，M8）, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2（`budget_minutes` M8，schema v7） |
+| `item_ai` | `item_id`, `kind`（summary / prereq）, `data`（JSON）, `model`, `created_at`；`(item_id, kind)` 唯一 | M8 |
 | `feedback` | `id`, `item_id`, `kind`（M7：later / dismiss / too_easy / gained / too_hard / worthless / clear）, `note`, `ts`；每个条目最新一条为当前状态；读完后四种写 `items.read_at` | M3（kind 取值 M7 修订） |
 | `wiki_ingests` | `item_id`（主键）, `ts`, `pages`（JSON：新建 / 更新的 slug） | M6 |
 | `digest_concepts` | `date`, `slug`, `title`, `mastery`, `est_minutes`, `related_item_id`, `created_at`；`(date, slug)` 唯一 | M6 |
-| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE / WIKI）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
+| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE / WIKI / SUMMARY / SUMMARY_MAP / PREREQ）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
 
 Wiki 概念页 frontmatter（M6）：`mastery`、`last_reviewed`、`interval_days`、`ease`（SM-2 简化版）、`sources`（来源条目）。
 

@@ -1,0 +1,25 @@
+{# POST /prereq/<id> 返回的片段 #}
+{% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+{% if report %}
+  {% if not report.entries %}<p class="empty">没有前置知识（L2 与深度速读都没有列出）。</p>{% endif %}
+  {% for e in report.entries %}
+  <div class="prereq-entry" data-prereq="{{ e.name }}">
+    <h3>{{ e.name }}</h3>
+    {% if e.why %}<p class="meta">为什么需要：{{ e.why }}</p>{% endif %}
+    {% if e.page_slug %}
+      <p>wiki 已有：<a href="/wiki/page/{{ e.page_slug }}">{{ e.page_title }}</a> <span class="tag">掌握度 {{ e.mastery or "—" }}</span></p>
+    {% elif e.explanation %}
+      <p class="ai-note"><span class="tag">AI 生成</span> {{ e.explanation }}</p>
+      <div id="save-{{ loop.index }}">
+        <button type="button" class="fb" hx-post="/prereq/{{ item_id }}/save" hx-vals='{{ {"name": e.name} | tojson }}' hx-target="#save-{{ loop.index }}" hx-swap="innerHTML" title="用这段讲解新建概念页（掌握度陌生，不调用 LLM）">存为概念页</button>
+      </div>
+    {% else %}
+      <p class="meta">没有生成讲解。</p>
+    {% endif %}
+    {% if e.explainers %}
+    <p class="meta">库中讲这个的文章：{% for x in e.explainers %}<a href="/item/{{ x.id }}">{{ x.title }}</a>{% if not loop.last %}、{% endif %}{% endfor %}</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+  <p class="meta">本次新生成 {{ report.generated }} 条讲解，估算费用 ${{ "%.4f" | format(report.cost) }}</p>
+{% endif %}

@@ -17,7 +17,7 @@
   {% if not l2 %}
   <section>
     <h2>精读（L2）</h2>
-    {% with item_id=item.id, no_transcript=(item.extract_method == "no_transcript") %}{% include "_deep_button.html" %}{% endwith %}
+    {% with item_id=item.id, no_transcript=(item.extract_method == "no_transcript"), hint=hints.l2(item.content_len) %}{% include "_deep_button.html" %}{% endwith %}
   </section>
   {% endif %}
   {% if l2 %}
@@ -31,6 +31,35 @@
     {% if l2.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ l2.prerequisites | join("、") }}</p>{% endif %}
   </section>
   {% endif %}
+
+  <section id="summary">
+    <h2>深度速读</h2>
+    {% if summary %}
+      <p><b>问题与动机</b> {{ summary.problem }}</p>
+      {% for title, key in (("核心方法", "method"), ("关键结果", "results"), ("局限与争议", "limitations")) %}
+      <p><b>{{ title }}</b></p>
+      <ul>{% for text, link in summary_points[key] %}<li>{% if link %}<a href="{{ link }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}</li>{% endfor %}</ul>
+      {% endfor %}
+      <p><b>与已有知识的关系</b> {{ summary.relation_to_known }}</p>
+      {% if summary.sections_to_read %}<p><b>值得精读的章节</b></p><ul>{% for s in summary.sections_to_read %}<li>{{ s.name }}：{{ s.reason }}</li>{% endfor %}</ul>{% endif %}
+      {% if summary.prerequisites %}<p><b>需要补的前置知识</b></p><ul>{% for p in summary.prerequisites %}<li>{{ p.name }}：{{ p.why }}</li>{% endfor %}</ul>{% endif %}
+      <p class="meta">生成于 {{ summary._created_at }} · {{ summary._model }}</p>
+      <button type="button" class="fb" hx-post="/summary/{{ item.id }}" hx-vals='{"force": "1"}' hx-target="#task-summary-{{ item.id }}" hx-swap="outerHTML" hx-confirm="重新生成会再花一次费用（{{ hints.summary(item.content_len) }}），确定？">重新生成</button>
+      {% with kind="summary-" ~ item.id, task=summary_task, message=None %}{% include "_task.html" %}{% endwith %}
+    {% else %}
+      {% if item.extract_method == "no_transcript" %}<p class="meta">没有字幕，无法速读。</p>{% else %}
+      {% with item_id=item.id, hint=hints.summary(item.content_len), has_summary=False, task=summary_task %}{% include "_summary_button.html" %}{% endwith %}
+      {% endif %}
+    {% endif %}
+  </section>
+
+  <section id="prereq">
+    <h2>补前置</h2>
+    <p class="meta">前置知识来自{% if summary %}深度速读{% else %} L2（生成深度速读后改用速读中更具体的前置知识）{% endif %}（共 {{ prereq_count }} 个）：wiki 已有的给出链接与掌握度；没有的用一次 strong 调用生成简短讲解（{{ hints.prereq(prereq_count) }}，约半分钟{% if prereq_cached %}；已有缓存的讲解不再调用{% endif %}），并列出库中讲这个知识点的文章。</p>
+    <button type="button" class="fb" hx-post="/prereq/{{ item.id }}" hx-target="#prereq-result" hx-swap="innerHTML" hx-indicator="#prereq-loading">补前置</button>
+    <span id="prereq-loading" class="htmx-indicator meta">生成中…</span>
+    <div id="prereq-result"></div>
+  </section>
 
   <section>
     <h2>评分</h2>

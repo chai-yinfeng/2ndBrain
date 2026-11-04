@@ -183,3 +183,35 @@ class LintIssue(BaseModel):
 
 class LintFindings(BaseModel):
     issues: list[LintIssue] = Field(default_factory=list)
+
+
+# ---------- M8：深度速读与补前置（ADR 0015） ----------
+
+
+class SectionToRead(BaseModel):
+    name: str
+    reason: str
+
+
+class PrereqNeed(BaseModel):
+    name: str
+    why: str  # 为什么这篇需要它
+
+
+class DeepSummary(BaseModel):
+    problem: str  # 问题与动机
+    method: list[str] = Field(default_factory=list)  # 核心方法：关键算法步骤 / 公式
+    results: list[str] = Field(default_factory=list)  # 关键结果与数字
+    limitations: list[str] = Field(default_factory=list)  # 局限与争议
+    relation_to_known: str = ""  # 与用户已有知识的关系
+    sections_to_read: list[SectionToRead] = Field(default_factory=list)
+    prerequisites: list[PrereqNeed] = Field(default_factory=list)
+
+
+class PrereqExplanation(BaseModel):
+    name: str
+    explanation: str  # 约 300–500 字，讲到"读懂这篇需要的程度"
+
+
+class PrereqExplanations(BaseModel):
+    items: list[PrereqExplanation] = Field(default_factory=list)

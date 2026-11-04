@@ -214,6 +214,41 @@ sleep 3; uv run sb run --no-fetch; echo "exit=$?"                # 锁冲突：�
 kill %1 %2 2> /dev/null                                           # 停掉 8765 的服务与持锁进程
 ```
 
+## M8 — 深度速读与前置知识（ADR 0015）
+
+- [x] 深读条目按速读时间计入预算：`deep_summary_minutes`（默认 15）；`digests.budget_minutes`（schema v7，旧行取 est_minutes）；"今日已排"、同日多次 run、`sb digest show` 都按占用预算算；卡片显示"速读约 15 分钟 · 全文约 90 分钟"；速读时间也放不下才顺延
+- [x] 深度速读：读全文（上限 `summary.max_total_chars`），长内容 cheap 分块提要（SUMMARY_MAP）→ strong 汇总（SUMMARY）；输出问题与动机、核心方法、关键结果、局限、与已有知识的关系、值得精读的章节、前置知识；视频保留时间戳；结果缓存在 `item_ai`，重新生成需确认
+- [x] 入口：`sb summary <id> [--force]`；item 详情页与深读卡片上的"深度速读"按钮（后台任务 + 轮询），按钮旁显示耗时与费用区间
+- [x] 补前置：有速读时只用速读的前置知识，否则用 L2 的（名字轻量归一后去重）；wiki 已有 → 链接 + 掌握度；没有 → 一次 strong 调用批量生成简短讲解（PREREQ，缓存）；列出库中最多 3 条 explainer / survey / tutorial；"存为概念页"不调用 LLM（mastery 陌生，首次复习间隔 `wiki.first_review_days`）；`sb prereq <id> [--force]`
+- [x] 按钮旁的费用提示改为按当前模型价格估算（非高峰 – 高峰区间）
+
+**模块**：`pipeline/summary.py`、`pipeline/tiering.py`、`ops.py`、`db.py`、`web/`、`cli.py`
+
+**验收**（临时目录，fake LLM，端口 8765，不碰默认 data/）
+```bash
+uv run pytest -q tests/test_summary.py tests/test_budget.py tests/test_tiering.py
+export SB_DATA_DIR=$(mktemp -d) SB_LLM_BACKEND=fake
+uv run sb fetch --source lmsys-sglang-blog --limit 5 && uv run sb run --no-fetch
+# 预算：3 篇 90 分钟的深读都放进必读，各占 15 分钟
+uv run python -c "from datetime import date; from secondbrain.models import FilterSettings; from secondbrain.pipeline.tiering import Candidate, tier; print([(p.lane, p.est_minutes, p.budget) for p in tier([Candidate(i, 9, 8, 8, 7, 2, 'frontier', 'core', 90, True) for i in (1, 2, 3)], FilterSettings(), date.today())])"
+sqlite3 "$SB_DATA_DIR/brain.db" "SELECT SUM(budget_minutes) FROM digests WHERE lane IN ('must_read', 'worth_it', 'refresher', 'serendipity')"   # 与 sb run 输出的"今日已排"一致
+ITEM=$(sqlite3 "$SB_DATA_DIR/brain.db" "SELECT item_id FROM digests WHERE lane = 'must_read' LIMIT 1")
+uv run sb summary $ITEM | head -12
+uv run sb summary $ITEM | tail -1                                  # 第二次读缓存
+uv run sb prereq $ITEM
+sqlite3 "$SB_DATA_DIR/brain.db" "SELECT stage, COUNT(*) FROM llm_calls WHERE stage IN ('SUMMARY', 'SUMMARY_MAP', 'PREREQ') GROUP BY stage"
+uv run sb serve --port 8765 &
+sleep 3
+curl -s 127.0.0.1:8765/item/$ITEM | grep -o '<h2>深度速读</h2>\|<h2>补前置</h2>\|（非高峰）' | sort | uniq -c
+curl -s -X POST 127.0.0.1:8765/summary/$ITEM > /dev/null; sleep 2
+curl -s 127.0.0.1:8765/tasks/summary-$ITEM | grep -o 'data-task-status="done"'
+curl -s -X POST 127.0.0.1:8765/prereq/$ITEM | grep -o 'AI 生成\|wiki 已有' | sort | uniq -c
+NAME=$(sqlite3 "$SB_DATA_DIR/brain.db" "SELECT key FROM item_ai, json_each(item_ai.data, '$.explanations') WHERE item_id = $ITEM AND kind = 'prereq' LIMIT 1")
+curl -s -X POST 127.0.0.1:8765/prereq/$ITEM/save --data-urlencode "name=$NAME" | grep -o '已存为概念页'
+curl -s 127.0.0.1:8765/ops | grep -o 'SUMMARY' | head -1
+kill %1
+```
+
 ## Backlog（不在本轮）
 
 - [ ] X / Twitter 信源

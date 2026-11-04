@@ -1,7 +1,7 @@
 <article class="entry lane-{{ e.lane }}" data-item-id="{{ e.item_id }}">
   <h3><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.title }}</a></h3>
   <p class="meta">
-    {{ e.source_id }} · {{ e.est_minutes }} 分钟
+    {{ e.source_id }} · {% if e.budget_minutes < e.est_minutes %}速读约 {{ e.budget_minutes }} 分钟 · 全文约 {{ e.est_minutes }} 分钟{% else %}{{ e.est_minutes }} 分钟{% endif %}
     {% if e.is_deep_read %}<span class="tag deep">深读</span>{% endif %}
     {% if e.deferred_from %}<span class="tag">顺延自 {{ e.deferred_from }}</span>{% endif %}
     {% if e.content_type %}<span class="tag">{{ e.content_type }}</span>{% endif %}
@@ -13,5 +13,6 @@
   {% if e.reason %}<p class="reason"><b>理由</b> {{ e.reason }}</p>{% endif %}
   {% if e.refresh_first %}<p class="refresh"><b>建议先回炉：</b>{% for name, link in e.refresh_first %}{% if link %}<a href="{{ link }}">{{ name }}</a>{% else %}{{ name }}{% endif %}{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
   {% if e.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ e.prerequisites | join("、") }}</p>{% endif %}
+  {% if e.is_deep_read %}{% with item_id=e.item_id, hint=hints.summary(e.content_len), has_summary=e.has_summary, task=tasks.get("summary-" ~ e.item_id) %}{% include "_summary_button.html" %}{% endwith %}{% endif %}
   {% with item_id=e.item_id, state=e.state, with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
 </article>

@@ -34,6 +34,8 @@ uv run sb profile update        # 根据反馈生成 profile 修改提案，只�
 uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
 uv run sb sources tune          # 按反馈给出信源 trust 调整建议（--apply 写入 config/sources.yaml）
 uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
+uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
+uv run sb prereq <item_id>      # 补前置：wiki 已有的给链接，没有的生成简短讲解（AI 生成）
 uv run sb wiki ingest --pending # 把标了"有收获"的条目编进 data/wiki（Obsidian 可直接打开）
 uv run sb wiki due              # 今天到期复习的概念（复习：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered）
 uv run sb wiki lint             # 检查断链、孤立页、缺字段
@@ -54,6 +56,9 @@ Web 上的其他页面：
 - `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；信源 trust 调整建议。
 - `/sources`：信源列表、试抓后添加、启用 / 停用、删除。修改写入 `config/sources.yaml`，**写回时注释不保留**，字段说明见 `config/sources.example.yaml`。
 - `/wiki`：体检、到期复习、知识图谱（`/wiki/graph`）。
+- 条目详情页：深度速读（深读卡片上也有按钮）、补前置（可把 AI 讲解"存为概念页"）。
+
+深读条目（全文时间超过预算 × `deep_read_ratio`）按速读时间（`deep_summary_minutes`，默认 15 分钟）占用每日预算，卡片同时显示全文时间（ADR 0015）。
 
 ### 用 Obsidian 打开 wiki（可选）
 
@@ -100,5 +105,6 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M5 视频讲座与长内容：YouTube 字幕、map-reduce 精读、`sb deep`、经典回补
 - [x] M6 知识 Wiki 闭环：`sb wiki ingest / lint / due / review`、`/wiki`、到期概念进温故栏、L1 已知知识
 - [x] M7 反馈语义与 Web 运维：两组文章反馈、`/later`、`/ops`、`/sources`、后台任务与运行锁、`/wiki/graph`
+- [x] M8 深度速读与前置知识：深读按速读时间计入预算、`sb summary`、`sb prereq`、存为概念页
 
 详见 [docs/progress.md](docs/progress.md)。

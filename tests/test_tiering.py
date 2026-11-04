@@ -38,7 +38,7 @@ def lanes_of(placements) -> dict[int, str]:
 
 
 def top_minutes(placements) -> int:
-    return sum(p.est_minutes for p in placements if p.lane in TOP_LANES)
+    return sum(p.budget for p in placements if p.lane in TOP_LANES)  # 占用预算（ADR 0015）
 
 
 def test_rank_score_formula_and_trust():
@@ -110,10 +110,12 @@ def test_deep_read_flag():
 
 
 def test_deep_read_that_does_not_fit_is_deferred():
-    first = cand(1, score=9.5, est_minutes=50)
+    # 深读按速读时间（15 分钟）占预算（ADR 0015）：只剩 10 分钟时速读也放不下才顺延
+    first = cand(1, score=9.5, est_minutes=60)
+    second = cand(4, score=9.2, est_minutes=35)
     deep = cand(2, score=9.0, est_minutes=70)
-    small = cand(3, score=8.5, est_minutes=20)
-    placements = {p.item_id: p for p in tier([first, deep, small], FS, TODAY)}
+    small = cand(3, score=8.5, est_minutes=5)
+    placements = {p.item_id: p for p in tier([first, second, deep, small], FS, TODAY)}
     assert placements[1].lane == "must_read"
     assert placements[2].lane == "deferred"
     assert placements[2].is_deep_read
@@ -130,11 +132,13 @@ def test_non_deep_item_that_does_not_fit_falls_to_fyi():
 
 def test_deferred_items_are_considered_first():
     deferred = cand(1, score=7.6, est_minutes=70, deferred_from="2026-11-03")
-    better = cand(2, score=9.5, est_minutes=50)
-    placements = {p.item_id: p for p in tier([deferred, better], FS, TODAY)}
+    better = cand(2, score=9.5, est_minutes=60)
+    third = cand(3, score=9.4, est_minutes=40)
+    placements = {p.item_id: p for p in tier([deferred, better, third], FS, TODAY)}
     assert placements[1].lane == "must_read"
     assert placements[1].deferred_from == "2026-11-03"
-    assert placements[2].lane == "fyi"  # 预算只剩 35 分钟
+    assert placements[2].lane == "must_read"
+    assert placements[3].lane == "fyi"  # 顺延条目先占 15 分钟（速读），只剩 30 分钟
 
 
 def test_expired_deferred_items_go_to_fyi():
@@ -254,3 +258,28 @@ def test_reserve_can_be_disabled():
     lanes = lanes_of(placements)
     assert sum(lane == "must_read" for lane in lanes.values()) == 3
     assert lanes[100] == "fyi"  # 90 + 20 > 105
+
+
+def test_deep_reads_take_summary_minutes_from_budget():
+    """ADR 0015：深读按 deep_summary_minutes 占预算，全文时间保留；非深读按全文。"""
+    deep = [cand(i, score=9 - i / 10, est_minutes=90) for i in range(1, 4)]
+    normal = cand(9, score=8.0, est_minutes=40)
+    placements = {p.item_id: p for p in tier([*deep, normal], FS, TODAY)}
+    for i in range(1, 4):
+        p = placements[i]
+        assert (p.lane, p.est_minutes, p.budget, p.is_deep_read) == ("must_read", 90, 15, True)
+    assert placements[9].lane == "worth_it" and placements[9].budget == 40  # 必读 3 条已满
+    assert top_minutes(placements.values()) == 3 * 15 + 40
+    custom = FilterSettings(deep_summary_minutes=30)
+    (p,) = tier([cand(1, est_minutes=90)], custom, TODAY)
+    assert p.budget == 30
+    (p,) = tier([cand(1, est_minutes=60)], FS, TODAY)  # 60 ≤ 63：不是深读，按全文
+    assert (p.budget, p.is_deep_read) == (60, False)
+
+
+def test_shared_day_budget_counts_summary_minutes():
+    """同一天先前 run 已占用的分钟数按占用预算传入；剩余不足速读时间时顺延。"""
+    (p,) = tier([cand(1, est_minutes=90)], FS, TODAY, already_minutes=95)
+    assert p.lane == "deferred" and p.budget == 15
+    (p,) = tier([cand(1, est_minutes=90)], FS, TODAY, already_minutes=90)
+    assert p.lane == "must_read"

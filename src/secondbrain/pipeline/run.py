@@ -315,7 +315,7 @@ def run_pipeline(
         if p.item_id in backfill_ids:
             report.backfill_placed += 1
     report.minutes_used = minutes + sum(
-        p.est_minutes
+        p.budget
         for p in placements
         if p.lane in tiering.TOP_LANES
         and not (p.item_id in backfill_ids and p.lane != "refresher")

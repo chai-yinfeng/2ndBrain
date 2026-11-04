@@ -160,11 +160,13 @@ def pipeline_settings(settings: dict[str, Any]) -> FilterSettings:
         "lanes",
         "lane_budget_reserve",
         "deep_read_ratio",
+        "deep_summary_minutes",
         "backlog_max_days",
         "run",
         "personalize",
         "backfill",
         "wiki",
+        "summary",
     )
     data = {k: settings[k] for k in keys if settings.get(k) is not None}
     data.update(settings.get("filter") or {})
