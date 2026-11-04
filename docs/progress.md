@@ -7,6 +7,8 @@
 - **`needs_scraper` 信源的页面抓取支持**：6 个信源（LMSYS、Hazy Research、Anthropic engineering、Anthropic news、Meta AI、DeepSeek）没有可用 RSS，目前跳过。推荐默认：放入 roadmap Backlog，不进 M1–M6。（已加入 Backlog，待用户确认）
 - **默认 data 目录是否重置（M2 遗留）**：推荐默认：不重置，保留已有数据，不做覆盖。（已按默认处理）
 - **温故 / 意外是否预留预算（M2 遗留）**：推荐默认：预留。tiering 新增 `lane_budget_reserve`（默认 refresher 15 分钟、serendipity 10 分钟）；该栏没有合格候选时释放回总预算，must_read 不能占用（ADR 0007）。（已按默认处理）
+- **真实 DeepSeek 下的 profile 提案质量（M4 遗留）**：推荐默认：暂不验证，等用户积累真实反馈后由用户在 UI 中触发。（已按默认处理）
+- **Web"生成修改提案"没有费用确认（M4 遗留）**：推荐默认：保持（单次约几美分），在按钮旁显示"将调用 strong 模型"提示（M5 已加，"精读"按钮同样提示）。（已按默认处理）
 
 ## M0 — 仓库与骨架（2026-11-04）
 
@@ -175,3 +177,51 @@
 **遗留问题**
 - 段落修改只支持追加 / 删除整行；更大的改写需要在 `/profile` 手动编辑。
 - 真实 DeepSeek 的提案质量还没验证：默认 data 没有反馈，也不能改用户的真实 profile。
+
+## M5 — 视频讲座、长内容与经典回补（2026-11-04，分支 `m5-longform`）
+
+**做了什么**
+- 新增依赖：youtube-transcript-api（直接读取字幕）、yt-dlp（前者失败时退回，只取字幕、不下载视频）。
+- `sources/youtube.py`：解析频道 RSS（video id、Shorts 链接、简介）。`sources.example.yaml` 中 5 个视频频道的 channel_id 已查实；默认启用 karpathy-youtube（max_age_days 放宽到 730）和 gpu-mode，其余仍为 false。
+- `extract/transcript.py`：
+  - 字幕：先人工字幕后自动字幕，限英文 / 中文。
+  - 限流：全局最小间隔，HTTP 错误退避重试；被封禁时只退回 yt-dlp 一次，不用代理和 cookie。
+  - 存储：每约 30 秒合并为一段 `[mm:ss]` 文本，存入 content。
+  - 时间戳工具：解析、生成跳转链接。
+- `db.py` 迁移 v4：新增 `items.is_backfill`、`items.duration_seconds`；条目状态新增 `backfill_l1`。
+- L0：排除 Shorts 和短于 `min_video_minutes` 的视频；无字幕视频不按正文长度排除，也不进入 L2。
+- `pipeline/l2_deep.py`：
+  - 长内容 map-reduce：分块后 cheap 模型逐块提要（L2_MAP），strong 模型汇总（L2）；单条精读时各块并发。
+  - 费用预估同时覆盖 map 与 reduce。
+  - 视频要点带时间戳。
+- `pipeline/run.py`：
+  - 重构为 `_Runner`，L1 / L2 逻辑复用。
+  - 新增回补步骤：每天 `backfill.daily_limit` 条，先粗筛回补池，再按优先级选出做 L2，只进温故栏，没排上的回到池中。
+  - 新增 `deep_one`，供 `sb deep` 和 Web 使用。
+- `sb deep <item_id> [--force]`；`sb fetch` 输出回补条数和无字幕原因；`sb run` 输出回补统计。
+- Web：
+  - 速览条目和详情页增加"精读"按钮（HTMX，旁注"将调用 strong 模型"）。
+  - 视频要点渲染为时间戳链接。
+  - 显示"无字幕 / 经典回补"标记。
+  - `/profile` 的"生成修改提案"旁增加费用提示。
+- karpathy-github、lilian-weng、colah 设为 `backfill: true`。
+- 设计取舍见 ADR 0009。
+- 测试：新增 `tests/test_youtube.py`（12）、`test_longform.py`（9）、`test_backfill.py`（7）。
+
+**验收结果**
+- `uv run pytest -q tests/test_youtube.py tests/test_longform.py tests/test_backfill.py`：28 passed；`uv run pytest -q`：170 passed；`uv run ruff check .`：通过。
+- `sb fetch --source karpathy-youtube --limit 2`（真实网络）：新增 2 条，youtube-transcript-api 直接拿到字幕，没有被限流。
+  - item 217 "How I use LLMs"：时长 2h11m，13.1 万字符。
+  - item 218 "Deep Dive into LLMs like ChatGPT"：时长 3h31m，因 `content_max_chars` 截断为 20 万字符。
+- `sb deep 217`（真实 DeepSeek，UTC 高峰）：
+  - 12 段 map + 1 次汇总，耗时 3:05（map 串行）；
+  - 6 条带 `[mm:ss]` 的要点，每条附 `watch?v=…&t=…` 链接；
+  - 预估 $0.040，实际 $0.0568。
+- 之后把 map 改为并发，并调高输出 token 的预估。`sb deep 218`：18 段 map + 汇总，耗时 1:44，预估 $0.103，实际 $0.0722。
+- `sb fetch --source lilian-weng`（回补）：新增 53 条，全部进入回补池，耗时 52 秒；未触发 L2。
+
+**遗留问题**
+- 超过约 3.5 小时的字幕会被 `fetch.content_max_chars`（20 万）截断，后半段不参与精读；如需完整，可以单独为视频放宽上限。
+- 频道 RSS 只有最近 15 个视频，看不到 Karpathy 早期的系列课程。
+- lilian-weng 的 feed 中有一条发布时间为 0001-01-01 的条目（疑似站点的非文章页面），已进入回补池，L1 会自行判断。
+- 默认 data 中的回补池（53 条）会在下次 `sb run` 时开始粗筛（每次最多 10 条）。

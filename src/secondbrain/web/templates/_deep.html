@@ -1,0 +1,10 @@
+{# POST /deep 返回的片段 #}
+<div class="deep" id="deep-{{ item_id }}">
+  {% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+  {% if l2 %}
+    <p class="tldr"><b>TL;DR</b> {{ l2.tldr }}</p>
+    <ul>{% for text, link in key_points %}<li>{% if link %}<a href="{{ link }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}</li>{% endfor %}</ul>
+    <p class="reason"><b>理由</b> {{ l2.why_for_you }}</p>
+    <p class="meta">预计 {{ l2.est_minutes }} 分钟 · 本次估算费用 ${{ "%.4f" | format(cost) }}</p>
+  {% endif %}
+</div>

@@ -7,15 +7,24 @@
     {{ item.source_id }}（trust {{ item.trust }} · {{ item.role }}）
     {% if item.author %}· {{ item.author }}{% endif %}
     · 发布 {{ item.published_at or "未知" }} · 正文 {{ item.content_len }} 字符
+    {% if item.duration_seconds %}· 时长 {{ (item.duration_seconds / 60) | round | int }} 分钟{% endif %}
+    {% if item.extract_method == "no_transcript" %}· <span class="tag">无字幕</span>{% endif %}
+    {% if item.is_backfill %}· <span class="tag">经典回补</span>{% endif %}
     {% if item.read_at %}· <span class="tag">已读 {{ item.read_at }}</span>{% endif %}
   </p>
   <p><a href="{{ item.url }}" target="_blank" rel="noopener">原文链接</a></p>
 
+  {% if not l2 %}
+  <section>
+    <h2>精读（L2）</h2>
+    {% with item_id=item.id, no_transcript=(item.extract_method == "no_transcript") %}{% include "_deep_button.html" %}{% endwith %}
+  </section>
+  {% endif %}
   {% if l2 %}
   <section>
     <h2>精读（L2）</h2>
     <p class="tldr"><b>TL;DR</b> {{ l2.tldr }}</p>
-    <ul>{% for p in l2.key_points %}<li>{{ p }}</li>{% endfor %}</ul>
+    <ul>{% for text, link in key_points %}<li>{% if link %}<a href="{{ link }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}</li>{% endfor %}</ul>
     <p class="reason"><b>为什么推荐</b> {{ l2.why_for_you }}</p>
     <p class="meta">预计 {{ l2.est_minutes }} 分钟</p>
     {% if refresh_first %}<p class="refresh"><b>建议先回炉：</b>{{ refresh_first | join("、") }}</p>{% endif %}

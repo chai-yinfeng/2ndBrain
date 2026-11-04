@@ -69,3 +69,16 @@ class ProfileProposal(BaseModel):
     summary: str = ""
     mastery_changes: list[MasteryChange] = Field(default_factory=list)
     section_edits: list[SectionEdit] = Field(default_factory=list)
+
+
+# ---------- M5：长内容 map-reduce ----------
+
+
+class ChunkPoint(BaseModel):
+    t: str | None = None  # 时间戳 mm:ss / h:mm:ss（视频）；没有则为空
+    text: str
+
+
+class ChunkNotes(BaseModel):
+    summary: str
+    points: list[ChunkPoint] = Field(default_factory=list)

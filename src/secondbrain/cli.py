@@ -158,13 +158,17 @@ def fetch(
         name = result.source_id.ljust(width)
         if result.status == "ok":
             line = f"{OK} {name}  新增 {result.added} / 跳过重复 {result.duplicates}"
+            if result.backfilled:
+                line += f"（其中回补池 {result.backfilled}）"
             if result.extract_failed:
-                line += f"（正文提取失败 {result.extract_failed}，已用摘要代替）"
+                line += f"（正文 / 字幕提取失败 {result.extract_failed}）"
         elif result.status == "failed":
             line = f"{FAIL} {name}  失败：{result.message}"
         else:
             line = f"- {name}  跳过：{result.message}"
         typer.echo(line)
+        for note in result.notes:
+            typer.echo(f"    {WARN} {note}")
 
     conn = db.connect()
     try:
@@ -292,6 +296,11 @@ def run(
     r = report
     typer.echo(f"L1：送入 {r.l1_selected} 条，完成 {r.l1_assessed} 条，失败 {r.l1_failed} 条")
     typer.echo(f"L2：选中 {r.l2_selected} 条，完成 {r.l2_assessed} 条，失败 {r.l2_failed} 条")
+    if r.backfill_screened or r.backfill_picked:
+        typer.echo(
+            f"回补：粗筛 {r.backfill_screened} 条，选中 {r.backfill_picked} 条，"
+            f"放入温故 {r.backfill_placed} 条"
+        )
     for error in report.errors:
         typer.echo(f"  {FAIL} {error}")
     typer.echo(f"本次 LLM 调用 {report.calls} 次，估算费用 ${report.cost_usd:.4f}")
@@ -315,6 +324,10 @@ def _flat(text: str) -> str:
 def _lane_line(position: int, row, l1: dict, l2: dict | None) -> list[str]:
     deep = " · 深读" if row["is_deep_read"] else ""
     deferred = f" · 顺延自 {row['deferred_from']}" if row["deferred_from"] else ""
+    if row["extract_method"] == "no_transcript":
+        deep += " · 无字幕"
+    if row["is_backfill"]:
+        deep += " · 经典回补"
     lines = [
         f"{position}. {_flat(row['title'])}",
         f"   {row['source_id']} · {row['est_minutes']} 分钟{deep}{deferred}",
@@ -606,3 +619,56 @@ def sources_tune(
     for source_id in missing:
         typer.echo(f"{FAIL} {source_id}：在 {target.name} 中找不到 trust 行，未修改")
     typer.echo(f"{OK} 已更新 {target}：{len(changes) - len(missing)} 个信源")
+
+
+@app.command()
+def deep(
+    item_id: int = typer.Argument(..., help="条目 id（见 sb items list 或 Web 详情页）"),
+    force: bool = typer.Option(False, "--force", help="已有精读结果时仍重新精读"),
+) -> None:
+    """按需精读单条：长内容自动分块 map-reduce，视频要点带时间戳链接。"""
+    from secondbrain.extract.transcript import key_point_link
+    from secondbrain.pipeline.run import deep_one
+
+    config.load_env()
+    settings, fs, _ = _load_pipeline_settings()
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, item_id)
+        if row is None:
+            typer.echo(f"{FAIL} 条目不存在：{item_id}", err=True)
+            raise typer.Exit(code=1)
+        existing = db.item_assessment(conn, item_id, "L2")
+        typer.echo(f"#{item_id} {row['title']}（{row['source_id']}）")
+        if existing and not force:
+            typer.echo(f"{WARN} 已有精读结果（如需重新精读加 --force）：\n")
+            _print_l2(existing, row["url"], key_point_link)
+            return
+        backend_name = config.llm_backend(settings)
+        try:
+            backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
+        except LLMError as exc:
+            typer.echo(f"{FAIL} {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        profile_file, _ = config.ensure_profile()
+        outcome = deep_one(conn, fs, backend, load_profile(profile_file), row, datetime.now(UTC))
+    finally:
+        conn.close()
+    typer.echo(f"预估 ${outcome.estimate:.4f}；实际估算费用 ${outcome.cost:.4f}")
+    if outcome.response is None:
+        typer.echo(f"{FAIL} {outcome.error}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("")
+    _print_l2(outcome.response.model_dump(), row["url"], key_point_link)
+
+
+def _print_l2(l2: dict, url: str, key_point_link) -> None:
+    typer.echo(f"TL;DR：{_flat(l2['tldr'])}")
+    typer.echo("要点：")
+    for point in l2["key_points"]:
+        text, link = key_point_link(_flat(point), url)
+        typer.echo(f"  - {text}" + (f"\n    {link}" if link else ""))
+    typer.echo(f"理由：{_flat(l2['why_for_you'])}")
+    typer.echo(f"预计 {l2['est_minutes']} 分钟")
+    if l2.get("prerequisites"):
+        typer.echo(f"前置知识：{'、'.join(l2['prerequisites'])}")

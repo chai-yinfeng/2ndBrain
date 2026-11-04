@@ -136,11 +136,11 @@ uv run sb sources tune                    # 打印信任度调整建议
 
 ## M5 — 视频讲座与长内容
 
-- [ ] 新信源类型 `youtube`（频道 RSS：`https://www.youtube.com/feeds/videos.xml?channel_id=...`）
-- [ ] `extract/transcript.py`：优先 youtube-transcript-api，退回 yt-dlp 字幕（新增依赖，说明理由）；保留时间戳
-- [ ] 长内容 L2 分块 map-reduce 总结（块大小可配），视频 key points 带时间戳链接
-- [ ] UI：未进入 L2 的条目提供"按需精读"按钮（触发单条 L2）
-- [ ] 经典回补：`backfill: true` 的信源抓取历史归档中的经典文章，进入"温故 / 补课"池，按每日限额慢速释放（ADR 0004）
+- [x] 新信源类型 `youtube`（频道 RSS：`https://www.youtube.com/feeds/videos.xml?channel_id=...`）
+- [x] `extract/transcript.py`：优先 youtube-transcript-api，退回 yt-dlp 字幕（新增依赖，说明理由）；保留时间戳
+- [x] 长内容 L2 分块 map-reduce 总结（块大小可配），视频 key points 带时间戳链接
+- [x] UI：未进入 L2 的条目提供"按需精读"按钮（触发单条 L2）
+- [x] 经典回补：`backfill: true` 的信源抓取历史归档中的经典文章，进入"温故 / 补课"池，按每日限额慢速释放（ADR 0004）
 
 **模块**：`sources/youtube.py`、`extract/transcript.py`、`pipeline/l2_deep.py`、`web/`
 

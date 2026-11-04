@@ -33,6 +33,7 @@ uv run sb usage --since 7d      # token 与费用
 uv run sb profile update        # 根据反馈生成 profile 修改提案，只打印 diff
 uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
 uv run sb sources tune          # 按反馈给出信源 trust 调整建议（--apply 写入 config/sources.yaml）
+uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
 ```
 
 `sb serve` 默认只监听 127.0.0.1（`--host` / `--port` 可改）。页面上的按钮（👍 / 👎 / 已读 / 稍后读 / 学了 / 需要回炉 / 已扎实）写入本地 `feedback` 表；"已读"的必读不再计入积压。
@@ -66,7 +67,7 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M2 LLM 后端 + 分层过滤 + 分级：`sb run`、`sb digest show`、`sb usage`
 - [x] M3 本地 Web UI + 反馈 + 定时运行：`sb serve`、`sb schedule`
 - [x] M4 个性化与记忆：反馈 few-shot、`sb profile update`、`sb sources tune`、`/profile`
-- [ ] M5 视频讲座与长内容
+- [x] M5 视频讲座与长内容：YouTube 字幕、map-reduce 精读、`sb deep`、经典回补
 - [ ] M6 知识 Wiki 闭环
 
 详见 [docs/progress.md](docs/progress.md)。

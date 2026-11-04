@@ -74,6 +74,10 @@ fetch:
   content_max_chars: 200000      # 入库正文的长度上限
   pdf_max_pages: 30              # PDF 只提取前 N 页
   pdf_max_bytes: 20000000        # 超过该大小的 PDF 不下载
+  transcript_interval_seconds: 3 # 两次 YouTube 字幕请求的最小间隔（避免被限流）
+  transcript_retries: 2          # 字幕请求遇到 HTTP 错误时的退避重试次数（被封禁时不重试）
+  transcript_paragraph_seconds: 30  # 字幕约每 N 秒合并为一段，段首带 [mm:ss]
+  backfill_max_per_source: 100   # backfill 信源每次 fetch 最多放入回补池的历史条目
 
 # `sb run`（M2）。
 run:
@@ -86,6 +90,7 @@ filter:
     max_age_days: 30             # 只处理该天数内发布的条目
     min_content_chars: 300       # 正文短于该长度的条目排除
     include_keywords: []         # 非空时，标题 / 摘要须至少命中一个
+    min_video_minutes: 5         # 短于该时长的视频排除（时长取自字幕；Shorts 一律排除）
     exclude_keywords:            # 标题 / 摘要命中任一即排除（不区分大小写）
       - funding round
       - raises $
@@ -98,6 +103,10 @@ filter:
   l2:
     max_input_chars: 96000       # 约 24k token
     section_max_chars: 24000     # 论文单个章节（introduction / conclusion）的上限
+    mapreduce_threshold_chars: 96000  # 待读文本超过该长度时分块 map-reduce（cheap 逐块提要 → strong 汇总）
+    chunk_chars: 12000           # 每块字符数
+    chunk_overlap_chars: 500     # 相邻块重叠
+    max_chunks: 20               # 最多处理的块数（超出部分丢弃）
   score:
     w_relevance: 0.45
     w_quality: 0.30
@@ -127,3 +136,9 @@ personalize:
   tune_min_samples: 5            # 信源有反馈的条目数少于该值时不给建议
   tune_raise_ratio: 0.7          # 正向（👍 / 学了）比例 ≥ 该值建议 trust +1
   tune_lower_ratio: 0.3          # 正向比例 ≤ 该值建议 trust −1
+
+# 经典回补（M5，ADR 0009）：backfill: true 的信源的历史条目进入回补池，
+# 每天挑少量（优先 explainer / survey、与"接触过 / 想回炉"领域相关的）经 L1 / L2 后放进温故栏。
+backfill:
+  daily_limit: 1                 # 每天最多放入温故栏的回补条目
+  screen_size: 10                # 回补池中保持多少条已粗筛的候选

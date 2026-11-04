@@ -18,8 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from secondbrain import __version__, config, db
+from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, make_backend
 from secondbrain.llm.usage import record_call
+from secondbrain.pipeline.run import deep_one
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
@@ -84,6 +86,9 @@ def _entry(row: sqlite3.Row, l1: dict, l2: dict | None, kinds: set[str], profile
         "refresh_first": weak,
         "prerequisites": [p for p in prereqs if p not in weak],
         "kinds": kinds,
+        "has_l2": l2 is not None,
+        "no_transcript": row["extract_method"] == "no_transcript",
+        "is_backfill": bool(row["is_backfill"]),
     }
 
 
@@ -156,6 +161,7 @@ def create_app() -> FastAPI:
                 "item": row,
                 "l1": l1,
                 "l2": l2,
+                "key_points": _key_points(l2, row["url"]),
                 "history": history,
                 "kinds": kinds,
                 "digests": lanes,
@@ -285,7 +291,41 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/deep", response_class=HTMLResponse)
+    def deep(request: Request, item_id: str = Form(...)) -> HTMLResponse:
+        """按需精读单条（与 sb deep 同一逻辑），返回 TL;DR 片段。"""
+        try:
+            item_key = int(item_id)
+        except ValueError as exc:
+            raise HTTPException(400, "item_id 必须是整数") from exc
+        context: dict = {"item_id": item_key, "l2": None, "error": None, "cost": 0.0}
+        with _conn() as conn:
+            row = db.item_detail(conn, item_key)
+            if row is None:
+                raise HTTPException(404, "条目不存在")
+            try:
+                settings = config.load_settings()
+                fs = config.pipeline_settings(settings)
+                config.load_env()
+                backend = make_backend(
+                    config.llm_backend(settings), fs.llm, os.environ.get("DEEPSEEK_API_KEY")
+                )
+            except (config.ConfigError, OSError, ValueError, LLMError) as exc:
+                context["error"] = str(exc)
+                return templates.TemplateResponse(request, "_deep.html", context)
+            outcome = deep_one(conn, fs, backend, _profile(), row, datetime.now(UTC))
+        context.update(cost=outcome.cost, error=outcome.error)
+        if outcome.response is not None:
+            l2 = outcome.response.model_dump()
+            context.update(l2=l2, key_points=_key_points(l2, row["url"]))
+        return templates.TemplateResponse(request, "_deep.html", context)
+
     return app
+
+
+def _key_points(l2: dict | None, url: str) -> list[tuple[str, str | None]]:
+    """要点及其时间戳链接（仅视频）。"""
+    return [key_point_link(p, url) for p in (l2 or {}).get("key_points", [])]
 
 
 def _history_dir() -> Path:

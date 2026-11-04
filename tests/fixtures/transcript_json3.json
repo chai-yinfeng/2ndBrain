@@ -1,0 +1,6 @@
+{"events": [
+  {"tStartMs": 0, "dDurationMs": 4000, "segs": [{"utf8": "Welcome to the lecture."}]},
+  {"tStartMs": 4000, "dDurationMs": 100},
+  {"tStartMs": 12000, "dDurationMs": 5000, "segs": [{"utf8": "Today we cover "}, {"utf8": "paged attention."}]},
+  {"tStartMs": 3725000, "dDurationMs": 6000, "segs": [{"utf8": "That's all, thanks."}]}
+]}

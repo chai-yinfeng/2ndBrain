@@ -149,10 +149,11 @@ def test_failures_are_isolated_and_skips_make_no_requests(conn, make_client):
     assert by_id["scrape"].status == "skipped"
     assert "待支持" in by_id["scrape"].message
     assert by_id["off"].status == "skipped"
-    assert by_id["yt"].status == "skipped"
+    # M5 起 youtube 信源会正常抓取（这里的地址不存在 → 失败，且不影响其他信源）
+    assert by_id["yt"].status == "failed"
     assert (by_id["blog"].status, by_id["blog"].added) == ("ok", 2)
     hosts = {r.url.host for r in router.requests}
-    assert not hosts & {"s.example.com", "off.example.com", "youtube.example.com"}
+    assert not hosts & {"s.example.com", "off.example.com"}
 
 
 def test_retries_transient_errors(conn, make_client):
