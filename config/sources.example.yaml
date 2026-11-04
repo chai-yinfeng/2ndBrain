@@ -1,37 +1,450 @@
-# 信源清单示例。复制为 config/sources.yaml 后修改。
-# 完整的预置清单在 M1 补充；这里只给出 schema 与少量示例。
+# 信源清单（种子）。复制为 config/sources.yaml 后按需修改。
+# URL 标注 "# TODO verify" 的尚未实测，由 M1 `sb fetch` 确认；未标注的也只是按已知信息填写。
 #
 # 每个条目字段：
-#   id:           唯一标识（小写、短横线）
-#   type:         rss | arxiv | hf_papers（M5 起支持 youtube）
-#   url:          rss / hf_papers 使用的地址
-#   query:        arxiv 使用的检索式（分类 + 关键词）
-#   trust:        1–5，信源可信度，参与排序加权
-#   tags:         标签列表
-#   max_age_days: 只采集该天数内发布的内容
-#   enabled:      是否启用
+#   id:            唯一标识（小写、短横线）
+#   type:          rss | arxiv | hf_papers | youtube（youtube 在 M5 实现）
+#   url:           rss / hf_papers / youtube 使用的地址
+#   query:         arxiv 使用的检索式（分类 + 关键词）
+#   trust:         1–5，信源可信度，参与排序加权
+#                  建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
+#   role:          core | expansion（expansion 只进入"意外"栏候选池），默认 core
+#   tags:          标签列表
+#   max_age_days:  只采集该天数内发布的内容
+#   enabled:       是否启用
+#   backfill:      是否回补历史归档中的经典文章（默认 false；M5 实现，ADR 0004）
+#   needs_scraper: 站点没有可用 RSS，需要页面抓取支持（默认 false；M1 记录为待支持，不阻塞）
 
 sources:
-  - id: simon-willison
+  # ---------- core / 推理 infra ----------
+  - id: vllm-blog
     type: rss
-    url: https://simonwillison.net/atom/everything/
-    trust: 4
-    tags: [llm, tools]
-    max_age_days: 7
+    url: https://blog.vllm.ai/feed.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [inference, serving]
+    max_age_days: 30
+    enabled: true
+
+  - id: lmsys-sglang-blog
+    type: rss
+    url: https://lmsys.org/rss.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [inference, serving, sglang]
+    max_age_days: 30
+    enabled: true
+
+  - id: pytorch-blog
+    type: rss
+    url: https://pytorch.org/feed/  # TODO verify
+    trust: 5
+    role: core
+    tags: [pytorch, infra]
+    max_age_days: 30
+    enabled: true
+
+  - id: horace-he
+    type: rss
+    url: https://www.thonking.ai/feed  # TODO verify
+    trust: 5
+    role: core
+    tags: [gpu, performance, compilers]
+    max_age_days: 60
+    enabled: true
+
+  - id: tri-dao
+    type: rss
+    url: https://tridao.me/feed.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [attention, kernels]
+    max_age_days: 60
+    enabled: true
+
+  - id: hazy-research
+    type: rss
+    url: https://hazyresearch.stanford.edu/blog  # TODO verify（可能无 RSS）
+    trust: 5
+    role: core
+    tags: [systems, kernels, research]
+    max_age_days: 60
+    enabled: true
+    needs_scraper: true
+
+  - id: tim-dettmers
+    type: rss
+    url: https://timdettmers.com/feed/
+    trust: 5
+    role: core
+    tags: [quantization, gpu]
+    max_age_days: 90
+    enabled: true
+
+  - id: chips-and-cheese
+    type: rss
+    url: https://chipsandcheese.com/feed/
+    trust: 5
+    role: core
+    tags: [hardware, microarchitecture, gpu]
+    max_age_days: 30
+    enabled: true
+
+  # ---------- core / 分布式系统 ----------
+  - id: marc-brooker
+    type: rss
+    url: https://brooker.co.za/blog/rss.xml
+    trust: 5
+    role: core
+    tags: [distributed-systems]
+    max_age_days: 60
+    enabled: true
+
+  - id: murat-demirbas
+    type: rss
+    url: https://muratbuffalo.blogspot.com/feeds/posts/default  # TODO verify
+    trust: 5
+    role: core
+    tags: [distributed-systems, consensus]
+    max_age_days: 30
+    enabled: true
+
+  - id: aphyr-jepsen
+    type: rss
+    url: https://aphyr.com/posts.atom  # TODO verify
+    trust: 5
+    role: core
+    tags: [distributed-systems, testing, consistency]
+    max_age_days: 90
+    enabled: true
+
+  - id: martin-kleppmann
+    type: rss
+    url: https://martin.kleppmann.com/feed.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [distributed-systems, crdt]
+    max_age_days: 90
+    enabled: true
+
+  # ---------- core / LLM 与研究 ----------
+  - id: karpathy-github
+    type: rss
+    url: https://karpathy.github.io/feed.xml
+    trust: 5
+    role: core
+    tags: [llm, deep-learning]
+    max_age_days: 90
+    enabled: true
+    backfill: false  # 经典博客，M5 实现后可改为 true
+
+  - id: karpathy-bearblog
+    type: rss
+    url: https://karpathy.bearblog.dev/feed/  # TODO verify
+    trust: 5
+    role: core
+    tags: [llm]
+    max_age_days: 90
     enabled: true
 
   - id: lilian-weng
     type: rss
     url: https://lilianweng.github.io/index.xml
     trust: 5
-    tags: [ml, research]
+    role: core
+    tags: [llm, research, survey]
+    max_age_days: 90
+    enabled: true
+    backfill: false  # 经典综述，M5 实现后可改为 true
+
+  - id: sebastian-raschka
+    type: rss
+    url: https://magazine.sebastianraschka.com/feed
+    trust: 5
+    role: core
+    tags: [llm, research]
     max_age_days: 30
+    enabled: true
+
+  - id: chip-huyen
+    type: rss
+    url: https://huyenchip.com/feed.xml
+    trust: 5
+    role: core
+    tags: [ml-systems, llm]
+    max_age_days: 90
+    enabled: true
+
+  - id: colah
+    type: rss
+    url: https://colah.github.io/rss.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [deep-learning, explainer]
+    max_age_days: 365
+    enabled: true
+    backfill: false  # 经典讲解，M5 实现后可改为 true
+
+  - id: interconnects
+    type: rss
+    url: https://www.interconnects.ai/feed
+    trust: 5
+    role: core
+    tags: [llm, post-training, rl]
+    max_age_days: 14
+    enabled: true
+
+  - id: hf-blog
+    type: rss
+    url: https://huggingface.co/blog/feed.xml
+    trust: 4
+    role: core
+    tags: [llm, open-source]
+    max_age_days: 14
+    enabled: true
+
+  # ---------- core / harness ----------
+  - id: anthropic-engineering
+    type: rss
+    url: https://www.anthropic.com/engineering
+    trust: 4
+    role: core
+    tags: [harness, agents]
+    max_age_days: 60
+    enabled: true
+    needs_scraper: true
+
+  - id: simon-willison
+    type: rss
+    url: https://simonwillison.net/atom/everything/
+    trust: 5
+    role: core
+    tags: [llm, tools, harness]
+    max_age_days: 7
+    enabled: true
+
+  - id: hamel-husain
+    type: rss
+    url: https://hamel.dev/index.xml  # TODO verify
+    trust: 5
+    role: core
+    tags: [evals, harness]
+    max_age_days: 60
+    enabled: true
+
+  - id: eugene-yan
+    type: rss
+    url: https://eugeneyan.com/rss/  # TODO verify
+    trust: 5
+    role: core
+    tags: [evals, ml-systems, harness]
+    max_age_days: 60
+    enabled: true
+
+  # ---------- core / 实验室官方 ----------
+  - id: openai-news
+    type: rss
+    url: https://openai.com/news/rss.xml  # TODO verify
+    trust: 4
+    role: core
+    tags: [lab]
+    max_age_days: 14
+    enabled: true
+
+  - id: anthropic-news
+    type: rss
+    url: https://www.anthropic.com/news
+    trust: 4
+    role: core
+    tags: [lab]
+    max_age_days: 14
+    enabled: true
+    needs_scraper: true
+
+  - id: google-deepmind
+    type: rss
+    url: https://deepmind.google/blog/rss.xml  # TODO verify
+    trust: 4
+    role: core
+    tags: [lab]
+    max_age_days: 14
+    enabled: true
+
+  - id: meta-ai
+    type: rss
+    url: https://ai.meta.com/blog/
+    trust: 4
+    role: core
+    tags: [lab]
+    max_age_days: 14
+    enabled: true
+    needs_scraper: true
+
+  - id: qwen-blog
+    type: rss
+    url: https://qwenlm.github.io/blog/index.xml  # TODO verify
+    trust: 4
+    role: core
+    tags: [lab, open-weights]
+    max_age_days: 30
+    enabled: true
+
+  - id: deepseek-news
+    type: rss
+    url: https://api-docs.deepseek.com/news/  # TODO verify（可能无 RSS）
+    trust: 4
+    role: core
+    tags: [lab, open-weights]
+    max_age_days: 30
+    enabled: true
+    needs_scraper: true
+
+  # ---------- core / 论文 ----------
+  - id: hf-daily-papers
+    type: hf_papers
+    url: https://huggingface.co/api/daily_papers  # TODO verify
+    trust: 4
+    role: core
+    tags: [paper]
+    max_age_days: 3
     enabled: true
 
   - id: arxiv-cs-cl
     type: arxiv
-    query: "cat:cs.CL AND (abs:agent OR abs:reasoning)"
-    trust: 3
+    query: 'cat:cs.CL AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:"speculative decoding" OR abs:quantization OR abs:attention OR abs:agent)'
+    trust: 4
+    role: core
     tags: [paper, nlp]
     max_age_days: 3
     enabled: true
+
+  - id: arxiv-cs-lg
+    type: arxiv
+    query: 'cat:cs.LG AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:"speculative decoding" OR abs:quantization OR abs:parallelism OR abs:attention)'
+    trust: 4
+    role: core
+    tags: [paper, ml]
+    max_age_days: 3
+    enabled: true
+
+  - id: arxiv-cs-dc
+    type: arxiv
+    query: 'cat:cs.DC AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:parallelism OR abs:LLM)'
+    trust: 4
+    role: core
+    tags: [paper, distributed-systems]
+    max_age_days: 3
+    enabled: true
+
+  # ---------- core / newsletter ----------
+  - id: import-ai
+    type: rss
+    url: https://importai.substack.com/feed  # TODO verify
+    trust: 3
+    role: core
+    tags: [newsletter]
+    max_age_days: 14
+    enabled: true
+
+  - id: latent-space
+    type: rss
+    url: https://www.latent.space/feed
+    trust: 3
+    role: core
+    tags: [newsletter, harness]
+    max_age_days: 14
+    enabled: true
+
+  # ---------- expansion / 工程哲学与理性思考 ----------
+  - id: lesswrong-curated
+    type: rss
+    url: https://www.lesswrong.com/feed.xml?view=curated-rss  # TODO verify
+    trust: 3
+    role: expansion
+    tags: [rationality]
+    max_age_days: 14
+    enabled: true
+
+  - id: alignment-forum
+    type: rss
+    url: https://www.alignmentforum.org/feed.xml?view=curated-rss  # TODO verify
+    trust: 3
+    role: expansion
+    tags: [alignment]
+    max_age_days: 14
+    enabled: true
+
+  - id: gwern
+    type: rss
+    url: https://gwern.substack.com/feed  # TODO verify
+    trust: 3
+    role: expansion
+    tags: [essays]
+    max_age_days: 60
+    enabled: true
+
+  - id: dan-luu
+    type: rss
+    url: https://danluu.com/atom.xml
+    trust: 3
+    role: expansion
+    tags: [engineering, essays]
+    max_age_days: 90
+    enabled: true
+
+  - id: hillel-wayne
+    type: rss
+    url: https://www.hillelwayne.com/index.xml  # TODO verify
+    trust: 3
+    role: expansion
+    tags: [formal-methods, engineering]
+    max_age_days: 60
+    enabled: true
+
+  # ---------- 视频（M5 才启用）----------
+  # 频道 RSS：https://www.youtube.com/feeds/videos.xml?channel_id=<id>；channel_id 待 M5 确认。
+  - id: karpathy-youtube
+    type: youtube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXUPKJO5MZQN11PqgIvyuvQ  # TODO verify
+    trust: 5
+    role: core
+    tags: [video, llm]
+    max_age_days: 90
+    enabled: false
+
+  - id: stanford-online
+    # CS25（Transformers United）、CS336（Language Modeling from Scratch）等课程
+    type: youtube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCBa5G_ESCn8Yd4vw5U-gIcg  # TODO verify
+    trust: 4
+    role: core
+    tags: [video, course]
+    max_age_days: 30
+    enabled: false
+
+  - id: gpu-mode
+    type: youtube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=TODO  # TODO verify
+    trust: 5
+    role: core
+    tags: [video, gpu, kernels]
+    max_age_days: 30
+    enabled: false
+
+  - id: dwarkesh-podcast
+    type: youtube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=TODO  # TODO verify
+    trust: 3
+    role: core
+    tags: [video, podcast]
+    max_age_days: 30
+    enabled: false
+
+  - id: adam-neely
+    type: youtube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UCnkp4xDOwqqJD7sSM3xdUiQ  # TODO verify
+    trust: 3
+    role: expansion
+    tags: [video, music-theory]
+    max_age_days: 60
+    enabled: false

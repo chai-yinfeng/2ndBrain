@@ -22,13 +22,21 @@ pricing:
     input_cache_miss: 1.32
     output: 3.96
 
-# 每日 digest 各层级的条目上限（允许为空）。
-tiers:
+# 每日时间预算（分钟）：分级的主约束（ADR 0004）。所选条目总 est_minutes 不超过它。
+daily_budget_minutes: 105
+
+# 各 lane 的条目上限（时间预算之外的上限；允许为空）。
+lanes:
   must_read: 3
   worth_it: 10
+  refresher: 2      # 温故：讲得好的 explainer / survey 或到期复习概念，不占 must_read 名额
+  serendipity: 1    # 意外：高质量但与 profile 相关性较低，或来自 role: expansion 信源
 
-# "意外"名额：高质量但与 profile 相关性较低的条目。
-serendipity_slots: 1
+# 单条 est_minutes 超过 daily_budget_minutes × deep_read_ratio 时标记"深读"，可顺延。
+deep_read_ratio: 0.6
+
+# 未读 must_read 积压超过该天数后降级到 fyi。
+backlog_max_days: 3
 
 # 输出语言：中文，术语和原文标题保留英文。
 output_language: zh
