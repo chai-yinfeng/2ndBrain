@@ -138,7 +138,9 @@ def tier(
     - 顺延过的深读条目最先考虑；超过 backlog_max_days 仍未排上的不再顺延，降为 fyi。
     - 单条 est_minutes > 预算 × deep_read_ratio 为"深读"；深读条目放不进剩余预算时标记 deferred。
     - 非深读条目放不进预算时落到 fyi。lane 允许为空。
-    - already_counts / already_minutes：当天先前 run 已占用的名额与时间。
+    - already_counts / already_minutes：当天先前 run 已占用的名额与时间（同一天多次 run 共享预算）。
+    - lane_budget_reserve（ADR 0007）：温故 / 意外栏各自保留一段预算，其他 lane 不能占用；
+      该栏没有合格候选（或名额已满）时不保留；该栏分配结束后，未用完的保留额度释放回总预算。
     """
     th = fs.thresholds
     budget = fs.daily_budget_minutes
@@ -153,12 +155,26 @@ def tier(
             _days_between(c.deferred_from, today) > fs.backlog_max_days
         )
 
+    # 仍在保留中的额度：lane → 分钟
+    reserved = {
+        lane: minutes
+        for lane, minutes in fs.lane_budget_reserve.items()
+        if minutes > 0
+        and lane in counts
+        and counts[lane] < caps[lane]
+        and any(lane in eligible_lanes(c, th) and not expired(c) for c in candidates)
+    }
+
+    def available(lane: str) -> int:
+        """该 lane 可用的预算：总剩余减去其他 lane 仍在保留的额度。"""
+        return left - sum(m for other, m in reserved.items() if other != lane)
+
     def try_place(c: Candidate, lane: str) -> bool:
         nonlocal left
         if counts[lane] >= caps[lane]:
             return False
         deep = c.est_minutes > deep_limit
-        if c.est_minutes <= left:
+        if c.est_minutes <= available(lane):
             counts[lane] += 1
             left -= c.est_minutes
             placed[c.item_id] = Placement(
@@ -188,6 +204,7 @@ def tier(
             if counts[lane] >= caps[lane]:
                 break
             try_place(c, lane)
+        reserved.pop(lane, None)  # 该栏分配结束，释放未用完的保留额度
     # 3) 剩下的进 fyi / archived
     rest = [c for c in by_score if c.item_id not in placed]
     ranks = {"fyi": 0, "archived": 0}

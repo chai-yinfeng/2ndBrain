@@ -5,6 +5,8 @@
 ## 待决
 
 - **`needs_scraper` 信源的页面抓取支持**：6 个信源（LMSYS、Hazy Research、Anthropic engineering、Anthropic news、Meta AI、DeepSeek）没有可用 RSS，目前跳过。推荐默认：放入 roadmap Backlog，不进 M1–M6。（已加入 Backlog，待用户确认）
+- **默认 data 目录是否重置（M2 遗留）**：推荐默认：不重置，保留已有数据，不做覆盖。（已按默认处理）
+- **温故 / 意外是否预留预算（M2 遗留）**：推荐默认：预留。tiering 新增 `lane_budget_reserve`（默认 refresher 15 分钟、serendipity 10 分钟）；该栏没有合格候选时释放回总预算，must_read 不能占用（ADR 0007）。（已按默认处理）
 
 ## M0 — 仓库与骨架（2026-11-04）
 
@@ -109,3 +111,37 @@
 - 默认 data 目录中今天的 digest 来自修复前的那次 run。未做重置（需要清空 M2 的三张表并把条目状态改回 new，属于覆盖数据，等待确认）。
 - L2 占费用的约 95%；单次约 $0.22（高峰），非高峰约减半。
 - 时间预算常被 1–2 篇长文占满，此时温故 / 意外 / 值得读可能为空，这是"预算为主约束"的预期行为；若希望这些 lane 有保底，需要另行决定是否为其预留预算。
+
+## M3 — 本地 Web UI + 反馈采集 + 定时运行（2026-11-04，分支 `m3-web`）
+
+**做了什么**
+- 先处理 M2 遗留的两个决策（见"待决"）：默认 data 不重置；tiering 新增 `lane_budget_reserve`（ADR 0007，默认 refresher 15 / serendipity 10 分钟），补了 5 个单测。design.md 注明同一天多次 `sb run` 共享当日预算。
+- 新增依赖：fastapi、uvicorn、jinja2、python-multipart（表单解析）。
+- `web/`：
+  - `app.py`：`/`、`/item/{id}`、`/history`、`POST /feedback`。
+  - `templates/`：服务端渲染的中文页面。
+  - `static/`：vendored 的 htmx 2.0.4 和 `style.css`，支持浅色 / 深色模式。
+- `db.py`：
+  - 迁移 v3：新增 `feedback` 表与 `items.read_at`。
+  - 新增反馈读写、详情、历史等查询。
+  - 积压改为只统计未读的必读。
+- `profile/loader.py`：新增 `weak_prerequisites`，用于"建议先回炉"提示。
+- `schedule.py` 与 CLI：
+  - `sb serve [--host 127.0.0.1] [--port 8000]`。
+  - `sb schedule install [--time HH:MM] [--dry-run]`、`sb schedule uninstall [--dry-run]`。默认本地 07:00，美东冬令时 = UTC 12:00、夏令时 = UTC 11:00，都在非高峰时段。
+- README：日常使用、定时运行、cron 替代方案、HTMX 版本与来源。
+- 测试：`tests/test_web.py`（TestClient、反馈校验、已读与积压、前置知识提示、定时 dry-run 与 UTC 换算），以及 `tests/test_tiering.py` 新增的预留预算单测。
+
+**验收结果**
+- `uv run pytest -q tests/test_web.py`：19 passed；`uv run pytest -q`：120 passed；`uv run ruff check .`：通过。
+- `sb serve --port 8000`（默认 data，启动时迁移到 schema v3）：
+  - 首页 `data-item-id` 计数 43（digest 51 条，其中 8 条归档不展示）。
+  - `POST /feedback item_id=1&kind=up` 返回 200。
+  - `data-budget="102/105"`。
+  - `/history`、`/item/1` 返回 200；非法 kind 返回 400；不存在的 item 返回 404。
+- 验收写入的那条反馈（feedback.id = 1，item 1，kind up）已从默认 data 中删除，feedback 表恢复为空。
+- `sb schedule install --dry-run`：打印 plist 与将执行的 `launchctl load -w ...`；没有写入 `~/Library/LaunchAgents`，也没有调用 launchctl。
+
+**遗留问题**
+- 非 dry-run 的 install / uninstall（真正写 plist、调用 launchctl）按要求没有执行过。
+- 浏览器实际点击验证待主会话进行。

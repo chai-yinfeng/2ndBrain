@@ -192,3 +192,65 @@ def test_select_for_l2_reserves_refresher_and_serendipity():
     assert len(chosen) == 4
     assert 100 in chosen and 200 in chosen
     assert chosen[2:] == [0, 1]
+
+
+# ---------- lane_budget_reserve（ADR 0007） ----------
+
+
+def _musts(n: int, minutes: int) -> list[Candidate]:
+    return [cand(i, score=9.5 - i * 0.01, est_minutes=minutes) for i in range(n)]
+
+
+def _refresher(item_id: int, minutes: int = 10) -> Candidate:
+    return cand(
+        item_id,
+        content_type="explainer",
+        refresher_value=9,
+        novelty=2,
+        score=6.5,
+        est_minutes=minutes,
+    )
+
+
+def _serendipity(item_id: int, minutes: int = 8) -> Candidate:
+    return cand(item_id, role="expansion", quality=9, relevance=2, score=5, est_minutes=minutes)
+
+
+def test_reserve_keeps_budget_for_refresher_and_serendipity():
+    placements = tier(_musts(3, 30) + [_refresher(100), _serendipity(200)], FS, TODAY)
+    lanes = lanes_of(placements)
+    # 105 − 15 − 10 = 80 分钟可用于必读：只放得下 2 条 30 分钟的
+    assert sum(lane == "must_read" for lane in lanes.values()) == 2
+    assert lanes[100] == "refresher"
+    assert lanes[200] == "serendipity"
+    assert top_minutes(placements) <= FS.daily_budget_minutes
+
+
+def test_must_read_never_uses_reserved_minutes():
+    placements = tier(_musts(5, 20) + [_refresher(100, 15), _serendipity(200, 10)], FS, TODAY)
+    must_minutes = sum(p.est_minutes for p in placements if p.lane == "must_read")
+    assert must_minutes <= FS.daily_budget_minutes - 15 - 10
+
+
+def test_reserve_is_released_without_candidates():
+    placements = tier(_musts(3, 30), FS, TODAY)
+    assert sum(p.lane == "must_read" for p in placements) == 3  # 90 ≤ 105，保留额度已释放
+
+
+def test_unused_reserve_flows_to_worth_it():
+    # 温故条目只用掉 5 分钟，剩余的保留额度在温故栏分配完后释放给值得读
+    worth = [cand(i, score=6.5, relevance=5, est_minutes=20) for i in range(10, 15)]
+    placements = tier(_musts(2, 30) + [_refresher(100, 5)] + worth, FS, TODAY)
+    lanes = lanes_of(placements)
+    assert lanes[100] == "refresher"
+    worth_minutes = sum(p.est_minutes for p in placements if p.lane == "worth_it")
+    assert worth_minutes == 40  # 105 − 60 − 5 = 40，正好两条
+    assert top_minutes(placements) <= FS.daily_budget_minutes
+
+
+def test_reserve_can_be_disabled():
+    fs = FilterSettings.model_validate({"lane_budget_reserve": {"refresher": 0, "serendipity": 0}})
+    placements = tier(_musts(3, 30) + [_refresher(100, 20)], fs, TODAY)
+    lanes = lanes_of(placements)
+    assert sum(lane == "must_read" for lane in lanes.values()) == 3
+    assert lanes[100] == "fyi"  # 90 + 20 > 105

@@ -100,3 +100,27 @@ def render_mastery(profile: Profile) -> str:
         priority = f"；优先级 {d.priority}" if d.priority else ""
         lines.append(f"- {d.domain}：{mastery}{priority}")
     return "\n".join(lines)
+
+
+# 需要回炉的掌握度（"扎实"之外的都算）
+WEAK_LEVELS = ("陌生", "接触过", "想回炉")
+
+
+def _core_term(text: str) -> str:
+    """ "MLA (Multi-head Latent Attention)" → "mla"：去掉括号内的补充说明。"""
+    for bracket in ("(", "（"):
+        text = text.split(bracket, 1)[0]
+    return text.strip().lower()
+
+
+def weak_prerequisites(profile: Profile, prerequisites: list[str]) -> list[str]:
+    """前置概念中，出现在用户掌握度不扎实的领域（领域名或说明）里的那些。"""
+    weak_text = " ".join(
+        f"{d.domain} {d.note}".lower() for d in profile.domains if d.mastery in WEAK_LEVELS
+    )
+    result = []
+    for prereq in prerequisites:
+        core = _core_term(prereq)
+        if len(core) >= 3 and core in weak_text:
+            result.append(prereq)
+    return result
