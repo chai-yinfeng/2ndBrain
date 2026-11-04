@@ -3,6 +3,12 @@
 {% block content %}
 <h1>Wiki <small class="meta">{{ count }} 个页面</small></h1>
 <section class="entry">
+  <h2>体检</h2>
+  <button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查 wiki</button>
+  <span class="meta">检查断链、缺失页面、孤立页、frontmatter 缺字段、index 不一致；只报告不修改，不调用 LLM，一秒内完成。</span>
+  <div id="lint-result"></div>
+</section>
+<section class="entry">
   <h2>今日到期复习 <small>{{ due | length }}</small></h2>
   {% for d in due %}
   <div class="fyi" data-concept="{{ d.page.slug }}">

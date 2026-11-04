@@ -1,0 +1,7 @@
+{# POST /wiki/lint 返回的片段 #}
+<div id="lint-result">
+  {% for title, lines in sections %}
+  <h3>{{ title }} <small class="meta">{{ lines | length }}</small></h3>
+  {% if lines %}<ul>{% for line in lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+  {% endfor %}
+</div>

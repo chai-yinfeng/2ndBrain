@@ -57,6 +57,27 @@ def lint(wiki: Wiki) -> LintReport:
     return report
 
 
+def report_sections(report: LintReport) -> list[tuple[str, list[str]]]:
+    """(标题, 各行) 列表，供 CLI 与 Web 展示。"""
+    return [
+        (
+            "断链（指向不存在的页面）",
+            [f"[[{s}]] → {', '.join(t)}" for s, t in report.broken_links.items()],
+        ),
+        (
+            "缺失页面（被链接但不存在）",
+            [f"[[{s}]]（{n} 处）" for s, n in report.missing_pages.items()],
+        ),
+        ("孤立页（没有其他页面链接到它）", [f"[[{s}]]" for s in report.orphans]),
+        (
+            "frontmatter 缺字段",
+            [f"[[{s}]]：{', '.join(f)}" for s, f in report.missing_fields.items()],
+        ),
+        ("不在 index 中的页面", [f"[[{s}]]" for s in report.index_missing]),
+        ("index 中指向不存在页面的条目", [f"[[{s}]]" for s in report.index_dangling]),
+    ]
+
+
 def llm_contradictions(wiki: Wiki, backend: LLMBackend, max_chars: int = 12_000) -> LintFindings:
     """把各页摘要与开头交给 cheap 模型，找可能相互矛盾的说法。"""
     pages, total = [], 0

@@ -84,3 +84,7 @@ pre.diff { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px
 .entry.concept { border-left: 3px solid var(--accent); }
 .fb-group { color: var(--muted); font-size: 12px; margin-left: 4px; }
 .fb-group:first-of-type { margin-left: 0; }
+pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; white-space: pre-wrap; max-height: 320px; }
+.ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+.ingest .task { flex: 1 1 100%; }

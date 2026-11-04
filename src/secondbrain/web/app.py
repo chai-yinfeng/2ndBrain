@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import markdown
@@ -19,16 +19,20 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from secondbrain import __version__, config, db
+from secondbrain import __version__, config, db, ops
 from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, make_backend
-from secondbrain.llm.usage import record_call
+from secondbrain.llm.usage import is_peak, record_call, summarize
 from secondbrain.models import FilterSettings
 from secondbrain.pipeline.run import deep_one
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
+from secondbrain.profile.tune import source_stats
+from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
+from secondbrain.wiki.ingest import pending_items
+from secondbrain.wiki.lint import lint, report_sections
 from secondbrain.wiki.loop import wiki_refresh_link
 from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
 from secondbrain.wiki.store import WIKILINK_RE, Wiki, open_wiki, slugify_safe
@@ -144,9 +148,43 @@ def _entry(
     }
 
 
+def _run_task(task: Task) -> dict:
+    report = ops.run_once(task.log)
+    if report.aborted:
+        raise ops.OpsError(report.aborted)
+    return {"cost": report.cost_usd}
+
+
+def _ingest_task(task: Task) -> dict:
+    with _conn() as conn:
+        ids = pending_items(conn)
+    task.log(f"待编进 wiki：{len(ids)} 条")
+    s = ops.ingest_items(ids, task.log)
+    return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
+
+
+# 后台任务：kind → (标题, 函数)
+TASKS = {
+    "run": ("立即运行（与 sb run 相同）", _run_task),
+    "wiki_ingest": ("编进 wiki", _ingest_task),
+}
+
+
+def _usage_rows(conn: sqlite3.Connection, since: datetime) -> tuple[list[sqlite3.Row], float]:
+    rows = summarize(conn, since)
+    return rows, sum(r["cost_usd"] for r in rows)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Second Brain", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    tasks = TaskRegistry()
+    app.state.tasks = tasks
+
+    def task_fragment(request: Request, kind: str, message: str | None = None) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request, "_task.html", {"kind": kind, "task": tasks.get(kind), "message": message}
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -167,6 +205,7 @@ def create_app() -> FastAPI:
             states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
             later = len(db.items_in_state(conn, "later"))
+            to_ingest = len(pending_items(conn))
         lanes: dict[str, list[dict]] = {}
         for row in rows:
             entry = _entry(
@@ -191,6 +230,8 @@ def create_app() -> FastAPI:
                 "budget": _budget(),
                 "backlog": backlog,
                 "later": later,
+                "to_ingest": to_ingest,
+                "ingest_task": tasks.get("wiki_ingest"),
                 "archived": len(lanes.get("archived", [])),
                 "concepts": concept_rows,
                 "grades": GRADES,
@@ -394,6 +435,82 @@ def create_app() -> FastAPI:
             context.update(l2=l2, key_points=_key_points(l2, row["url"]))
         return templates.TemplateResponse(request, "_deep.html", context)
 
+    # ---------- 后台任务 ----------
+
+    @app.post("/tasks/{kind}", response_class=HTMLResponse)
+    def task_start(request: Request, kind: str) -> HTMLResponse:
+        if kind not in TASKS:
+            raise HTTPException(404, "未知的任务")
+        if kind == "run" and ops.is_running():
+            return task_fragment(request, kind, "已有 sb run 在运行（CLI 或定时任务），请稍后再试")
+        title, fn = TASKS[kind]
+        try:
+            tasks.start(kind, title, fn)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
+    @app.get("/tasks/{kind}", response_class=HTMLResponse)
+    def task_status(request: Request, kind: str) -> HTMLResponse:
+        if kind not in TASKS:
+            raise HTTPException(404, "未知的任务")
+        return task_fragment(request, kind)
+
+    # ---------- 运维 ----------
+
+    @app.get("/ops", response_class=HTMLResponse)
+    def ops_page(request: Request) -> HTMLResponse:
+        fs = _settings()
+        now = datetime.now(UTC)
+        midnight = datetime.combine(datetime.now().date(), datetime.min.time()).astimezone()
+        try:
+            sources, sources_error = config.load_sources(), None
+        except config.ConfigError as exc:
+            sources, sources_error = [], str(exc)
+        with _conn() as conn:
+            today_rows, today_cost = _usage_rows(conn, midnight)
+            week_rows, week_cost = _usage_rows(conn, now - timedelta(days=7))
+            stats = source_stats(conn, sources, now, fs.personalize)
+        return templates.TemplateResponse(
+            request,
+            "ops.html",
+            {
+                "today_rows": today_rows,
+                "today_cost": today_cost,
+                "week_rows": week_rows,
+                "week_cost": week_cost,
+                "peak": is_peak(now, fs.pricing_schedule),
+                "multiplier": fs.pricing_schedule.off_peak_multiplier,
+                "max_cost": fs.run.max_cost_usd,
+                "running": ops.is_running(),
+                "run_task": tasks.get("run"),
+                "stats": [st for st in stats if st.samples or st.suggested],
+                "silent": sum(1 for st in stats if not (st.samples or st.suggested)),
+                "suggestions": [st for st in stats if st.suggested],
+                "pers": fs.personalize,
+                "sources_error": sources_error,
+            },
+        )
+
+    @app.post("/ops/tune", response_class=HTMLResponse)
+    def ops_tune(request: Request) -> HTMLResponse:
+        """应用信源 trust 建议（与 sb sources tune --apply 同一逻辑）。"""
+        fs = _settings()
+        lines: list[str] = []
+        try:
+            sources = config.load_sources()
+        except config.ConfigError as exc:
+            lines.append(f"✗ {exc}")
+        else:
+            with _conn() as conn:
+                stats = source_stats(conn, sources, datetime.now(UTC), fs.personalize)
+            changes = {st.source_id: st.suggested for st in stats if st.suggested}
+            if changes:
+                ops.apply_trust(changes, lines.append)
+            else:
+                lines.append("没有 trust 调整建议")
+        return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
+
     # ---------- wiki ----------
 
     @app.get("/wiki", response_class=HTMLResponse)
@@ -407,6 +524,12 @@ def create_app() -> FastAPI:
             "wiki.html",
             {"index_html": index_html, "due": due, "grades": GRADES, "count": len(wiki.pages)},
         )
+
+    @app.post("/wiki/lint", response_class=HTMLResponse)
+    def wiki_lint(request: Request) -> HTMLResponse:
+        """体检（不调用 LLM）：断链、缺失页面、孤立页、缺字段、index 不一致。"""
+        sections = report_sections(lint(_wiki()))
+        return templates.TemplateResponse(request, "_lint.html", {"sections": sections})
 
     @app.get("/wiki/page/{slug}", response_class=HTMLResponse)
     def wiki_page(request: Request, slug: str) -> HTMLResponse:
