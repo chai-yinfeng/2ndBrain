@@ -6,13 +6,16 @@ llm:
   # 可被环境变量 SB_LLM_BACKEND 覆盖。可选：deepseek | fake（离线测试）
   backend: deepseek
   base_url: https://api.deepseek.com
+  # 两级机制保留，默认都用 deepseek-flash（ADR 0014）。
+  # strong 用于 L2 精读、按需精读（sb deep）、wiki ingest、profile 修改提案；
+  # 想换回更强的模型时改为 deepseek-v4-pro（价格表中保留了它的计价）。
   models:
-    cheap: deepseek-flash      # L1 粗筛
-    strong: deepseek-v4-pro    # L2 精读
+    cheap: deepseek-flash      # L1 粗筛、长内容分块提要
+    strong: deepseek-flash     # L2 精读等（可改回 deepseek-v4-pro）
   timeout_seconds: 120
   max_retries: 3               # 网络错误 / 429 / 5xx 的退避重试次数
   concurrency: 4               # 同时进行的 LLM 调用数
-  max_tokens:                  # 推理模型的 reasoning token 也计入（ADR 0011）
+  max_tokens:                  # 推理模型（如 deepseek-v4-pro）的 reasoning token 也计入（ADR 0011）
     cheap: 4096
     strong: 8192
   max_tokens_cap: 16384        # 输出被截断（finish_reason=length）时重试翻倍的上限
@@ -24,7 +27,7 @@ pricing:
     input_cache_hit: 0.006
     input_cache_miss: 0.3
     output: 1.2
-  deepseek-v4-pro:
+  deepseek-v4-pro:               # 默认不再使用；models.strong 切回时按此计价
     input_cache_hit: 0.044
     input_cache_miss: 1.32
     output: 3.96
