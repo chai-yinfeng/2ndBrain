@@ -88,3 +88,10 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
   border-radius: 6px; padding: 8px; white-space: pre-wrap; max-height: 320px; }
 .ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
 .ingest .task { flex: 1 1 100%; }
+.sources td { vertical-align: top; }
+.sources .actions form { display: inline; }
+.source-form { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 14px; }
+.source-form label { display: flex; flex-direction: column; }
+.source-form label.wide { flex: 1 1 100%; }
+.source-form input, .source-form select { padding: 4px 6px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; }

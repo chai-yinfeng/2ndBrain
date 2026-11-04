@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}删除信源 · Second Brain{% endblock %}
+{% block content %}
+<h1>删除信源 {{ source_id }}？</h1>
+<p>将从 {{ path }} 中删除该信源（写回时注释不保留）。已入库的条目、反馈与 digest 都会保留。</p>
+<form method="post" action="/sources/{{ source_id }}/delete">
+  <input type="hidden" name="confirm" value="yes">
+  <button type="submit" class="fb">确认删除</button>
+  <a href="/sources">取消</a>
+</form>
+{% endblock %}

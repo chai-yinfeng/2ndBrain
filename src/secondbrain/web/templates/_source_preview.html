@@ -1,0 +1,15 @@
+{# POST /sources/preview 返回的片段 #}
+{% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+{% if source %}
+<p class="saved">试抓成功：解析到 {{ total }} 条，前 {{ entries | length }} 条如下{% if source.type == "sitemap" %}（sitemap 没有标题，这里显示 URL slug；正式抓取时从页面提取标题与日期）{% endif %}。</p>
+<table class="scores preview">
+  <tr><th>发布时间</th><th>标题</th></tr>
+  {% for e in entries %}
+  <tr><td>{{ e.published_at.strftime("%Y-%m-%d") if e.published_at else "未知" }}</td><td><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.title }}</a></td></tr>
+  {% else %}<tr><td colspan="2" class="empty">（没有条目）</td></tr>{% endfor %}
+</table>
+<form method="post" action="/sources/add">
+  {% for key, value in form.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+  <button type="submit" class="fb">确认保存到 config/sources.yaml</button>
+</form>
+{% endif %}

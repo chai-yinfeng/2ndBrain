@@ -113,6 +113,36 @@ def load_sources(path: Path | None = None) -> list[SourceConfig]:
     return sources
 
 
+SOURCES_HEADER = (
+    "# 个人信源配置（gitignore）。由 Web /sources 写回时注释不保留；\n"
+    "# 各字段说明见 config/sources.example.yaml。\n"
+)
+# 写回时省略取默认值的这些字段，让文件保持简短
+_OMIT_DEFAULTS = ("backfill", "needs_scraper", "use_lastmod")
+
+
+def source_to_dict(source: SourceConfig) -> dict[str, Any]:
+    data = source.model_dump(exclude_none=True)
+    for key in _OMIT_DEFAULTS:
+        if data.get(key) is False:
+            del data[key]
+    return data
+
+
+def save_sources(sources: list[SourceConfig], path: Path) -> None:
+    """校验 id 唯一后原子写入（临时文件 + rename）。PyYAML 写回不保留注释（ADR 0013）。"""
+    ids = [s.id for s in sources]
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
+    if duplicates:
+        raise ConfigError(f"信源 id 重复：{', '.join(duplicates)}")
+    body = yaml.safe_dump(
+        {"sources": [source_to_dict(s) for s in sources]}, allow_unicode=True, sort_keys=False
+    )
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(SOURCES_HEADER + body, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def fetch_settings(settings: dict[str, Any]) -> FetchSettings:
     try:
         return FetchSettings.model_validate(settings.get("fetch") or {})

@@ -127,6 +127,13 @@ MIGRATIONS: list[str] = [
         UNIQUE (date, slug)
     );
     """,
+    # v6（M7）：每个信源最近一次抓取的结果（Web /sources 展示）。
+    """
+    ALTER TABLE sources ADD COLUMN last_fetch_at TEXT;
+    ALTER TABLE sources ADD COLUMN last_fetch_status TEXT;     -- ok | failed
+    ALTER TABLE sources ADD COLUMN last_fetch_added INTEGER;
+    ALTER TABLE sources ADD COLUMN last_fetch_message TEXT;
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -203,6 +210,33 @@ def upsert_sources(conn: sqlite3.Connection, sources: list[SourceConfig]) -> Non
         ],
     )
     conn.commit()
+
+
+def record_fetch(
+    conn: sqlite3.Connection, source_id: str, status: str, added: int, message: str, ts: datetime
+) -> None:
+    conn.execute(
+        "UPDATE sources SET last_fetch_at = ?, last_fetch_status = ?, last_fetch_added = ?,"
+        " last_fetch_message = ? WHERE id = ?",
+        (format_time(ts), status, added, message or None, source_id),
+    )
+
+
+def source_overview(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """各信源：最近一次抓取结果、入库条数、当前反馈中的正（有收获）/ 负（不感兴趣 / 没价值）数。"""
+    rows = conn.execute(
+        f"""
+        SELECT s.id, s.last_fetch_at, s.last_fetch_status, s.last_fetch_added,
+               s.last_fetch_message,
+               (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id) AS items,
+               (SELECT COUNT(*) FROM ({LATEST_FEEDBACK}) f JOIN items i ON i.id = f.item_id
+                WHERE i.source_id = s.id AND f.kind = 'gained') AS positive,
+               (SELECT COUNT(*) FROM ({LATEST_FEEDBACK}) f JOIN items i ON i.id = f.item_id
+                WHERE i.source_id = s.id AND f.kind IN ('dismiss', 'worthless')) AS negative
+        FROM sources s
+        """
+    ).fetchall()
+    return {r["id"]: r for r in rows}
 
 
 def known_urls(conn: sqlite3.Connection) -> frozenset[str]:

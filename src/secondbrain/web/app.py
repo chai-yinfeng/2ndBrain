@@ -18,18 +18,21 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 
 from secondbrain import __version__, config, db, ops
 from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, make_backend
 from secondbrain.llm.usage import is_peak, record_call, summarize
-from secondbrain.models import FilterSettings
+from secondbrain.models import FetchSettings, FilterSettings, SourceConfig
+from secondbrain.net import FetchError, HttpClient
 from secondbrain.pipeline.run import deep_one
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import source_stats
+from secondbrain.sources import FETCHERS
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
 from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
@@ -161,6 +164,50 @@ def _ingest_task(task: Task) -> dict:
     task.log(f"待编进 wiki：{len(ids)} 条")
     s = ops.ingest_items(ids, task.log)
     return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
+
+
+PREVIEW_ENTRIES = 10
+SOURCE_FIELDS = ("id", "type", "url", "query", "trust", "role", "tags", "max_age_days")
+
+
+def _http_client(fs: FetchSettings) -> HttpClient:
+    """试抓用的 HTTP 客户端（测试中替换为离线 transport）。"""
+    return HttpClient(fs)
+
+
+def _fetch_settings() -> FetchSettings:
+    try:
+        return config.fetch_settings(config.load_settings())
+    except (config.ConfigError, OSError, ValueError):
+        return FetchSettings()
+
+
+def _source_from_form(form: dict[str, str]) -> SourceConfig:
+    """表单 → SourceConfig（空字段不传，tags 用逗号分隔）；不合法时抛 ValueError。"""
+    data: dict = {}
+    for key in SOURCE_FIELDS:
+        value = (form.get(key) or "").strip()
+        if value:
+            data[key] = value
+    if "tags" in data:
+        data["tags"] = [t.strip() for t in re.split(r"[,，]", data["tags"]) if t.strip()]
+    if data.get("type") == "sitemap":
+        if (form.get("url_pattern") or "").strip():
+            data["url_pattern"] = form["url_pattern"].strip()
+        data["use_lastmod"] = bool(form.get("use_lastmod"))
+    try:
+        return SourceConfig.model_validate(data)
+    except ValidationError as exc:
+        problems = "；".join(
+            f"{'.'.join(str(p) for p in e['loc']) or '配置'}：{e['msg']}" for e in exc.errors()
+        )
+        raise ValueError(problems) from exc
+
+
+def _editable_sources() -> tuple[Path, list[SourceConfig]]:
+    """config/sources.yaml（不存在时先从 example 复制）及其中的信源。"""
+    path, _ = ops.ensure_sources_file()
+    return path, config.load_sources(path)
 
 
 # 后台任务：kind → (标题, 函数)
@@ -510,6 +557,97 @@ def create_app() -> FastAPI:
             else:
                 lines.append("没有 trust 调整建议")
         return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
+
+    # ---------- 信源管理 ----------
+
+    @app.get("/sources", response_class=HTMLResponse)
+    def sources_page(request: Request, saved: str | None = None) -> HTMLResponse:
+        path, is_example = config.sources_path()
+        try:
+            sources, error = config.load_sources(path), None
+        except config.ConfigError as exc:
+            sources, error = [], str(exc)
+        with _conn() as conn:
+            overview = db.source_overview(conn)
+        return templates.TemplateResponse(
+            request,
+            "sources.html",
+            {
+                "sources": sources,
+                "overview": overview,
+                "path": path,
+                "is_example": is_example,
+                "error": error,
+                "saved": saved,
+                "types": SourceConfig.model_fields["type"].annotation.__args__,
+            },
+        )
+
+    @app.post("/sources/preview", response_class=HTMLResponse)
+    async def sources_preview(request: Request) -> HTMLResponse:
+        """试抓：只拉取并解析信源（不抓正文、不写库），列出前几条标题与日期。"""
+        form = {k: str(v) for k, v in (await request.form()).items()}
+        context: dict = {"form": form, "error": None, "entries": [], "source": None}
+        try:
+            source = _source_from_form(form)
+        except ValueError as exc:
+            context["error"] = str(exc)
+            return templates.TemplateResponse(request, "_source_preview.html", context)
+        try:
+            existing = {s.id for s in config.load_sources()}
+        except config.ConfigError:
+            existing = set()
+        if source.id in existing:
+            context["error"] = f"信源 id 已存在：{source.id}"
+            return templates.TemplateResponse(request, "_source_preview.html", context)
+        fs = _fetch_settings()
+        try:
+            with _http_client(fs) as client:
+                entries = FETCHERS[source.type](source, client, fs)
+        except FetchError as exc:
+            context["error"] = f"试抓失败：{exc}"
+            return templates.TemplateResponse(request, "_source_preview.html", context)
+        entries.sort(key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+        context.update(source=source, entries=entries[:PREVIEW_ENTRIES], total=len(entries))
+        return templates.TemplateResponse(request, "_source_preview.html", context)
+
+    @app.post("/sources/add")
+    async def sources_add(request: Request) -> RedirectResponse:
+        form = {k: str(v) for k, v in (await request.form()).items()}
+        try:
+            source = _source_from_form(form)
+            path, sources = _editable_sources()
+            if any(s.id == source.id for s in sources):
+                raise ValueError(f"信源 id 已存在：{source.id}")
+            config.save_sources([*sources, source], path)
+        except (ValueError, config.ConfigError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
+
+    @app.post("/sources/{source_id}/toggle")
+    def sources_toggle(source_id: str) -> RedirectResponse:
+        path, sources = _editable_sources()
+        target = next((s for s in sources if s.id == source_id), None)
+        if target is None:
+            raise HTTPException(404, "信源不存在")
+        target.enabled = not target.enabled
+        config.save_sources(sources, path)
+        return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
+
+    @app.post("/sources/{source_id}/delete", response_class=HTMLResponse)
+    def sources_delete(
+        request: Request, source_id: str, confirm: str | None = Form(None)
+    ) -> HTMLResponse:
+        """二次确认：没带 confirm=yes 时只显示确认页；已入库的条目保留。"""
+        path, sources = _editable_sources()
+        if not any(s.id == source_id for s in sources):
+            raise HTTPException(404, "信源不存在")
+        if confirm != "yes":
+            return templates.TemplateResponse(
+                request, "source_delete.html", {"source_id": source_id, "path": path}
+            )
+        config.save_sources([s for s in sources if s.id != source_id], path)
+        return RedirectResponse("/sources?saved=deleted", status_code=303)
 
     # ---------- wiki ----------
 
