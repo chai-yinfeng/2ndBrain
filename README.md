@@ -26,7 +26,7 @@ uv run pytest -q
 ## 当前状态
 
 - [x] M0 仓库与骨架：`sb --help`、`sb doctor`、配置示例、文档
-- [ ] M1 采集层（RSS/Atom、arXiv、HF Daily Papers）
+- [x] M1 采集层（RSS/Atom、arXiv、HF Daily Papers）：`sb sources list`、`sb fetch`、`sb items list`
 - [ ] M2 LLM 后端 + 分层过滤 + 分级
 - [ ] M3 本地 Web UI + 反馈 + 定时运行
 - [ ] M4 个性化与记忆

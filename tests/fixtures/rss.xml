@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example Infra Blog</title>
+    <link>https://blog.example.com/</link>
+    <description>Fixture feed</description>
+    <item>
+      <title>Paged   KV cache
+        explained</title>
+      <link>http://Blog.Example.com/posts/paged-kv-cache/?utm_source=rss&amp;utm_medium=feed#intro</link>
+      <dc:creator>Alice</dc:creator>
+      <pubDate>Tue, 03 Nov 2026 08:00:00 +0000</pubDate>
+      <description>&lt;p&gt;A short teaser about paged KV cache.&lt;/p&gt;</description>
+      <content:encoded><![CDATA[<p>PagedAttention stores the KV cache in fixed-size blocks, much like virtual memory pages in an operating system.</p><p>This lets the serving engine allocate memory on demand and share prefix blocks between requests, which raises batch size and throughput.</p>]]></content:encoded>
+    </item>
+    <item>
+      <title>Continuous batching in practice</title>
+      <link>https://blog.example.com/posts/continuous-batching</link>
+      <pubDate>Mon, 02 Nov 2026 10:00:00 +0000</pubDate>
+      <description>Short summary only.</description>
+    </item>
+    <item>
+      <title>An old post</title>
+      <link>https://blog.example.com/posts/old</link>
+      <pubDate>Mon, 05 Jan 2026 10:00:00 +0000</pubDate>
+      <description>This post is outside the age window.</description>
+    </item>
+  </channel>
+</rss>

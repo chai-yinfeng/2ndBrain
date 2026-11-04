@@ -40,3 +40,19 @@ backlog_max_days: 3
 
 # 输出语言：中文，术语和原文标题保留英文。
 output_language: zh
+
+# 采集（M1）。省略的键使用代码中的默认值。
+fetch:
+  user_agent: "secondbrain/0.1 (+https://github.com/chai-yinfeng/2ndBrain)"
+  timeout_seconds: 20
+  retries: 2                     # 网络错误与 429/5xx 的重试次数
+  retry_backoff_seconds: 1.0     # 指数退避基数
+  concurrency: 4                 # 同时抓取的信源数
+  per_host_interval_seconds: 1.0 # 同一 host 两次请求的最小间隔
+  host_intervals:
+    export.arxiv.org: 3.0        # arXiv API 要求的礼貌间隔
+  arxiv_max_results: 50          # 每次 arXiv API 查询返回的最大条数
+  min_feed_content_chars: 1500   # feed 自带正文达到该长度就不再抓原网页
+  content_max_chars: 200000      # 入库正文的长度上限
+  pdf_max_pages: 30              # PDF 只提取前 N 页
+  pdf_max_bytes: 20000000        # 超过该大小的 PDF 不下载
