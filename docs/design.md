@@ -24,11 +24,11 @@ flowchart LR
     MR --> W[Web UI<br/>预算进度条 · 积压 · 前置知识提示]
     RF --> W
     SE --> W
-    W --> F[Feedback<br/>👍 👎 已读 稍后读 学了<br/>需要回炉 已扎实]
+    W --> F[Feedback<br/>读之前：稍后读 不感兴趣<br/>读完后：太浅 有收获 太难 没价值]
     F --> P[Profile<br/>掌握度表 + 反馈样例]
     P --> L1
     P --> L2
-    F -- 学了 --> K[Wiki<br/>概念页 mastery · 复习间隔]
+    F -- 有收获 --> K[Wiki<br/>概念页 mastery · 复习间隔]
     K -- 已知 / 新颖信号 --> L1
     K -- 到期复习概念 --> RF
 ```
@@ -43,8 +43,8 @@ flowchart LR
 | L1 粗筛 | cheap 模型批量打分：`relevance / novelty / quality`、`content_type`、`refresher_value`、`topics[]` + 一句理由；结合 profile 掌握度：不扎实领域的好讲解加 refresher_value，扎实领域只推 frontier；分数 × trust 取 top-N | 是（判断） |
 | L2 精读 | strong 模型读截断全文，输出中文 `tldr / key_points / why_for_you / scores`，以及 `est_minutes`（读懂并验证的时间）和 `prerequisites[]` | 是（判断 + 总结） |
 | Tiering | 以 `daily_budget_minutes` 为主约束、各 lane 条数为上限，分到 `must_read / worth_it / refresher / serendipity / fyi / archived`；标记"深读"并可顺延；积压超期降级；允许为空 | 否 |
-| Web UI | 本地 FastAPI + Jinja2 + HTMX：今日 digest（按 lane）、预算进度条、积压数量、est_minutes、前置知识提示、详情、历史、反馈按钮 | 否 |
-| Feedback | 记录用户动作（含"需要回炉 / 已扎实"），供 profile 汇总、掌握度调整与 few-shot | 否 |
+| Web UI | 本地 FastAPI + Jinja2 + HTMX：今日 digest（按 lane）、预算进度条、积压数量、est_minutes、前置知识提示、详情、历史、反馈按钮；稍后再看、运维（立即运行、用量、trust 建议）、信源管理、wiki 体检与知识图谱（M7） | 否 |
+| Feedback | 文章反馈两组（读之前 / 读完后，ADR 0013），每条目只有一个当前状态；供 few-shot、profile 证据、信源 trust 与 wiki 队列；掌握度只在概念复习中调整 | 否 |
 | Profile | 用户手写的 `profile.md`，含可解析的领域掌握度表；LLM 只提出修改 diff（含掌握度调整建议），用户确认后才写入 | 提案时用 |
 | Wiki | "学了"的条目由 LLM 产出结构化页面操作、代码落盘；概念页记录 mastery 与复习间隔；`index.md` 作为已知知识注入 L1，到期概念进入温故栏 | 是（结构化输出） |
 
@@ -87,7 +87,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 - 预算分配：先放此前顺延的深读条目，再按 must_read → refresher → serendipity → worth_it 的顺序、分数从高到低填充；每条须放得进剩余预算，lane 条数不超过 `lanes`。
 - 放不下的深读条目（est_minutes > 预算 × `deep_read_ratio`）记为 `deferred`，下次 run 优先；顺延超过 `backlog_max_days` 天不再顺延，进 fyi。放不下的非深读条目进 fyi。
 - 其余条目 score ≥ `thresholds.fyi` 进 fyi，否则 archived。
-- 积压：此前各日仍未读（`items.read_at` 为空，M3 起由"已读"反馈写入）的 must_read 超过 `backlog_max_days` 天的改为 fyi；未超期的计入积压数。
+- 积压：此前各日仍未读（`items.read_at` 为空；M7 起由读完后的四种反馈写入）、且当前状态不是稍后读 / 不感兴趣的 must_read，超过 `backlog_max_days` 天的改为 fyi；未超期的计入积压数。
 - 预算预留（ADR 0007）：`lane_budget_reserve`（默认 refresher 15、serendipity 10 分钟）在分配开始时为有合格候选的温故 / 意外栏保留，must_read 与 worth_it 不能占用；该栏分配结束后未用完的额度释放回总预算。
 - 同一天多次 `sb run` 共享当日预算：后一次 run 先扣除当天已占用的名额与时间（预期行为，不会每次 run 都重新给满 105 分钟）。digest 日期用本地日期，高峰计价用 UTC。
 
@@ -98,17 +98,20 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 ## Web UI（M3）
 
 - `web/app.py`（FastAPI + Jinja2，服务端渲染）：`/` 当天（或 `?date=`）digest，按 必读 / 温故 / 意外 / 值得读 / 顺延深读 / 速览（折叠）分组，顶部预算进度条（`data-budget="已排/预算"`）与积压数；`/item/{id}` 详情（L1 / L2 评分、key points、反馈历史）；`/history` 日期列表。
-- 反馈：HTMX 按钮 `POST /feedback`（item_id、kind、可选 note），返回按钮组片段原地替换；kind 白名单，非法 400，条目不存在 404。👍 / 👎 互斥，以最后一次为准。
+- 反馈：HTMX 按钮 `POST /feedback`（item_id、kind、可选 note），返回按钮组片段原地替换；kind 白名单，非法 400，条目不存在 404。M7 起为两组按钮，最新一次点击即当前状态，再点高亮按钮撤销（见下文"文章反馈与运维"）。
 - "建议先回炉"：L2 的 `prerequisites` 中出现在用户掌握度为 陌生 / 接触过 / 想回炉 的领域（领域名或说明）里的概念单独提示（`profile/loader.weak_prerequisites`）。
-- HTMX 2.0.4 vendored 在 `web/static/`，不依赖 CDN。`sb serve` 默认只监听 127.0.0.1。
+- 前端资源 vendored 在 `web/static/`，不依赖 CDN：
+  - HTMX 2.0.4，来源 `https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js`，sha256 `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447`；
+  - Cytoscape.js 3.34.4（M7），来源 `https://registry.npmjs.org/cytoscape/-/cytoscape-3.34.4.tgz` 中的 `package/dist/cytoscape.min.js`，sha256 `081591ab735b2b6a3b31a3c60f8f3a3e2fee8c92939e0c7820ad1208571b6cd8`，MIT。
+- `sb serve` 默认只监听 127.0.0.1。
 - 定时：`sb schedule install` 生成 launchd plist（`uv run sb run`，默认本地 07:00，按 UTC 检查是否高峰）。
 
 ## 个性化（M4，见 ADR 0008）
 
-- `profile/feedback.py`：汇总近 `personalize.feedback_window_days` 天的 👍 / 👎 / 学了 / 需要回炉 / 已扎实（含条目标题、信源、content_type、topics）。
-- L1 system prompt = profile + 规则（固定前缀）+ "最近反馈样例"（正 / 负各最多 `few_shot_per_polarity` 条，无反馈时省略）。
-- `sb profile update`（与 Web `/profile` 共用 `profile/rewrite.py`）：strong 模型输出结构化提案（掌握度表的 update / add / remove，段落的 append / remove，每条带反馈 id 证据）→ 代码按规则校验（升级需 已扎实 / 学了，降级需 需要回炉，每次一级；有 已扎实 证据可直接到"扎实"）→ 生成新文本与 unified diff；`--apply` 前备份到 `data/profile_history/`。反馈不足时不调用 LLM。LLM 用量记为 stage = PROFILE。
-- `sb sources tune`（`profile/tune.py`）：每个条目取最新一次 👍 / 👎 / 学了，按信源统计正向比例，样本足够时建议 trust ±1；`--apply` 对 `config/sources.yaml` 做行级替换（不存在时从 example 复制）。
+- `profile/feedback.py`：汇总近 `personalize.feedback_window_days` 天各条目的当前反馈（M7：不感兴趣 / 太浅 / 有收获 / 太难 / 没价值；含条目标题、信源、content_type、topics）。
+- L1 system prompt = profile + 规则（固定前缀）+ "最近反馈样例"（M7：正例有收获、反例不感兴趣 / 没价值、校准样例太浅 / 太难，各最多 `few_shot_per_polarity` 条，无反馈时省略）；近期"太难"条目的前置知识放在 user 消息开头。
+- `sb profile update`（与 Web `/profile` 共用 `profile/rewrite.py`）：strong 模型输出结构化提案（掌握度表的 update / add / remove，段落的 append / remove，每条带反馈 id 证据）→ 代码按规则校验（M7：升级需要太浅，有收获只能用于 陌生 → 接触过，降级需要太难，每次最多一级）→ 生成新文本与 unified diff；`--apply` 前备份到 `data/profile_history/`。反馈不足时不调用 LLM。LLM 用量记为 stage = PROFILE。
+- `sb sources tune`（`profile/tune.py`）：每个条目取当前反馈（M7：有收获为正，不感兴趣 / 没价值为负），按信源统计正向比例，样本足够时建议 trust ±1；`--apply` 对 `config/sources.yaml` 做行级替换（不存在时从 example 复制）。
 
 ## 视频、长内容与回补（M5，见 ADR 0009）
 
@@ -119,13 +122,28 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 
 ## 知识 wiki 与复习（M6，见 ADR 0010）
 
-- 布局：`data/wiki/index.md`（代码重建）、`log.md`（只追加）、`pages/{concepts,entities,papers}/<slug>.md`（frontmatter + `[[slug]]`），原文在 `data/raw/<item_id>.md`。
+- 布局：`data/wiki/index.md`（代码重建）、`log.md`（只追加）、`pages/{concepts,entities,papers}/<slug>.md`（frontmatter + `[[slug]]`），原文在 `data/wiki/raw/<item_id>.md`（M7 起；页面链接 `../../raw/<id>.md`，lint / index / 图谱忽略 raw/）。
 - ingest：条目 L2 结果 + 正文（长文只给要点）+ index + 相关页面 → strong 模型输出 `WikiPlan`（create，或 update 的 append_section / replace_section / add_links / add_aliases）→ 代码校验 slug 与路径、落盘、重建 index、追加 log（stage = WIKI）。
-- 复习：SM-2 简化版（还记得 / 模糊 / 忘了，见 ADR 0010），状态写在概念页 frontmatter。
+- 复习：SM-2 简化版（还记得 / 模糊 / 忘了，见 ADR 0010；M7 增加 需要回炉 / 已扎实），状态写在概念页 frontmatter。新概念页 mastery 从"接触过"起步（M7，不继承 profile）。
 - 闭环：
   - 到期概念：作为只进温故栏的候选参与分级（est 5 分钟，`digest_concepts` 表，附近期相关条目）；
   - L1：user 消息开头附与本批相关的"已知知识"（system 前缀不变）；
   - 前置知识：匹配到不扎实的概念页时，"建议先回炉"链接到 wiki。
+
+## 文章反馈与运维（M7，见 ADR 0013）
+
+- 反馈两组：
+  - 读之前：`later` 稍后读、`dismiss` 不感兴趣；
+  - 读完后：`too_easy` 太浅、`gained` 有收获、`too_hard` 太难、`worthless` 没价值。
+- 条目的当前状态 = 最新一条 feedback（`clear` = 撤销）。读完后四种写 `read_at`，其余清空 `read_at`。`/later` 列出当前为稍后读的条目。
+- `ops.py`：`run_once`（与 `sb run` 相同，持有 `data/run.lock` 的非阻塞 `fcntl.flock`）、`ingest_items`、`apply_trust`，由 CLI 与 Web 共用。
+- `web/tasks.py`：后台线程任务，同类只跑一个；状态片段 `GET /tasks/<kind>` 每 2 秒轮询。
+- 页面：
+  - `/`："待编进 wiki" 按钮；
+  - `/ops`：用量、立即运行、trust 建议；
+  - `/sources`：列表、试抓、添加、启停、删除确认；写 `config/sources.yaml`，原子写，注释不保留；
+  - `/wiki`：体检按钮；
+  - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
 
 ## 数据模型草案
 
@@ -133,11 +151,11 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 
 | 表 | 主要字段 | 引入 |
 |---|---|---|
-| `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill` | M1 |
+| `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7） | M1（`last_fetch_*` M7，schema v6） |
 | `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2 |
-| `feedback` | `id`, `item_id`, `kind`（up / down / read / later / learned / needs_refresh / mastered）, `note`, `ts`；`kind = read` 时同时写 `items.read_at` | M3 |
+| `feedback` | `id`, `item_id`, `kind`（M7：later / dismiss / too_easy / gained / too_hard / worthless / clear）, `note`, `ts`；每个条目最新一条为当前状态；读完后四种写 `items.read_at` | M3（kind 取值 M7 修订） |
 | `wiki_ingests` | `item_id`（主键）, `ts`, `pages`（JSON：新建 / 更新的 slug） | M6 |
 | `digest_concepts` | `date`, `slug`, `title`, `mastery`, `est_minutes`, `related_item_id`, `created_at`；`(date, slug)` 唯一 | M6 |
 | `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE / WIKI）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |

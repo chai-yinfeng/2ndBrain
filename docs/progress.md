@@ -321,3 +321,50 @@
 - 用户选择用 `/research/` 前缀接入 engineering 文章。`config/sources.example.yaml` 中 `anthropic-engineering` 改名为 `anthropic-research`（内容已不只是 engineering；默认 DB 中该 id 从未入库过条目，改名不影响数据）：`type: sitemap`、`use_lastmod: true`、`url_pattern: '^https://www\.anthropic\.com/research/[^/]+$'`，tags 改为 `[research, harness, agents]`，trust / role / max_age_days 不变，去掉 `needs_scraper`。
 - 实测 sitemap 中 `/research` 下 213 个 URL 全部有 lastmod：1 个 `/research` 列表页、5 个 `/research/team/*` 团队页由正则排除，其余 207 个单段 slug 都是文章页。
 - 临时目录（`SB_LLM_BACKEND=fake`）`sb fetch --source anthropic-research --limit 5`：新增 5（"Progress on provable inference for large language models" 2026-11-02 等；另外 4 条是 lastmod 被批量刷新的老文章，页面日期 2026-03-23 至 2026-10-01，与页面 `datePublished` 一致）；再跑一次新增 0、重复 5。
+
+## M7 — 反馈语义与 Web 运维（2026-11-04，分支 `m7-web-ops`）
+
+**做了什么**（ADR 0013）
+- 文章反馈：
+  - 改为两组：读之前（稍后读 / 不感兴趣）、读完后（太浅 / 有收获 / 太难 / 没价值）；
+  - 每个条目的当前状态 = 最新一次点击，再点高亮按钮记录 `clear` 撤销；读完后四种写 `read_at`；
+  - 新页面 `/later`，首页显示"稍后再看：N 条"；积压排除稍后读 / 不感兴趣。
+- 个性化：
+  - L1 few-shot：正例有收获，反例不感兴趣 / 没价值，校准样例太浅 / 太难；
+  - 近期"太难"条目的 L2 前置知识注入 L1 user 消息（`personalize.too_hard_prereq_max_chars`，默认 600）；
+  - profile 证据规则：升级需要太浅，有收获只用于 陌生 → 接触过，降级需要太难，每次一级；
+  - sources tune：有收获为正，不感兴趣 / 没价值为负。
+- wiki：
+  - `--pending` = 当前状态为有收获；
+  - 新概念页从"接触过"起步，首次复习间隔 `wiki.first_review_days`（3 天）；
+  - 复习新增"需要回炉"（立即到期）、"已扎实"（间隔 ≥ `wiki.mastered_interval_days`，30 天）；
+  - 原文目录移到 `data/wiki/raw`。
+- 运维：
+  - `ops.py`：`run_once` / `ingest_items` / `apply_trust`，CLI 与 Web 共用；`data/run.lock` 用 `fcntl.flock`；
+  - `web/tasks.py`：后台线程任务，HTMX 2 秒轮询；
+  - 首页"编进 wiki"，`/ops`（用量、立即运行、高峰提示、trust 建议），`/wiki` 体检按钮。
+- 信源管理 `/sources`：
+  - 列表含最近抓取结果（schema v6 `sources.last_fetch_*`）、入库数、正 / 负反馈数；
+  - 试抓预览后添加，启用 / 停用，删除二次确认；
+  - 写 `config/sources.yaml`：先从 example 复制，原子写，注释不保留。
+- 知识图谱：`/wiki/graph` 与 `/wiki/graph.json`，前端用 vendored 的 Cytoscape.js 3.34.4。版本、来源与 sha256 见 design.md / ADR 0013。没有新增 Python 依赖。
+- 测试：
+  - 新增 `test_feedback.py`（11）、`test_ops.py`（9）、`test_sources_web.py`（5）、`test_graph.py`（4），`test_wiki.py` 新增 1 个（raw 目录）；
+  - 因语义变更修改了 `test_profile.py`、`test_web.py`、`test_wiki.py` 中的旧测试（反馈类型改名、证据规则、新概念页掌握度、raw 路径）。
+
+**验收结果**
+- `uv run pytest -q`：251 passed；`uv run ruff check .`、`uv run ruff format --check .`：通过。
+- roadmap M7 的验收命令在 `mktemp -d` 临时目录中全部实际运行过（fake LLM，端口 8765）：
+  - 首页 5 条条目都带两组按钮；
+  - `POST /feedback kind=gained` 返回"已记录：有收获"，`read_at` 已设置；
+  - `/later`、`/ops`、`/sources` 正常；
+  - 后台 wiki ingest 状态为 done；
+  - `/wiki/graph.json` 返回 3 个节点、2 条边；
+  - 持锁时 `sb run --no-fetch` 被拒绝，exit=1。
+- 浏览器中手动检查：首页按钮、后台 ingest 进度与结果链接、图谱渲染（无控制台错误）、`/ops`、`/sources` 都正常。
+
+**遗留问题**
+- 后台任务只在内存中，Web 服务重启后进行中的任务丢失；Web 中 run 与 ingest 并发时依靠 SQLite 锁等待。
+- `/sources` 写回会丢失 sources.yaml 的注释（已在页面与 README 注明）。
+- `profile/loader.mastery_for` 已无调用方，保留未删；`wiki.ingest.apply_plan` 的 `profile` 参数保留但不再使用。
+- 已有页面中旧的 `../../../raw/<id>.md` 链接在 Obsidian 中会失效（默认 wiki 为空，无影响）。

@@ -174,13 +174,53 @@ cat data/wiki/index.md && tail -5 data/wiki/log.md
 uv run sb wiki lint
 ```
 
+## M7 — 反馈语义与 Web 运维（ADR 0013）
+
+- [x] 文章反馈改为两组：读之前（稍后读 / 不感兴趣）、读完后（太浅 / 有收获 / 太难 / 没价值）；当前状态 = 最新一次点击，再点高亮按钮 = 撤销（记录 `clear`）；按钮高亮当前状态并有 title 说明
+- [x] 稍后读进入 `/later`（首页显示"稍后再看：N 条"），不计入积压、不降级；不感兴趣移出积压；读完后四种设置 `read_at`
+- [x] L1：正例有收获、反例不感兴趣 / 没价值、校准样例太浅 / 太难；近期"太难"条目的前置知识注入 L1 user 消息（`personalize.too_hard_prereq_max_chars`）
+- [x] profile 证据规则：升级需要太浅；有收获只能用于 陌生 → 接触过；降级需要太难；每次最多一级
+- [x] sources tune：有收获为正，不感兴趣 / 没价值为负
+- [x] wiki：`--pending` = 当前状态为有收获；新概念页从"接触过"起步、首次复习间隔 `wiki.first_review_days`；复习新增"需要回炉 / 已扎实"（`wiki.mastered_interval_days`）
+- [x] 后台任务（线程注册表 + HTMX 2 秒轮询）；`sb run` 与 Web"立即运行"共用 `data/run.lock`（fcntl.flock）
+- [x] 首页"待编进 wiki：N 条" + 后台 ingest；`/wiki` 体检按钮、到期复习、图谱入口
+- [x] `/ops`：今天 / 近 7 天用量，立即运行（高峰提示与费用倍率），信源 trust 建议与应用，画像入口
+- [x] `/sources`：列表（最近抓取结果、入库数、正 / 负反馈数；schema v6），试抓预览后添加，启用 / 停用，删除二次确认；写入 `config/sources.yaml`（原子写，注释不保留）
+- [x] `/wiki/graph` + `/wiki/graph.json`（Cytoscape.js 3.34.4 vendored）：颜色 = 掌握度，到期高亮，大小 ~ 度数，类型 / 掌握度筛选
+- [x] 原文目录移到 `data/wiki/raw`，页面链接 `../../raw/<id>.md`；lint / index / 图谱忽略 raw/；README 增加 Obsidian 说明
+
+**模块**：`db.py`、`profile/`、`wiki/`（`graph.py`）、`ops.py`、`web/`（`tasks.py`）、`cli.py`
+
+**验收**（临时目录，fake LLM，端口 8765，不碰默认 data/）
+```bash
+uv run pytest -q tests/test_feedback.py tests/test_ops.py tests/test_sources_web.py tests/test_graph.py
+export SB_DATA_DIR=$(mktemp -d) SB_LLM_BACKEND=fake
+uv run sb fetch --source lmsys-sglang-blog --limit 5 && uv run sb run --no-fetch
+uv run sb serve --port 8765 &
+sleep 3
+curl -s 127.0.0.1:8765/ | grep -c '读完后'                       # 首页每条都有两组反馈按钮
+ITEM=$(sqlite3 "$SB_DATA_DIR/brain.db" "SELECT item_id FROM digests LIMIT 1")
+curl -s -X POST 127.0.0.1:8765/feedback -d item_id=$ITEM -d kind=gained | grep -o '已记录：有收获'
+sqlite3 "$SB_DATA_DIR/brain.db" "SELECT read_at FROM items WHERE id = $ITEM"   # 已设置
+curl -s 127.0.0.1:8765/ | grep -o '稍后再看：[0-9]* 条'
+curl -s 127.0.0.1:8765/later | grep -o '<h1>稍后再看'
+curl -s 127.0.0.1:8765/ops | grep -o '立即运行' | head -1
+curl -s 127.0.0.1:8765/sources | grep -o 'data-source="lmsys-sglang-blog"'
+curl -s -X POST 127.0.0.1:8765/tasks/wiki_ingest > /dev/null; sleep 3
+curl -s 127.0.0.1:8765/tasks/wiki_ingest | grep -o 'data-task-status="done"'
+curl -s 127.0.0.1:8765/wiki/graph.json | python3 -c "import json, sys; g = json.load(sys.stdin); print(len(g['nodes']), 'nodes', len(g['edges']), 'edges')"
+uv run python -c "import time; from secondbrain import ops; lock = ops.run_lock(); lock.__enter__(); time.sleep(15)" &
+sleep 3; uv run sb run --no-fetch; echo "exit=$?"                # 锁冲突：被拒绝，exit=1
+kill %1 %2 2> /dev/null                                           # 停掉 8765 的服务与持锁进程
+```
+
 ## Backlog（不在本轮）
 
 - [ ] X / Twitter 信源
 - [ ] IM 推送（Telegram / 邮件）
 - [ ] embedding 语义去重 + 同一事件多信源聚合（sqlite-vec）
 - [ ] Anthropic / `claude -p` 后端
-- [ ] wiki 图谱可视化增强
+- [ ] wiki 图谱可视化增强（M7 已有基础图谱 `/wiki/graph`；更多布局、聚类等仍待）
 - [ ] `needs_scraper` 信源的页面抓取支持（LMSYS、Hazy Research、Anthropic engineering / news、Meta AI、DeepSeek）
   - [x] sitemap 部分（`type: sitemap`，ADR 0012）：LMSYS、Anthropic news、Anthropic engineering（改为 `anthropic-research`，经 `/research/` 接入，混入研究文章由 L1 过滤）已接入
   - [ ] 其余仍待：Hazy Research、Meta AI（均无 sitemap）、DeepSeek
