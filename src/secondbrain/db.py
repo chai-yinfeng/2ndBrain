@@ -49,7 +49,51 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_items_published_at ON items(published_at);
     CREATE INDEX idx_items_source_id ON items(source_id);
     """,
+    # v2（M2）：评估、分级、LLM 调用记录。items.status 新增取值见 ITEM_STATUSES。
+    """
+    CREATE TABLE assessments (
+        id         INTEGER PRIMARY KEY,
+        item_id    INTEGER NOT NULL REFERENCES items(id),
+        stage      TEXT NOT NULL,             -- L0 | L1 | L2
+        model      TEXT,
+        data       TEXT NOT NULL,             -- JSON：该阶段的全部输出字段
+        score      REAL,                      -- 该阶段的排序分（L0 为空）
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_assessments_item_stage ON assessments(item_id, stage);
+    CREATE TABLE digests (
+        id            INTEGER PRIMARY KEY,
+        date          TEXT NOT NULL,          -- 本地日期 YYYY-MM-DD
+        item_id       INTEGER NOT NULL REFERENCES items(id),
+        lane          TEXT NOT NULL,          -- must_read | worth_it | refresher | serendipity
+                                              -- | fyi | archived | deferred
+        rank          INTEGER NOT NULL,
+        est_minutes   INTEGER NOT NULL,
+        is_deep_read  INTEGER NOT NULL,
+        deferred_from TEXT,                   -- 首次被顺延的日期
+        created_at    TEXT NOT NULL,
+        UNIQUE (date, item_id)
+    );
+    CREATE INDEX idx_digests_lane ON digests(lane);
+    CREATE TABLE llm_calls (
+        id                 INTEGER PRIMARY KEY,
+        ts                 TEXT NOT NULL,
+        backend            TEXT NOT NULL,
+        stage              TEXT NOT NULL,
+        model              TEXT NOT NULL,
+        prompt_tokens      INTEGER NOT NULL,
+        cache_hit_tokens   INTEGER NOT NULL,
+        cache_miss_tokens  INTEGER NOT NULL,
+        completion_tokens  INTEGER NOT NULL,
+        cost_usd           REAL NOT NULL,
+        is_peak            INTEGER NOT NULL
+    );
+    CREATE INDEX idx_llm_calls_ts ON llm_calls(ts);
+    """,
 ]
+
+# items.status：new（待处理）→ l0_rejected | l1（已粗筛）→ l2（已精读）→ tiered | deferred
+ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred")
 
 
 def format_time(dt: datetime) -> str:
@@ -168,3 +212,144 @@ def list_items(
         ORDER BY ts DESC, id DESC
     """
     return conn.execute(sql, params).fetchall()
+
+
+# ---------- M2：评估与分级 ----------
+
+ITEM_COLUMNS = """
+    i.id, i.source_id, i.url, i.title, i.summary, i.content, i.extract_method,
+    i.published_at, i.fetched_at, i.status, length(i.content) AS content_len,
+    s.trust, s.role
+"""
+
+
+def items_by_status(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> list[sqlite3.Row]:
+    marks = ",".join("?" * len(statuses))
+    return conn.execute(
+        f"""
+        SELECT {ITEM_COLUMNS} FROM items i JOIN sources s ON s.id = i.source_id
+        WHERE i.status IN ({marks})
+        ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
+        """,
+        statuses,
+    ).fetchall()
+
+
+def set_status(conn: sqlite3.Connection, item_ids: list[int], status: str) -> None:
+    assert status in ITEM_STATUSES
+    conn.executemany("UPDATE items SET status = ? WHERE id = ?", [(status, i) for i in item_ids])
+
+
+def add_assessment(
+    conn: sqlite3.Connection,
+    item_id: int,
+    stage: str,
+    data: dict,
+    ts: datetime,
+    model: str | None = None,
+    score: float | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO assessments (item_id, stage, model, data, score, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (item_id, stage, model, json.dumps(data, ensure_ascii=False), score, format_time(ts)),
+    )
+
+
+def latest_assessments(conn: sqlite3.Connection, stage: str) -> dict[int, dict]:
+    """每个条目在该阶段最新的一条评估：item_id → {**data, "_score", "_model"}。"""
+    rows = conn.execute(
+        """
+        SELECT a.item_id, a.data, a.score, a.model FROM assessments a
+        JOIN (SELECT item_id, MAX(id) AS id FROM assessments WHERE stage = ? GROUP BY item_id) m
+          ON m.id = a.id
+        """,
+        (stage,),
+    ).fetchall()
+    return {
+        r["item_id"]: {**json.loads(r["data"]), "_score": r["score"], "_model": r["model"]}
+        for r in rows
+    }
+
+
+def deferred_since(conn: sqlite3.Connection) -> dict[int, str]:
+    """当前处于顺延状态的条目 → 首次顺延日期。"""
+    rows = conn.execute(
+        """
+        SELECT d.item_id, COALESCE(d.deferred_from, d.date) AS since FROM digests d
+        JOIN items i ON i.id = d.item_id
+        WHERE i.status = 'deferred' AND d.lane = 'deferred'
+        """
+    ).fetchall()
+    result: dict[int, str] = {}
+    for r in rows:
+        if r["item_id"] not in result or r["since"] < result[r["item_id"]]:
+            result[r["item_id"]] = r["since"]
+    return result
+
+
+def day_usage(
+    conn: sqlite3.Connection, day: str, lanes: frozenset[str], exclude: set[int]
+) -> tuple[dict[str, int], int]:
+    """某天前排 lane 已占用的 (各 lane 条数, 总分钟数)，不含 exclude 中的条目。"""
+    counts: dict[str, int] = {}
+    minutes = 0
+    for r in conn.execute("SELECT item_id, lane, est_minutes FROM digests WHERE date = ?", (day,)):
+        if r["lane"] in lanes and r["item_id"] not in exclude:
+            counts[r["lane"]] = counts.get(r["lane"], 0) + 1
+            minutes += r["est_minutes"]
+    return counts, minutes
+
+
+def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -> None:
+    conn.execute(
+        """
+        INSERT INTO digests (date, item_id, lane, rank, est_minutes, is_deep_read, deferred_from,
+                             created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date, item_id) DO UPDATE SET
+            lane = excluded.lane, rank = excluded.rank, est_minutes = excluded.est_minutes,
+            is_deep_read = excluded.is_deep_read, deferred_from = excluded.deferred_from,
+            created_at = excluded.created_at
+        """,
+        (
+            day,
+            placement.item_id,
+            placement.lane,
+            placement.rank,
+            placement.est_minutes,
+            int(placement.is_deep_read),
+            placement.deferred_from,
+            format_time(ts),
+        ),
+    )
+
+
+def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int, str]]:
+    """此前各日的必读条目（M2 尚无反馈，全部视为未读）。"""
+    rows = conn.execute(
+        "SELECT item_id, date FROM digests WHERE lane = 'must_read' AND date < ?", (before_day,)
+    ).fetchall()
+    return [(r["item_id"], r["date"]) for r in rows]
+
+
+def demote_must_reads(conn: sqlite3.Connection, item_ids: list[int], before_day: str) -> None:
+    conn.executemany(
+        "UPDATE digests SET lane = 'fyi' WHERE item_id = ? AND lane = 'must_read' AND date < ?",
+        [(i, before_day) for i in item_ids],
+    )
+
+
+def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT d.*, i.title, i.url, i.source_id FROM digests d JOIN items i ON i.id = d.item_id
+        WHERE d.date = ? ORDER BY d.lane, d.rank
+        """,
+        (day,),
+    ).fetchall()
+
+
+def latest_digest_date(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT MAX(date) FROM digests").fetchone()
+    return row[0] if row else None

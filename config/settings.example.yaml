@@ -9,6 +9,12 @@ llm:
   models:
     cheap: deepseek-flash      # L1 粗筛
     strong: deepseek-v4-pro    # L2 精读
+  timeout_seconds: 120
+  max_retries: 3               # 网络错误 / 429 / 5xx 的退避重试次数
+  concurrency: 4               # 同时进行的 LLM 调用数
+  max_tokens:
+    cheap: 4096
+    strong: 4096
 
 # 价格表：USD / 1M tokens，均为高峰价。
 # 非高峰时段半价。高峰时段（UTC）：周一至周五 01:00–04:00 与 06:00–10:00。
@@ -21,6 +27,12 @@ pricing:
     input_cache_hit: 0.044
     input_cache_miss: 1.32
     output: 3.96
+
+# 高峰判断（按调用时刻 UTC）：不在高峰时段时价格乘以 off_peak_multiplier。
+pricing_schedule:
+  peak_weekdays_utc: [0, 1, 2, 3, 4]   # 周一 = 0
+  peak_hours_utc: [[1, 4], [6, 10]]    # 左闭右开
+  off_peak_multiplier: 0.5
 
 # 每日时间预算（分钟）：分级的主约束（ADR 0004）。所选条目总 est_minutes 不超过它。
 daily_budget_minutes: 105
@@ -56,3 +68,45 @@ fetch:
   content_max_chars: 200000      # 入库正文的长度上限
   pdf_max_pages: 30              # PDF 只提取前 N 页
   pdf_max_bytes: 20000000        # 超过该大小的 PDF 不下载
+
+# `sb run`（M2）。
+run:
+  fetch_limit: 20                # sb run 内部 fetch 的每源条数
+  max_cost_usd: 0.5              # 单次 run 估算费用上限；L2 前预估超出则停止
+
+# 分层过滤（M2）。排序分公式见 docs/design.md。
+filter:
+  l0:
+    max_age_days: 30             # 只处理该天数内发布的条目
+    min_content_chars: 300       # 正文短于该长度的条目排除
+    include_keywords: []         # 非空时，标题 / 摘要须至少命中一个
+    exclude_keywords:            # 标题 / 摘要命中任一即排除（不区分大小写）
+      - funding round
+      - raises $
+      - 融资
+      - webinar
+  l1:
+    batch_size: 10               # 每次调用评估的条目数
+    item_chars: 4000             # 每条送入 L1 的正文字符数（约 1k token）
+    top_n: 15                    # 进入 L2 的条目数（含温故 / 意外的预留名额）
+  l2:
+    max_input_chars: 96000       # 约 24k token
+    section_max_chars: 24000     # 论文单个章节（introduction / conclusion）的上限
+  score:
+    w_relevance: 0.45
+    w_quality: 0.30
+    w_value: 0.25                # 作用于 max(novelty, refresher_value)
+    trust_weight: 0.1            # 每高于 3 一档 trust，排序分 ×(1+0.1)
+  thresholds:
+    must_read: 7.5
+    must_read_relevance: 6
+    worth_it: 6.0
+    refresher_value: 7           # 温故栏：refresher_value 下限（且 content_type 为 explainer/survey/tutorial）
+    serendipity_quality: 7.5     # 意外栏：quality 下限
+    serendipity_max_relevance: 5 # 意外栏：relevance 上限（role: expansion 的信源不受此限）
+    fyi: 4.0                     # 低于该分归档
+  estimate:                      # 未经 L2 的条目按长度估计阅读时间
+    chars_per_minute: 1200
+    paper_multiplier: 2.0
+    min_minutes: 3
+    max_minutes: 180

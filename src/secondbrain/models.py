@@ -65,3 +65,112 @@ class RawEntry:
     feed_content: str | None = None  # feed 自带的正文（HTML 或纯文本）
     published_at: datetime | None = None
     arxiv_id: str | None = None
+
+
+# ---------- M2：LLM 与过滤 / 分级设置 ----------
+
+
+class LLMSettings(BaseModel):
+    backend: str = "deepseek"
+    base_url: str = "https://api.deepseek.com"
+    models: dict[Literal["cheap", "strong"], str] = Field(
+        default_factory=lambda: {"cheap": "deepseek-flash", "strong": "deepseek-v4-pro"}
+    )
+    timeout_seconds: float = 120.0
+    max_retries: int = Field(default=3, ge=0)  # 网络错误 / 429 / 5xx，由 openai SDK 指数退避
+    concurrency: int = Field(default=4, ge=1)  # 同时进行的 LLM 调用数
+    max_tokens: dict[Literal["cheap", "strong"], int] = Field(
+        default_factory=lambda: {"cheap": 4096, "strong": 4096}
+    )
+
+
+class ModelPrice(BaseModel):
+    """USD / 1M tokens（高峰价）。"""
+
+    input_cache_hit: float
+    input_cache_miss: float
+    output: float
+
+
+class PricingSchedule(BaseModel):
+    peak_weekdays_utc: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])  # 周一 = 0
+    peak_hours_utc: list[tuple[int, int]] = Field(default_factory=lambda: [(1, 4), (6, 10)])
+    off_peak_multiplier: float = 0.5
+
+
+class L0Settings(BaseModel):
+    max_age_days: int = Field(default=30, ge=1)
+    min_content_chars: int = Field(default=300, ge=0)
+    include_keywords: list[str] = Field(default_factory=list)  # 非空时标题/摘要须至少命中一个
+    exclude_keywords: list[str] = Field(default_factory=list)  # 标题/摘要命中任一即排除
+
+
+class L1Settings(BaseModel):
+    batch_size: int = Field(default=10, ge=1)
+    item_chars: int = Field(default=4000, ge=200)  # 每条送入 L1 的正文字符数（约 1k token）
+    top_n: int = Field(default=15, ge=0)  # 进入 L2 的条目数
+
+
+class L2Settings(BaseModel):
+    max_input_chars: int = Field(default=96_000, ge=1000)  # 约 24k token
+    section_max_chars: int = Field(default=24_000, ge=500)  # 论文单个章节的上限
+
+
+class ScoreSettings(BaseModel):
+    """排序分 = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) / Σw
+    × (1 + trust_weight·(trust − 3))。"""
+
+    w_relevance: float = 0.45
+    w_quality: float = 0.30
+    w_value: float = 0.25
+    trust_weight: float = 0.1
+
+
+class Thresholds(BaseModel):
+    must_read: float = 7.5
+    must_read_relevance: float = 6.0
+    worth_it: float = 6.0
+    refresher_value: float = 7.0
+    serendipity_quality: float = 7.5
+    serendipity_max_relevance: float = 5.0
+    fyi: float = 4.0
+
+
+class EstimateSettings(BaseModel):
+    """未经 L2 的条目按正文长度估计阅读时间。"""
+
+    chars_per_minute: int = Field(default=1200, ge=1)
+    paper_multiplier: float = 2.0
+    min_minutes: int = 3
+    max_minutes: int = 180
+
+
+class LaneCaps(BaseModel):
+    must_read: int = 3
+    worth_it: int = 10
+    refresher: int = 2
+    serendipity: int = 1
+
+
+class RunSettings(BaseModel):
+    fetch_limit: int = Field(default=20, ge=1)
+    max_cost_usd: float = 0.5  # 单次 run 估算费用上限，超过则不调用 L2
+
+
+class FilterSettings(BaseModel):
+    """settings 中与流水线相关的全部配置（由 config.pipeline_settings 组装）。"""
+
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    pricing: dict[str, ModelPrice] = Field(default_factory=dict)
+    pricing_schedule: PricingSchedule = Field(default_factory=PricingSchedule)
+    daily_budget_minutes: int = 105
+    lanes: LaneCaps = Field(default_factory=LaneCaps)
+    deep_read_ratio: float = 0.6
+    backlog_max_days: int = 3
+    run: RunSettings = Field(default_factory=RunSettings)
+    l0: L0Settings = Field(default_factory=L0Settings)
+    l1: L1Settings = Field(default_factory=L1Settings)
+    l2: L2Settings = Field(default_factory=L2Settings)
+    score: ScoreSettings = Field(default_factory=ScoreSettings)
+    thresholds: Thresholds = Field(default_factory=Thresholds)
+    estimate: EstimateSettings = Field(default_factory=EstimateSettings)
