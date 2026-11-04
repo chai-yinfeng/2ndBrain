@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}画像 · Second Brain{% endblock %}
+{% block content %}
+<h1>画像 profile.md</h1>
+<p class="meta">{{ path }}</p>
+{% if saved %}<p class="saved">已保存；旧版本备份为 {{ saved }}</p>{% endif %}
+{% for w in profile.warnings %}<p class="refresh">⚠ {{ w }}</p>{% endfor %}
+
+{% if profile.domains %}
+<section class="entry">
+  <h2>领域掌握度（解析结果）</h2>
+  <table class="scores">
+    <tr><th>领域</th><th>掌握度</th><th>优先级</th></tr>
+    {% for d in profile.domains %}
+    <tr><td>{{ d.domain }}</td><td>{{ d.mastery or ("未识别：" ~ d.raw_mastery) }}</td><td>{{ d.priority }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<section class="entry">
+  <h2>根据反馈生成修改提案</h2>
+  <p class="meta">读取近期 👍 / 👎 / 学了 / 需要回炉 / 已扎实，由 strong 模型提出修改；每条都带反馈证据，代码按规则校验。应用前会自动备份。</p>
+  <button type="button" class="fb" hx-post="/profile/propose" hx-target="#proposal" hx-swap="innerHTML"
+          hx-indicator="#proposal-loading">生成修改提案</button>
+  <span id="proposal-loading" class="htmx-indicator meta">生成中…</span>
+  <div id="proposal"></div>
+</section>
+
+<section class="entry">
+  <h2>编辑</h2>
+  <form method="post" action="/profile">
+    <textarea name="text" rows="28" class="editor">{{ text }}</textarea>
+    <p><button type="submit" class="fb">保存（自动备份旧版本）</button></p>
+  </form>
+</section>
+{% endblock %}

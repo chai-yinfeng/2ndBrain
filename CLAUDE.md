@@ -28,7 +28,7 @@ uv run ruff format .
 ## 目录约定
 
 ```
-config/              *.example.* 提交到仓库；同名去掉 .example 的正式文件为个人配置
+config/              *.example.* 提交到仓库；同名去掉 .example 的正式文件（sources.yaml、settings.yaml）为个人配置，已在 .gitignore 中，不提交
 docs/                design.md  roadmap.md  progress.md  decisions/NNNN-*.md（ADR）
 src/secondbrain/     代码（按 milestone 逐步增加模块，不预建空模块）
 tests/               test_*.py，fixtures/ 放离线数据

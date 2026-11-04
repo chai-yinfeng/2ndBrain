@@ -117,12 +117,12 @@ uv run sb schedule install --dry-run      # 打印将写入的 plist
 
 ## M4 — 个性化与记忆
 
-- [ ] profile 结构化：Markdown 掌握度表格（领域 | 掌握度 | 优先级 | 说明）由代码解析，格式错误时给出明确提示
-- [ ] `profile/feedback.py`：汇总近期反馈（喜欢 / 不喜欢 / 学了 / 需要回炉 / 已扎实的标题、标签、信源）
-- [ ] L1 prompt 注入：profile.md + 最近 N 条正 / 负反馈样例（few-shot）
-- [ ] `profile/rewrite.py`：`sb profile update` 用 strong 模型提出 profile.md 修改（含依据"需要回炉 / 已扎实"等反馈调整掌握度的建议），输出 diff，`--apply` 才写入，旧版本存 `data/profile_history/`
-- [ ] 信源信任建议：按 👍 / 👎 比例建议 trust 调整（`sb sources tune --apply` 才改）
-- [ ] Web：`/profile` 查看 / 编辑 profile.md，查看并应用 LLM 修改提案
+- [x] profile 结构化：Markdown 掌握度表格（领域 | 掌握度 | 优先级 | 说明）由代码解析，格式错误时给出明确提示
+- [x] `profile/feedback.py`：汇总近期反馈（喜欢 / 不喜欢 / 学了 / 需要回炉 / 已扎实的标题、标签、信源）
+- [x] L1 prompt 注入：profile.md + 最近 N 条正 / 负反馈样例（few-shot）
+- [x] `profile/rewrite.py`：`sb profile update` 用 strong 模型提出 profile.md 修改（含依据"需要回炉 / 已扎实"等反馈调整掌握度的建议），输出 diff，`--apply` 才写入，旧版本存 `data/profile_history/`
+- [x] 信源信任建议：按 👍 / 👎 比例建议 trust 调整（`sb sources tune --apply` 才改）
+- [x] Web：`/profile` 查看 / 编辑 profile.md，查看并应用 LLM 修改提案
 
 **模块**：`profile/`、`pipeline/l1_screen.py`、`web/`、`cli.py`
 

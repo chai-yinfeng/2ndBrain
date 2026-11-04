@@ -157,6 +157,19 @@ class RunSettings(BaseModel):
     max_cost_usd: float = 0.5  # 单次 run 估算费用上限，超过则不调用 L2
 
 
+class PersonalizeSettings(BaseModel):
+    """M4：反馈汇总、few-shot、profile 修改提案、信源 trust 调整。"""
+
+    feedback_window_days: int = Field(default=30, ge=1)  # 汇总近 N 天的反馈
+    summary_max_items: int = Field(default=50, ge=1)  # 送入 profile 提案的反馈上限
+    few_shot_per_polarity: int = Field(default=5, ge=0)  # L1 中正 / 负样例各最多几条
+    min_feedback_for_update: int = Field(default=1, ge=1)  # 少于该数不提议修改 profile
+    tune_window_days: int = Field(default=90, ge=1)
+    tune_min_samples: int = Field(default=5, ge=1)  # 信源有反馈的条目数少于该值不给建议
+    tune_raise_ratio: float = Field(default=0.7, ge=0, le=1)  # 正向比例 ≥ 该值建议 trust +1
+    tune_lower_ratio: float = Field(default=0.3, ge=0, le=1)  # 正向比例 ≤ 该值建议 trust −1
+
+
 class FilterSettings(BaseModel):
     """settings 中与流水线相关的全部配置（由 config.pipeline_settings 组装）。"""
 
@@ -178,3 +191,4 @@ class FilterSettings(BaseModel):
     score: ScoreSettings = Field(default_factory=ScoreSettings)
     thresholds: Thresholds = Field(default_factory=Thresholds)
     estimate: EstimateSettings = Field(default_factory=EstimateSettings)
+    personalize: PersonalizeSettings = Field(default_factory=PersonalizeSettings)

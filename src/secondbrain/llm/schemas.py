@@ -37,3 +37,35 @@ class L2Response(BaseModel):
     est_minutes: int = Field(ge=1, le=600)
     prerequisites: list[str] = Field(default_factory=list)
     scores: Scores
+
+
+# ---------- M4：profile 修改提案 ----------
+
+
+class MasteryChange(BaseModel):
+    """对掌握度表的一处修改。update / remove 用 row（1 起，对应输入中的行号），add 用 domain。"""
+
+    action: Literal["update", "add", "remove"]
+    row: int | None = None
+    domain: str | None = None
+    mastery: str | None = None
+    priority: str | None = None
+    note: str | None = None
+    reason: str
+    evidence: list[int]  # 反馈 id
+
+
+class SectionEdit(BaseModel):
+    """对其他段落的修改：在某个 ## 段落末尾追加一行，或删除其中完全相同的一行。"""
+
+    section: str
+    action: Literal["append", "remove"]
+    text: str
+    reason: str
+    evidence: list[int]
+
+
+class ProfileProposal(BaseModel):
+    summary: str = ""
+    mastery_changes: list[MasteryChange] = Field(default_factory=list)
+    section_edits: list[SectionEdit] = Field(default_factory=list)

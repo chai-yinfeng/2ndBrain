@@ -1,0 +1,19 @@
+{# POST /profile/propose 与 /profile/apply 返回的片段 #}
+{% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+{% if message %}<p class="saved">{{ message }}</p>{% endif %}
+{% if result %}
+  {% if result.summary %}<p><b>提案摘要</b> {{ result.summary }}</p>{% endif %}
+  <p class="meta">估算费用 ${{ "%.4f" | format(cost) }}</p>
+  {% if result.applied %}<ul>{% for line in result.applied %}<li>✓ {{ line }}</li>{% endfor %}</ul>{% endif %}
+  {% if result.rejected %}<ul class="meta">{% for line in result.rejected %}<li>✗ 已拒绝：{{ line }}</li>{% endfor %}</ul>{% endif %}
+  {% if result.changed %}
+  <pre class="diff">{{ diff }}</pre>
+  <form hx-post="/profile/apply" hx-target="#proposal" hx-swap="innerHTML">
+    <input type="hidden" name="base_sha" value="{{ base_sha }}">
+    <textarea name="new_text" hidden>{{ result.new_text }}</textarea>
+    <button type="submit" class="fb">应用（自动备份旧版本）</button>
+  </form>
+  {% else %}
+  <p class="meta">提案没有可应用的修改，profile 不变。</p>
+  {% endif %}
+{% endif %}

@@ -145,3 +145,33 @@
 **遗留问题**
 - 非 dry-run 的 install / uninstall（真正写 plist、调用 launchctl）按要求没有执行过。
 - 浏览器实际点击验证待主会话进行。
+
+## M4 — 个性化与记忆（2026-11-04，分支 `m4-profile`）
+
+**做了什么**
+- `profile/feedback.py`：近期反馈汇总（窗口、条数可配），以及 L1 few-shot 段。few-shot 接在 L1 system prompt 的 profile + 规则之后，没有正负反馈时省略。
+- `profile/rewrite.py`：
+  - 输入：profile 与反馈。
+  - 提案：strong 模型输出结构化提案（schema `ProfileProposal`）。
+  - 校验：代码按证据与掌握度规则校验。
+  - 输出：生成新文本与 unified diff，未修改的表格行保留原文；写入前备份。
+  - 提示词：`llm/prompts/profile_update.md`；fake 后端支持该 schema。
+- `profile/tune.py`：按信源统计 👍 / 👎 / 学了 的比例，给出 trust 调整建议；YAML 用行级替换，保留注释。
+- `profile/loader.py`：记录掌握度表在文本中的位置，供重建表格。
+- CLI：`sb profile update [--dry-run|--apply]`（反馈不足时不调用 LLM）、`sb sources tune [--apply]`。
+- Web：`/profile` 页面，可查看、编辑保存（自动备份）、生成提案（HTMX）并应用；应用时校验 sha，生成提案后 profile 被改过则返回 409。导航栏新增"画像"。
+- settings 新增 `personalize` 段；`.gitignore` 加入 `config/sources.yaml`、`config/settings.yaml`；CLAUDE.md 目录约定写明这两个文件不提交。
+- 规则取舍见 ADR 0008。
+- 测试：新增 `tests/test_profile.py`（22 个），使用 fixture profile、临时 SB_DATA_DIR 与临时 CONFIG_DIR。
+
+**验收结果**
+- `uv run pytest -q tests/test_profile.py`：22 passed；`uv run pytest -q`：142 passed；`uv run ruff check .`：通过。
+- 默认 data 上运行 `sb profile update --dry-run`：输出"无足够反馈，不提议修改（…共 0 条…）"，没有调用 LLM，llm_calls 中无 PROFILE 记录。
+- 临时 SB_DATA_DIR（example profile + 复制的 brain.db + 构造的 6 条反馈）+ `SB_LLM_BACKEND=fake`：
+  - `--dry-run` 打印 3 处修改的 diff：新增 2 行掌握度，"不想看的内容"段追加 1 行。
+  - `--apply` 写入后，`profile_history/` 下有 1 个备份，内容与原 example 一致。
+- 默认 data 上运行 `sb sources tune`：46 个信源都没有反馈，提示样本不足，没有建议。
+
+**遗留问题**
+- 段落修改只支持追加 / 删除整行；更大的改写需要在 `/profile` 手动编辑。
+- 真实 DeepSeek 的提案质量还没验证：默认 data 没有反馈，也不能改用户的真实 profile。

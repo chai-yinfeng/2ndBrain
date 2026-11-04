@@ -23,6 +23,10 @@ class Profile:
     text: str
     domains: list[DomainMastery] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 掌握度表在 text.splitlines() 中的位置：[table_start, table_end)，含表头与分隔行
+    table_start: int | None = None
+    table_end: int | None = None
+    header: list[str] = field(default_factory=list)
 
     @property
     def parsed(self) -> bool:
@@ -54,9 +58,12 @@ def parse_profile(text: str) -> Profile:
         if i + 1 >= len(lines) or not _is_separator(_cells(lines[i + 1])):
             continue
         idx = {name: header.index(name) for name in header}
+        profile.table_start, profile.header = i, header
+        profile.table_end = i + 2
         for row_no, row in enumerate(lines[i + 2 :], start=1):
             if not row.strip().startswith("|"):
                 break
+            profile.table_end = i + 2 + row_no
             cells = _cells(row)
             cells += [""] * (len(header) - len(cells))
             values = {name: cells[j] for name, j in idx.items()}

@@ -23,10 +23,12 @@ sources_app = typer.Typer(help="信源管理。", no_args_is_help=True)
 items_app = typer.Typer(help="已采集条目。", no_args_is_help=True)
 digest_app = typer.Typer(help="每日分级推荐。", no_args_is_help=True)
 schedule_app = typer.Typer(help="macOS launchd 定时运行 sb run。", no_args_is_help=True)
+profile_app = typer.Typer(help="用户画像（profile.md）。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
 app.add_typer(schedule_app, name="schedule")
+app.add_typer(profile_app, name="profile")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -484,3 +486,123 @@ def schedule_uninstall(
     subprocess.run(command, check=False)
     target.unlink()
     typer.echo(f"{OK} 已卸载 {target}")
+
+
+@profile_app.command("update")
+def profile_update(
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--apply", help="默认只打印 diff；--apply 备份旧版后写入"
+    ),
+) -> None:
+    """根据近期反馈，让 strong 模型提出 profile.md 修改提案，打印 unified diff。"""
+    from secondbrain.llm.usage import record_call
+    from secondbrain.profile.feedback import recent_feedback
+    from secondbrain.profile.rewrite import generate_update, save_profile
+
+    config.load_env()
+    settings, fs, _ = _load_pipeline_settings()
+    pers = fs.personalize
+    now = datetime.now(UTC)
+    conn = db.connect()
+    try:
+        feedback = recent_feedback(conn, now, pers.feedback_window_days, pers.summary_max_items)
+        if len(feedback) < pers.min_feedback_for_update:
+            typer.echo(
+                f"无足够反馈，不提议修改（近 {pers.feedback_window_days} 天内 "
+                f"👍 / 👎 / 学了 / 需要回炉 / 已扎实 共 {len(feedback)} 条，"
+                f"至少需要 {pers.min_feedback_for_update} 条）"
+            )
+            return
+        backend_name = config.llm_backend(settings)
+        try:
+            backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
+        except LLMError as exc:
+            typer.echo(f"{FAIL} {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        path, created = config.ensure_profile()
+        if created:
+            typer.echo(f"{WARN} 已从 example 生成 {path}")
+        typer.echo(f"LLM 后端：{backend_name}；依据 {len(feedback)} 条反馈生成提案")
+        try:
+            result = generate_update(backend, path.read_text(encoding="utf-8"), feedback)
+        except LLMError as exc:
+            if exc.usage:
+                record_call(
+                    conn, backend.name, "PROFILE", exc.usage, now, fs.pricing, fs.pricing_schedule
+                )
+                conn.commit()
+            typer.echo(f"{FAIL} {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        cost = record_call(
+            conn, backend.name, "PROFILE", result.usage, now, fs.pricing, fs.pricing_schedule
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    typer.echo(f"本次估算费用 ${cost:.4f}")
+    if result.summary:
+        typer.echo(f"提案摘要：{result.summary}")
+    for line in result.applied:
+        typer.echo(f"{OK} {line}")
+    for line in result.rejected:
+        typer.echo(f"{FAIL} 已拒绝：{line}")
+    if not result.changed:
+        typer.echo("提案没有可应用的修改，profile 不变")
+        return
+    typer.echo("")
+    typer.echo(result.diff(path.name), nl=False)
+    if dry_run:
+        typer.echo("\n（dry-run：未写入；确认后用 --apply 应用）")
+        return
+    backup = save_profile(path, result.new_text, config.data_dir() / "profile_history", now)
+    typer.echo(f"\n{OK} 已写入 {path}；旧版本备份为 {backup}")
+
+
+@sources_app.command("tune")
+def sources_tune(
+    apply: bool = typer.Option(False, "--apply", help="把建议写入 config/sources.yaml"),
+) -> None:
+    """按信源的 👍 / 👎 / 学了 比例给出 trust 调整建议（±1，限 1–5）。"""
+    from secondbrain.profile.tune import apply_trust_changes, source_stats
+
+    _, fs, _ = _load_pipeline_settings()
+    sources = _load_sources_or_exit()
+    pers = fs.personalize
+    conn = db.connect()
+    try:
+        stats = source_stats(conn, sources, datetime.now(UTC), pers)
+    finally:
+        conn.close()
+    typer.echo(
+        f"近 {pers.tune_window_days} 天；每个条目取最新一次 👍 / 👎 / 学了；"
+        f"样本 ≥ {pers.tune_min_samples} 才给建议"
+    )
+    width = max(len(st.source_id) for st in stats) if stats else 0
+    shown = [st for st in stats if st.samples or st.suggested]
+    for st in shown:
+        change = f"trust {st.trust} → {st.suggested}" if st.suggested else f"trust {st.trust}"
+        typer.echo(
+            f"{st.source_id.ljust(width)}  👍/学了 {st.positive:>3}  👎 {st.negative:>3}  "
+            f"{change:<14}  {st.reason}"
+        )
+    silent = len(stats) - len(shown)
+    if silent:
+        typer.echo(f"另有 {silent} 个信源没有反馈：样本不足，不给建议")
+    changes = {st.source_id: st.suggested for st in stats if st.suggested}
+    if not changes:
+        typer.echo("没有 trust 调整建议")
+        return
+    if not apply:
+        typer.echo(f"\n共 {len(changes)} 条建议；用 --apply 写入 config/sources.yaml")
+        return
+    target = config.CONFIG_DIR / "sources.yaml"
+    if not target.exists():
+        example = config.CONFIG_DIR / "sources.example.yaml"
+        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        typer.echo(f"{WARN} 已从 {example.name} 生成 {target}（个人配置，已在 .gitignore 中）")
+    new_text, missing = apply_trust_changes(target.read_text(encoding="utf-8"), changes)
+    target.write_text(new_text, encoding="utf-8")
+    for source_id in missing:
+        typer.echo(f"{FAIL} {source_id}：在 {target.name} 中找不到 trust 行，未修改")
+    typer.echo(f"{OK} 已更新 {target}：{len(changes) - len(missing)} 个信源")
