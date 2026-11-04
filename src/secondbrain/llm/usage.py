@@ -17,19 +17,24 @@ def is_peak(ts: datetime, schedule: PricingSchedule) -> bool:
     return any(start <= utc.hour < end for start, end in schedule.peak_hours_utc)
 
 
+def full_price(usage: Usage, pricing: dict[str, ModelPrice]) -> float:
+    """高峰（全价）美元；价格表中没有的模型（如 fake）计 0。"""
+    price = pricing.get(usage.model)
+    if price is None:
+        return 0.0
+    return (
+        usage.cache_hit_tokens * price.input_cache_hit
+        + usage.cache_miss_tokens * price.input_cache_miss
+        + usage.completion_tokens * price.output
+    ) / 1_000_000
+
+
 def estimate_cost(
     usage: Usage, pricing: dict[str, ModelPrice], schedule: PricingSchedule, ts: datetime
 ) -> tuple[float, bool]:
     """返回 (估算美元, 是否高峰)。价格表中没有的模型（如 fake）计 0。"""
     peak = is_peak(ts, schedule)
-    price = pricing.get(usage.model)
-    if price is None:
-        return 0.0, peak
-    cost = (
-        usage.cache_hit_tokens * price.input_cache_hit
-        + usage.cache_miss_tokens * price.input_cache_miss
-        + usage.completion_tokens * price.output
-    ) / 1_000_000
+    cost = full_price(usage, pricing)
     return (cost if peak else cost * schedule.off_peak_multiplier), peak
 
 

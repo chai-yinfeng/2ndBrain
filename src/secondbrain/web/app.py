@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 import re
 import sqlite3
@@ -22,11 +23,17 @@ from pydantic import ValidationError
 
 from secondbrain import __version__, config, db, ops
 from secondbrain.extract.transcript import key_point_link
-from secondbrain.llm.base import LLMError, make_backend
-from secondbrain.llm.usage import is_peak, record_call, summarize
+from secondbrain.llm.base import LLMError, Usage, make_backend
+from secondbrain.llm.usage import full_price, is_peak, record_call, summarize
 from secondbrain.models import FetchSettings, FilterSettings, SourceConfig
 from secondbrain.net import FetchError, HttpClient
+from secondbrain.pipeline.l2_deep import EST_CHARS_PER_TOKEN, EST_L2_OUTPUT_TOKENS
 from secondbrain.pipeline.run import deep_one
+from secondbrain.pipeline.summary import (
+    estimate_prereq_cost,
+    estimate_summary_cost,
+    summary_minutes,
+)
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
@@ -150,6 +157,7 @@ def _entry(
         "has_l2": l2 is not None,
         "no_transcript": row["extract_method"] == "no_transcript",
         "is_backfill": bool(row["is_backfill"]),
+        "content_len": row["content_len"] or 0,
     }
 
 
@@ -166,6 +174,46 @@ def _ingest_task(task: Task) -> dict:
     task.log(f"待编进 wiki：{len(ids)} 条")
     s = ops.ingest_items(ids, task.log)
     return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
+
+
+class CostHints:
+    """按钮旁的费用提示：按当前配置的模型与价格表估算（高峰全价，非高峰 × off_peak_multiplier）。"""
+
+    def __init__(self, fs: FilterSettings) -> None:
+        self.fs = fs
+
+    def _fmt(self, peak: float) -> str:
+        if peak <= 0:
+            return "费用无法估算（价格表中没有当前模型）"
+        low = peak * self.fs.pricing_schedule.off_peak_multiplier
+
+        def money(x: float) -> str:
+            return f"${x:.3f}" if x >= 0.01 else f"${x:.4f}"
+
+        return f"约 {money(low)}（非高峰）– {money(peak)}（高峰）"
+
+    def _strong(self, input_chars: int, output_tokens: int) -> str:
+        tokens = input_chars // EST_CHARS_PER_TOKEN
+        usage = Usage(self.fs.llm.models["strong"], tokens, 0, tokens, output_tokens)
+        return self._fmt(full_price(usage, self.fs.pricing))
+
+    def l2(self, content_chars: int | None) -> str:
+        chars = min(content_chars or 0, self.fs.l2.max_input_chars) + 3000
+        return self._strong(chars, EST_L2_OUTPUT_TOKENS)
+
+    def summary(self, content_chars: int | None) -> str:
+        chars = content_chars or 0
+        minutes = summary_minutes(chars, self.fs)
+        return f"约 {minutes} 分钟，{self._fmt(estimate_summary_cost(chars, self.fs))}"
+
+    def ingest(self) -> str:
+        return self._strong(33_000, 8000) + " / 条"
+
+    def profile(self) -> str:
+        return self._strong(15_000, 3000)
+
+    def prereq(self, count: int = 3) -> str:
+        return self._fmt(estimate_prereq_cost(max(count, 1), self.fs))
 
 
 PREVIEW_ENTRIES = 10
@@ -254,6 +302,7 @@ def create_app() -> FastAPI:
             states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
             later = len(db.items_in_state(conn, "later"))
+            summarized = db.ai_item_ids(conn, "summary")
             to_ingest = len(pending_items(conn))
         lanes: dict[str, list[dict]] = {}
         for row in rows:
@@ -265,6 +314,7 @@ def create_app() -> FastAPI:
                 profile,
                 wiki,
             )
+            entry["has_summary"] = row["item_id"] in summarized
             lanes.setdefault(row["lane"], []).append(entry)
         used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
         used += sum(c["est_minutes"] for c in concept_rows)
@@ -279,6 +329,8 @@ def create_app() -> FastAPI:
                 "budget": _budget(),
                 "backlog": backlog,
                 "later": later,
+                "hints": CostHints(_settings()),
+                "tasks": tasks,
                 "to_ingest": to_ingest,
                 "ingest_task": tasks.get("wiki_ingest"),
                 "archived": len(lanes.get("archived", [])),
@@ -298,6 +350,9 @@ def create_app() -> FastAPI:
             l2 = db.item_assessment(conn, item_id, "L2")
             history = db.feedback_for(conn, item_id)
             state = db.feedback_state(conn, [item_id])[item_id]
+            summary = db.get_ai(conn, item_id, "summary")
+            prereq_cached = db.get_ai(conn, item_id, "prereq") is not None
+            prereq_count = len(ops.prereq_names(conn, item_id))
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
@@ -316,6 +371,12 @@ def create_app() -> FastAPI:
                 "state": state,
                 "digests": lanes,
                 "refresh_first": refresh_hints(prereqs, profile, _wiki())[0],
+                "summary": summary,
+                "summary_points": _summary_points(summary, row["url"]),
+                "summary_task": tasks.get(f"summary-{item_id}"),
+                "prereq_cached": prereq_cached,
+                "prereq_count": prereq_count,
+                "hints": CostHints(_settings()),
             },
         )
 
@@ -371,7 +432,13 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "profile.html",
-            {"profile": parse_profile(text), "text": text, "saved": saved, "path": path},
+            {
+                "profile": parse_profile(text),
+                "text": text,
+                "saved": saved,
+                "path": path,
+                "hints": CostHints(_settings()),
+            },
         )
 
     @app.post("/profile")
@@ -501,9 +568,54 @@ def create_app() -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str) -> HTMLResponse:
-        if kind not in TASKS:
+        if kind not in TASKS and not re.fullmatch(r"summary-\d+", kind):
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind)
+
+    # ---------- 深度速读与补前置（M8） ----------
+
+    @app.post("/summary/{item_id}", response_class=HTMLResponse)
+    def summary_start(
+        request: Request, item_id: int, force: str | None = Form(None)
+    ) -> HTMLResponse:
+        """后台生成深度速读；已有结果时直接完成（force=1 时重新生成）。"""
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "条目不存在")
+        kind = f"summary-{item_id}"
+
+        def run(task: Task) -> dict:
+            out = ops.deep_summary(item_id, task.log, force=bool(force))
+            return {"item_id": item_id, "cost": out.cost, "cached": out.cached}
+
+        try:
+            tasks.start(kind, f"深度速读 #{item_id}", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
+    @app.post("/prereq/{item_id}", response_class=HTMLResponse)
+    def prereq(request: Request, item_id: int, force: str | None = Form(None)) -> HTMLResponse:
+        """补前置（同步，一次 strong 调用；已缓存的讲解不再调用）。"""
+        lines: list[str] = []
+        context: dict = {"item_id": item_id, "report": None, "error": None, "lines": lines}
+        try:
+            context["report"] = ops.prerequisites(item_id, lines.append, force=bool(force))
+        except ops.OpsError as exc:
+            context["error"] = str(exc)
+        return templates.TemplateResponse(request, "_prereq.html", context)
+
+    @app.post("/prereq/{item_id}/save", response_class=HTMLResponse)
+    def prereq_save(request: Request, item_id: int, name: str = Form(...)) -> HTMLResponse:
+        """把 AI 讲解存为概念页（不调用 LLM）；已存在则返回链接。"""
+        try:
+            slug, created = ops.save_prereq_page(item_id, name)
+        except ops.OpsError as exc:
+            return HTMLResponse(f'<span class="refresh">✗ {html.escape(str(exc))}</span>')
+        label = "已存为概念页" if created else "wiki 已有该页面"
+        return HTMLResponse(
+            f'<span class="saved">{label}：<a href="/wiki/page/{slug}">{slug}</a></span>'
+        )
 
     # ---------- 运维 ----------
 
@@ -738,6 +850,14 @@ def render_markdown(text: str, wiki: Wiki) -> str:
     safe = _RAW_LINK_RE.sub(r"](/item/\1)", safe)
     safe = WIKILINK_RE.sub(link, safe)
     return markdown.markdown(safe, extensions=["tables", "fenced_code", "sane_lists"])
+
+
+def _summary_points(summary: dict | None, url: str) -> dict[str, list[tuple[str, str | None]]]:
+    """深度速读中方法 / 结果 / 局限各条及其时间戳链接（仅视频）。"""
+    if not summary:
+        return {}
+    keys = ("method", "results", "limitations")
+    return {k: [key_point_link(p, url) for p in summary.get(k, [])] for k in keys}
 
 
 def _key_points(l2: dict | None, url: str) -> list[tuple[str, str | None]]:

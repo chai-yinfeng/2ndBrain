@@ -166,6 +166,7 @@ def pipeline_settings(settings: dict[str, Any]) -> FilterSettings:
         "personalize",
         "backfill",
         "wiki",
+        "summary",
     )
     data = {k: settings[k] for k in keys if settings.get(k) is not None}
     data.update(settings.get("filter") or {})

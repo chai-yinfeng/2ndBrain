@@ -659,3 +659,34 @@ def digest_concepts(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
         """,
         (day,),
     ).fetchall()
+
+
+# ---------- M8：按需生成的 AI 内容（ADR 0015） ----------
+
+
+def get_ai(conn: sqlite3.Connection, item_id: int, kind: str) -> dict | None:
+    """item_ai 中的缓存：{**data, "_model", "_created_at"}；没有时返回 None。"""
+    row = conn.execute(
+        "SELECT data, model, created_at FROM item_ai WHERE item_id = ? AND kind = ?",
+        (item_id, kind),
+    ).fetchone()
+    if row is None:
+        return None
+    return {**json.loads(row["data"]), "_model": row["model"], "_created_at": row["created_at"]}
+
+
+def set_ai(
+    conn: sqlite3.Connection, item_id: int, kind: str, data: dict, model: str | None, ts: datetime
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO item_ai (item_id, kind, data, model, created_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(item_id, kind) DO UPDATE SET
+            data = excluded.data, model = excluded.model, created_at = excluded.created_at
+        """,
+        (item_id, kind, json.dumps(data, ensure_ascii=False), model, format_time(ts)),
+    )
+
+
+def ai_item_ids(conn: sqlite3.Connection, kind: str) -> set[int]:
+    return {r[0] for r in conn.execute("SELECT item_id FROM item_ai WHERE kind = ?", (kind,))}

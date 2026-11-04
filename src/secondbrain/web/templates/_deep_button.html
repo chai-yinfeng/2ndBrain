@@ -5,7 +5,7 @@
 <div class="deep" id="deep-{{ item_id }}">
   <button type="button" class="fb" hx-post="/deep" hx-vals='{"item_id": "{{ item_id }}"}'
           hx-target="#deep-{{ item_id }}" hx-swap="outerHTML" hx-indicator="#deep-loading-{{ item_id }}">精读</button>
-  <span class="meta">将调用 strong 模型（约几美分）</span>
+  <span class="meta">将调用 strong 模型，{{ hint }}</span>
   <span id="deep-loading-{{ item_id }}" class="htmx-indicator meta">精读中…（长内容可能需要几分钟）</span>
 </div>
 {% endif %}

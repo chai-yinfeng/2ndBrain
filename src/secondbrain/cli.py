@@ -610,6 +610,78 @@ def deep(
     _print_l2(outcome.response.model_dump(), row["url"], key_point_link)
 
 
+@app.command()
+def summary(
+    item_id: int = typer.Argument(..., help="条目 id"),
+    force: bool = typer.Option(False, "--force", help="已有深度速读时重新生成"),
+) -> None:
+    """深度速读：读全文（长内容分块提要后汇总），输出方法、结果、局限、前置知识等。"""
+    from secondbrain import ops
+    from secondbrain.extract.transcript import key_point_link
+
+    try:
+        out = ops.deep_summary(item_id, typer.echo, force=force)
+    except ops.OpsError as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    conn = db.connect()
+    try:
+        url = db.item_detail(conn, item_id)["url"]
+    finally:
+        conn.close()
+    d = out.data
+    typer.echo(f"\n## 问题与动机\n{_flat(d['problem'])}")
+    for title, key in (
+        ("核心方法", "method"),
+        ("关键结果", "results"),
+        ("局限与争议", "limitations"),
+    ):
+        typer.echo(f"\n## {title}")
+        for point in d[key]:
+            text, link = key_point_link(_flat(point), url)
+            typer.echo(f"- {text}" + (f"  {link}" if link else ""))
+    typer.echo(f"\n## 与已有知识的关系\n{_flat(d['relation_to_known'])}")
+    typer.echo("\n## 值得精读的章节")
+    for s in d["sections_to_read"] or [{"name": "（无）", "reason": ""}]:
+        typer.echo(f"- {s['name']}" + (f"：{_flat(s['reason'])}" if s["reason"] else ""))
+    typer.echo("\n## 需要补的前置知识")
+    for p in d["prerequisites"] or [{"name": "（无）", "why": ""}]:
+        typer.echo(f"- {p['name']}" + (f"：{_flat(p['why'])}" if p["why"] else ""))
+    note = "（缓存）" if out.cached else f"（本次费用 ${out.cost:.4f}）"
+    typer.echo(f"\n生成于 {d['_created_at']} · {d['_model']}{note}")
+
+
+@app.command()
+def prereq(
+    item_id: int = typer.Argument(..., help="条目 id"),
+    force: bool = typer.Option(False, "--force", help="重新生成 AI 讲解"),
+) -> None:
+    """补前置：列出该条目的前置知识；wiki 已有的给出页面与掌握度，没有的生成简短讲解。"""
+    from secondbrain import ops
+
+    try:
+        report = ops.prerequisites(item_id, typer.echo, force=force)
+    except ops.OpsError as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    for e in report.entries:
+        typer.echo(f"\n## {e.name}" + (f"（{_flat(e.why)}）" if e.why else ""))
+        if e.page_slug:
+            typer.echo(
+                f"{OK} wiki 已有：[[{e.page_slug}]] {e.page_title}（掌握度 {e.mastery or '—'}）"
+            )
+        elif e.explanation:
+            typer.echo(f"AI 讲解（AI 生成）：{_flat(e.explanation)}")
+        else:
+            typer.echo(f"{WARN} 没有生成讲解")
+        for x in e.explainers:
+            typer.echo(f"  讲解类条目 #{x['id']} {x['title']}  {x['url']}")
+    typer.echo(
+        f"\n共 {len(report.entries)} 个前置知识；"
+        f"本次新生成 {report.generated} 条讲解，费用 ${report.cost:.4f}"
+    )
+
+
 def _print_l2(l2: dict, url: str, key_point_link) -> None:
     typer.echo(f"TL;DR：{_flat(l2['tldr'])}")
     typer.echo("要点：")

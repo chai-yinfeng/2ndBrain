@@ -16,6 +16,8 @@
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
     {% elif kind == "run" %}
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/">查看今日 digest</a></p>
+    {% elif kind.startswith("summary-") %}
+      <p class="meta">{% if task.result.cached %}已有结果{% else %}估算费用 ${{ "%.4f" | format(task.result.cost) }}{% endif %} · <a href="/item/{{ task.result.item_id }}#summary">查看深度速读</a></p>
     {% endif %}
   {% endif %}
   {% endif %}
