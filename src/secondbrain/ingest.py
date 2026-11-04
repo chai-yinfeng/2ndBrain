@@ -119,8 +119,15 @@ def collect(
     cutoff = now - timedelta(days=source.max_age_days)
     fetched = FETCHERS[source.type](source, client, fs)
     fetched.sort(key=lambda e: e.published_at or now, reverse=True)
-    recent = [e for e in fetched if not (e.published_at and e.published_at < cutoff)]
+    # 发布时间未知的条目：普通信源当作近期条目；backfill 信源放进回补候选（再按正文长度把关）
+    undated = [e for e in fetched if e.published_at is None]
+    recent = [e for e in fetched if e.published_at and e.published_at >= cutoff]
     old = [e for e in fetched if e.published_at and e.published_at < cutoff]
+    if source.backfill:
+        old += undated
+    else:
+        recent += undated
+    recent.sort(key=lambda e: e.published_at or now, reverse=True)
     # 只看最新的 limit 条：新增数 ≤ limit，且重复运行时不会逐次补抓更旧的条目。
     if limit is not None:
         recent = recent[:limit]
@@ -146,7 +153,10 @@ def collect(
                 notes.append(note)
         else:
             text, method = extract_content(entry, client, fs)
-        text = text[: fs.content_max_chars]
+        text = text[: fs.transcript_max_chars if entry.video_id else fs.content_max_chars]
+        if is_backfill and entry.published_at is None and len(text) < fs.backfill_min_content_chars:
+            notes.append(f"跳过疑似非文章页（发布时间未知且正文过短）：{entry.title}")
+            continue
         items.append(
             db.NewItem(
                 source_id=source.id,

@@ -17,8 +17,16 @@
     {% set entries = lanes.get(lane, []) %}
     {% if entries or lane != "deferred" %}
     <section class="lane" id="lane-{{ lane }}">
-      <h2>{{ title }} <small>{{ entries | length }}</small></h2>
-      {% for e in entries %}{% include "_entry.html" %}{% else %}<p class="empty">（空）</p>{% endfor %}
+      <h2>{{ title }} <small>{{ entries | length + (concepts | length if lane == "refresher" else 0) }}</small></h2>
+      {% if lane == "refresher" %}{% for c in concepts %}
+      <article class="entry concept" data-concept="{{ c.slug }}">
+        <h3>概念复习：<a href="/wiki/page/{{ c.slug }}">{{ c.title }}</a></h3>
+        <p class="meta">掌握度 {{ c.mastery or "—" }} · {{ c.est_minutes }} 分钟</p>
+        {% if c.related_title %}<p class="reason"><b>相关条目</b> <a href="/item/{{ c.related_item_id }}">{{ c.related_title }}</a></p>{% endif %}
+        {% with slug=c.slug %}{% include "_review_buttons.html" %}{% endwith %}
+      </article>
+      {% endfor %}{% endif %}
+      {% for e in entries %}{% include "_entry.html" %}{% else %}{% if not (lane == "refresher" and concepts) %}<p class="empty">（空）</p>{% endif %}{% endfor %}
     </section>
     {% endif %}
   {% endfor %}

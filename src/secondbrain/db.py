@@ -108,6 +108,25 @@ MIGRATIONS: list[str] = [
     ALTER TABLE items ADD COLUMN duration_seconds INTEGER;
     CREATE INDEX idx_items_backfill_status ON items(is_backfill, status);
     """,
+    # v5（M6）：wiki ingest 记录；digest 中的概念复习条目（概念不是 items，单独存放）。
+    """
+    CREATE TABLE wiki_ingests (
+        item_id INTEGER PRIMARY KEY REFERENCES items(id),
+        ts      TEXT NOT NULL,
+        pages   TEXT NOT NULL            -- JSON：本次新建 / 更新的页面 slug
+    );
+    CREATE TABLE digest_concepts (
+        id              INTEGER PRIMARY KEY,
+        date            TEXT NOT NULL,
+        slug            TEXT NOT NULL,
+        title           TEXT NOT NULL,
+        mastery         TEXT,
+        est_minutes     INTEGER NOT NULL,
+        related_item_id INTEGER REFERENCES items(id),  -- 近期讲到该概念的条目（可空）
+        created_at      TEXT NOT NULL,
+        UNIQUE (date, slug)
+    );
+    """,
 ]
 
 # 反馈类型 → 按钮文字（顺序即页面上的按钮顺序）
@@ -486,3 +505,59 @@ def item_assessment(conn: sqlite3.Connection, item_id: int, stage: str) -> dict 
     if row is None:
         return None
     return {**json.loads(row["data"]), "_score": row["score"], "_model": row["model"]}
+
+
+# ---------- M6：wiki ----------
+
+
+def ingested_ids(conn: sqlite3.Connection) -> set[int]:
+    return {r[0] for r in conn.execute("SELECT item_id FROM wiki_ingests")}
+
+
+def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: datetime) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO wiki_ingests (item_id, ts, pages) VALUES (?, ?, ?)",
+        (item_id, format_time(ts), json.dumps(pages, ensure_ascii=False)),
+    )
+
+
+def learned_item_ids(conn: sqlite3.Connection) -> list[int]:
+    rows = conn.execute(
+        "SELECT item_id, MIN(id) AS first FROM feedback WHERE kind = 'learned'"
+        " GROUP BY item_id ORDER BY first"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def upsert_digest_concept(
+    conn: sqlite3.Connection,
+    day: str,
+    slug: str,
+    title: str,
+    mastery: str | None,
+    minutes: int,
+    related: int | None,
+    ts: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO digest_concepts (date, slug, title, mastery, est_minutes, related_item_id,
+                                     created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date, slug) DO UPDATE SET
+            title = excluded.title, mastery = excluded.mastery,
+            est_minutes = excluded.est_minutes, related_item_id = excluded.related_item_id
+        """,
+        (day, slug, title, mastery, minutes, related, format_time(ts)),
+    )
+
+
+def digest_concepts(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT c.*, i.title AS related_title, i.url AS related_url
+        FROM digest_concepts c LEFT JOIN items i ON i.id = c.related_item_id
+        WHERE c.date = ? ORDER BY c.id
+        """,
+        (day,),
+    ).fetchall()

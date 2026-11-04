@@ -4,18 +4,34 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 def clean_title(title: str | None) -> str:
     return re.sub(r"\s+", " ", title or "").strip()
 
 
+# 早于该年份或晚于"现在 + 1 天"的发布时间视为异常（如 0001-01-01），按未知处理
+MIN_PLAUSIBLE_YEAR = 1990
+
+
+def plausible(dt: datetime | None, now: datetime | None = None) -> datetime | None:
+    if dt is None:
+        return None
+    now = now or datetime.now(UTC)
+    if dt.year < MIN_PLAUSIBLE_YEAR or dt > now + timedelta(days=1):
+        return None
+    return dt
+
+
 def struct_time_to_datetime(value: time.struct_time | None) -> datetime | None:
-    """feedparser 的 *_parsed 字段（UTC struct_time）转 aware datetime。"""
+    """feedparser 的 *_parsed 字段（UTC struct_time）转 aware datetime；异常值返回 None。"""
     if not value:
         return None
-    return datetime(*value[:6], tzinfo=UTC)
+    try:
+        return plausible(datetime(*value[:6], tzinfo=UTC))
+    except ValueError:
+        return None
 
 
 def parse_iso_datetime(value: str | None) -> datetime | None:
@@ -25,4 +41,4 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
         dt = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return plausible(dt if dt.tzinfo else dt.replace(tzinfo=UTC))

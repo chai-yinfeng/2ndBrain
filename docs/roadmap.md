@@ -154,14 +154,14 @@ uv run pytest -q tests/test_backfill.py                         # fixture 归档
 
 ## M6 — 知识 Wiki（LLM-Wiki 闭环）
 
-- [ ] `data/wiki/`：`index.md`（目录 + 一行摘要）、`log.md`（只追加，`## [date] ingest | Title`）、`pages/{concepts,entities,papers}/*.md`，`[[wikilink]]`，YAML frontmatter；原文存 `data/raw/` 并链接回去
-- [ ] `wiki/ingest.py`：`sb wiki ingest <item_id>` / `--pending`；LLM 读条目 + index.md + 相关页面，输出结构化"页面新建 / 更新"操作，由代码落盘（LLM 不直接写文件）
-- [ ] `wiki/lint.py`：`sb wiki lint`：孤立页、断链、缺失概念页、可能矛盾（LLM 辅助）
-- [ ] 闭环：L1 prompt 注入 index.md 相关条目及其 mastery 作为"已知知识"→ 扎实的概念降低入门讲解的 novelty，不扎实的概念提高讲解类内容的 refresher_value，与已知概念相关的新进展加分（ADR 0003）
-- [ ] 复习调度：概念页 frontmatter 记录 `mastery`、`last_reviewed`、`interval`（SM-2 简化版）；`sb wiki due` 列出到期概念；到期概念进入温故栏，若近期采集到讲该概念的好文则一起推
-- [ ] 复习按钮："还记得 / 模糊 / 忘了"调整 interval 与 mastery
-- [ ] L2 `prerequisites[]` 与 wiki 概念页匹配，用于前置知识提示
-- [ ] Web：`/wiki` 浏览页面与 index；（可选）简单关系图
+- [x] `data/wiki/`：`index.md`（目录 + 一行摘要）、`log.md`（只追加，`## [date] ingest | Title`）、`pages/{concepts,entities,papers}/*.md`，`[[wikilink]]`，YAML frontmatter；原文存 `data/raw/` 并链接回去
+- [x] `wiki/ingest.py`：`sb wiki ingest <item_id>` / `--pending`；LLM 读条目 + index.md + 相关页面，输出结构化"页面新建 / 更新"操作，由代码落盘（LLM 不直接写文件）
+- [x] `wiki/lint.py`：`sb wiki lint`：孤立页、断链、缺失概念页、可能矛盾（LLM 辅助）
+- [x] 闭环：L1 prompt 注入 index.md 相关条目及其 mastery 作为"已知知识"→ 扎实的概念降低入门讲解的 novelty，不扎实的概念提高讲解类内容的 refresher_value，与已知概念相关的新进展加分（ADR 0003）
+- [x] 复习调度：概念页 frontmatter 记录 `mastery`、`last_reviewed`、`interval`（SM-2 简化版）；`sb wiki due` 列出到期概念；到期概念进入温故栏，若近期采集到讲该概念的好文则一起推
+- [x] 复习按钮："还记得 / 模糊 / 忘了"调整 interval 与 mastery
+- [x] L2 `prerequisites[]` 与 wiki 概念页匹配，用于前置知识提示
+- [x] Web：`/wiki` 浏览页面与 index（关系图未做，见 Backlog "wiki 图谱可视化增强"）
 
 **模块**：`wiki/`、`pipeline/l1_screen.py`、`web/`、`cli.py`
 

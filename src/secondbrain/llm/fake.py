@@ -17,7 +17,9 @@ from secondbrain.llm.schemas import (
     ChunkNotes,
     L1Response,
     L2Response,
+    LintFindings,
     ProfileProposal,
+    WikiPlan,
 )
 
 DEFAULT_KEYWORDS = (
@@ -77,8 +79,10 @@ def _keywords(system: str) -> set[str]:
 
 
 def _payload(messages: list[dict[str, str]]) -> dict:
+    """user 消息以单行 json 结尾（前面可能有"已知知识"等说明）。"""
     content = messages[-1]["content"]
-    return json.loads(content[content.index("{") :])
+    start = content.rfind("\n{") + 1 if "\n{" in content else content.index("{")
+    return json.loads(content[start:])
 
 
 def _assess(title: str, text: str, keywords: set[str]) -> dict:
@@ -142,6 +146,10 @@ class FakeBackend:
             obj = _chunk_notes(payload)
         elif schema is ProfileProposal:
             obj = _profile_proposal(payload)
+        elif schema is WikiPlan:
+            obj = _wiki_plan(payload)
+        elif schema is LintFindings:
+            obj = {"issues": []}
         else:
             raise LLMError(f"fake 后端不支持的 schema：{schema.__name__}")
         prompt_chars = sum(len(m["content"]) for m in messages)
@@ -220,3 +228,47 @@ def _chunk_notes(payload: dict) -> dict:
         elif line.strip():
             points.append({"t": None, "text": line.strip()[:100]})
     return {"summary": f"（fake）第 {payload.get('part', '?')} 段", "points": points}
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60].strip("-") or "item"
+
+
+def _wiki_plan(payload: dict) -> dict:
+    """确定性的 wiki 编辑：为条目建 paper 页；前置知识若已有页面则加链接，否则新建概念页。"""
+    item = payload["item"]
+    paper = _slug(item["title"])
+    index = payload.get("index", "")
+    existing = {p["slug"] for p in payload.get("related_pages", [])}
+    concepts = [_slug(c) for c in (item.get("prerequisites") or [])[:3]]
+    concepts = [c for c in dict.fromkeys(concepts) if c != paper]
+    points = "\n".join(f"- {kp}" for kp in item.get("key_points") or []) or f"- {item['title']}"
+    related = "\n".join(f"- [[{c}]]" for c in concepts)
+    creates = [
+        {
+            "slug": paper,
+            "type": "paper",
+            "title": item["title"],
+            "summary": "（fake）" + (item.get("tldr") or item["title"])[:60],
+            "body": f"## 要点\n\n{points}" + (f"\n\n## 相关\n\n{related}" if related else ""),
+        }
+    ]
+    updates = []
+    for c, name in zip(concepts, item.get("prerequisites") or [], strict=False):
+        if c in existing or f"[[{c}]]" in index:
+            updates.append({"slug": c, "action": "add_links", "links": [paper]})
+        else:
+            creates.append(
+                {
+                    "slug": c,
+                    "type": "concept",
+                    "title": name,
+                    "summary": f"（fake）{name}",
+                    "body": f"## 是什么\n\n（fake）{name}。\n\n## 相关\n\n- [[{paper}]]",
+                }
+            )
+    return {
+        "summary": f"（fake）新建 {len(creates)} 页，更新 {len(updates)} 页",
+        "creates": creates,
+        "updates": updates,
+    }

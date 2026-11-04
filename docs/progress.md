@@ -9,6 +9,8 @@
 - **温故 / 意外是否预留预算（M2 遗留）**：推荐默认：预留。tiering 新增 `lane_budget_reserve`（默认 refresher 15 分钟、serendipity 10 分钟）；该栏没有合格候选时释放回总预算，must_read 不能占用（ADR 0007）。（已按默认处理）
 - **真实 DeepSeek 下的 profile 提案质量（M4 遗留）**：推荐默认：暂不验证，等用户积累真实反馈后由用户在 UI 中触发。（已按默认处理）
 - **Web"生成修改提案"没有费用确认（M4 遗留）**：推荐默认：保持（单次约几美分），在按钮旁显示"将调用 strong 模型"提示（M5 已加，"精读"按钮同样提示）。（已按默认处理）
+- **超长视频字幕被截断（M5 遗留）**：推荐默认：视频单独使用 `fetch.transcript_max_chars`（默认 40 万字符），由 map-reduce 处理。（已按默认处理，M6 已实现）
+- **发布时间异常的条目（M5 遗留）**：推荐默认：早于 1990 年、晚于当前 + 1 天（如 0001-01-01）的发布时间按未知处理；回补信源中时间未知且正文短于 `fetch.backfill_min_content_chars`（2000）的条目视为非文章页，不入库。（已按默认处理，M6 已实现）默认 data 中已入库的那一条（item 271 "FAQ"，lilian-weng，回补池，正文 1327 字符）没有清理，待用户决定是否删除；保留也只会在回补粗筛时多花一点 L1。
 
 ## M0 — 仓库与骨架（2026-11-04）
 
@@ -225,3 +227,36 @@
 - 频道 RSS 只有最近 15 个视频，看不到 Karpathy 早期的系列课程。
 - lilian-weng 的 feed 中有一条发布时间为 0001-01-01 的条目（疑似站点的非文章页面），已进入回补池，L1 会自行判断。
 - 默认 data 中的回补池（53 条）会在下次 `sb run` 时开始粗筛（每次最多 10 条）。
+
+## M6 — 知识 Wiki（LLM-Wiki 闭环）（2026-11-04，分支 `m6-wiki`）
+
+**做了什么**
+- M5 遗留：视频字幕单独上限 `transcript_max_chars`；发布时间合理性检查（`sources/base.plausible`）；回补中时间未知的短页不入库。
+- 新增依赖 markdown（Web 渲染 wiki 页面）。
+- `wiki/store.py`：布局与初始化、slug 规范化与路径校验、frontmatter 读写、index 重建、log 追加、正文的受限编辑。
+- `wiki/ingest.py`：结构化提案 `WikiPlan`（prompt `wiki_ingest.md`），由代码校验后落盘；`wiki_ingests` 表保证幂等；新概念的掌握度取自 profile。
+- `wiki/lint.py`：断链、缺失页、孤立页、缺字段、index 不一致；`--llm` 检查矛盾。
+- `wiki/review.py`：SM-2 简化版、到期列表、复习写回。
+- `wiki/loop.py`：L1"已知知识"、到期概念的相关条目、前置知识与概念页匹配。
+- `pipeline/run.py`：L1 的 user 消息附"已知知识"；到期概念作为只进温故栏的候选参与分级，写入 `digest_concepts`。
+- `db.py` 迁移 v5：新增 `wiki_ingests`、`digest_concepts`。
+- CLI：`sb wiki ingest [ID] [--pending] [--force]`、`sb wiki lint [--llm]`、`sb wiki due [--date]`、`sb wiki review <slug> <结果>`；`sb run` 会使用 wiki；`digest show` 显示概念复习。
+- Web：`/wiki`、`/wiki/page/<slug>`、复习按钮（HTMX）；首页温故栏显示概念复习条目及相关条目；"建议先回炉"链接到 wiki 页面；导航栏新增 Wiki。
+- 规则取舍见 ADR 0010。
+- 测试：新增 `tests/test_wiki.py`（16）；`test_backfill.py` 与 `test_youtube.py` 补充了 M5 遗留项的测试。
+
+**验收结果**
+- `uv run pytest -q tests/test_wiki.py`：16 passed；`uv run pytest -q`：190 passed；`uv run ruff check .`：通过。
+- 默认 data：
+  - `sb wiki ingest --pending`：报告 0 条待 ingest，并初始化了 `data/wiki` 骨架（空 index、log）。
+  - `sb wiki lint`：0 项问题。
+- 真实 DeepSeek 演示：
+  - 环境：临时 SB_DATA_DIR（复制 brain.db，profile 用 example），为 item 217 插入一条"学了"反馈。
+  - `sb wiki ingest --pending`：新建 4 个概念页（token、context-window、tool-use、reasoning-model）和 1 个 paper 页（how-i-use-llms）。
+  - 费用：预估 $0.0085，实际 $0.0160（非高峰；输出 7654 token，之后已把输出预估调到 8000）。
+  - `sb wiki lint`：1 项（paper 页是孤立页，属预期）。
+  - `sb wiki due`：今天 0 个，明天 4 个。
+
+**遗留问题**
+- 名字匹配是子串匹配（"已知知识"、相关页面、前置知识），可能漏配或误配。
+- 受限编辑无法删除段落，需要手动在 Obsidian 或编辑器里改。

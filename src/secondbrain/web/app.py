@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +28,9 @@ from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
+from secondbrain.wiki.loop import wiki_refresh_link
+from secondbrain.wiki.review import GRADES, due_concepts, due_date, review
+from secondbrain.wiki.store import WIKILINK_RE, Wiki, open_wiki, slugify_safe
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -68,9 +73,42 @@ def _budget() -> int:
         return 0
 
 
-def _entry(row: sqlite3.Row, l1: dict, l2: dict | None, kinds: set[str], profile: Profile) -> dict:
+def _wiki() -> Wiki:
+    return open_wiki(config.wiki_dir(), config.raw_dir())
+
+
+def refresh_hints(
+    prereqs: list[str], profile: Profile, wiki: Wiki | None
+) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """前置知识分成 (建议先回炉 [(概念, wiki 链接或 None)], 其余)。
+
+    命中 wiki 中掌握度不是"扎实"的概念页 → 链接到该页；否则命中 profile 中不扎实的领域 → 无链接。"""
+    weak_profile = set(weak_prerequisites(profile, prereqs))
+    refresh, rest = [], []
+    for prereq in prereqs:
+        page, needs = wiki_refresh_link(wiki, prereq)
+        if page is not None:
+            if needs:
+                refresh.append((prereq, f"/wiki/page/{page.slug}"))
+            else:
+                rest.append(prereq)
+        elif prereq in weak_profile:
+            refresh.append((prereq, None))
+        else:
+            rest.append(prereq)
+    return refresh, rest
+
+
+def _entry(
+    row: sqlite3.Row,
+    l1: dict,
+    l2: dict | None,
+    kinds: set[str],
+    profile: Profile,
+    wiki: Wiki | None = None,
+) -> dict:
     prereqs = (l2 or {}).get("prerequisites", [])
-    weak = weak_prerequisites(profile, prereqs)
+    refresh, rest = refresh_hints(prereqs, profile, wiki)
     return {
         "item_id": row["item_id"],
         "title": row["title"],
@@ -83,8 +121,8 @@ def _entry(row: sqlite3.Row, l1: dict, l2: dict | None, kinds: set[str], profile
         "tldr": (l2 or {}).get("tldr"),
         "reason": (l2 or {}).get("why_for_you") or l1.get("one_line_reason", ""),
         "content_type": l1.get("content_type"),
-        "refresh_first": weak,
-        "prerequisites": [p for p in prereqs if p not in weak],
+        "refresh_first": refresh,
+        "prerequisites": rest,
         "kinds": kinds,
         "has_l2": l2 is not None,
         "no_transcript": row["extract_method"] == "no_transcript",
@@ -105,9 +143,11 @@ def create_app() -> FastAPI:
             except ValueError as exc:
                 raise HTTPException(400, "date 格式应为 YYYY-MM-DD") from exc
         profile = _profile()
+        wiki = _wiki()
         with _conn() as conn:
             day = day or db.latest_digest_date(conn)
             rows = db.digest_rows(conn, day) if day else []
+            concept_rows = db.digest_concepts(conn, day) if day else []
             l1 = db.latest_assessments(conn, "L1")
             l2 = db.latest_assessments(conn, "L2")
             kinds = db.feedback_kinds(conn, [r["item_id"] for r in rows])
@@ -120,9 +160,11 @@ def create_app() -> FastAPI:
                 l2.get(row["item_id"]),
                 kinds[row["item_id"]],
                 profile,
+                wiki,
             )
             lanes.setdefault(row["lane"], []).append(entry)
         used = sum(r["est_minutes"] for r in rows if r["lane"] in TOP_LANES)
+        used += sum(c["est_minutes"] for c in concept_rows)
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -134,6 +176,8 @@ def create_app() -> FastAPI:
                 "budget": _budget(),
                 "backlog": backlog,
                 "archived": len(lanes.get("archived", [])),
+                "concepts": concept_rows,
+                "grades": GRADES,
             },
         )
 
@@ -165,7 +209,7 @@ def create_app() -> FastAPI:
                 "history": history,
                 "kinds": kinds,
                 "digests": lanes,
-                "refresh_first": weak_prerequisites(profile, prereqs),
+                "refresh_first": refresh_hints(prereqs, profile, _wiki())[0],
             },
         )
 
@@ -320,7 +364,73 @@ def create_app() -> FastAPI:
             context.update(l2=l2, key_points=_key_points(l2, row["url"]))
         return templates.TemplateResponse(request, "_deep.html", context)
 
+    # ---------- wiki ----------
+
+    @app.get("/wiki", response_class=HTMLResponse)
+    def wiki_index(request: Request) -> HTMLResponse:
+        wiki = _wiki()
+        today = datetime.now().date()
+        due = [{"page": p, "due": due_date(p)} for p in due_concepts(wiki, today)]
+        index_html = render_markdown(wiki.index_path.read_text(encoding="utf-8"), wiki)
+        return templates.TemplateResponse(
+            request,
+            "wiki.html",
+            {"index_html": index_html, "due": due, "grades": GRADES, "count": len(wiki.pages)},
+        )
+
+    @app.get("/wiki/page/{slug}", response_class=HTMLResponse)
+    def wiki_page(request: Request, slug: str) -> HTMLResponse:
+        wiki = _wiki()
+        page = wiki.pages.get(slug) or wiki.find(slug)
+        if page is None:
+            raise HTTPException(404, "页面不存在")
+        return templates.TemplateResponse(
+            request,
+            "wiki_page.html",
+            {
+                "page": page,
+                "body_html": render_markdown(page.body, wiki),
+                "due": due_date(page),
+                "grades": GRADES,
+            },
+        )
+
+    @app.post("/wiki/review", response_class=HTMLResponse)
+    def wiki_review(
+        request: Request, slug: str = Form(...), grade: str = Form(...)
+    ) -> HTMLResponse:
+        if grade not in GRADES:
+            raise HTTPException(400, f"未知的复习结果：{grade}")
+        wiki = _wiki()
+        page = wiki.pages.get(slug)
+        if page is None or page.type != "concept":
+            raise HTTPException(404, "概念页不存在")
+        outcome = review(wiki, page, grade, datetime.now().date())
+        return templates.TemplateResponse(
+            request, "_review.html", {"outcome": outcome, "grades": GRADES, "page": page}
+        )
+
     return app
+
+
+_RAW_LINK_RE = re.compile(r"\]\((?:\.\./)+raw/(\d+)\.md\)")
+
+
+def render_markdown(text: str, wiki: Wiki) -> str:
+    """wiki Markdown → HTML：先转义 "<"（不渲染任何原始 HTML），[[slug]] 变为站内链接，
+    指向 data/raw 的原文链接变为条目详情页。"""
+
+    def link(match: re.Match) -> str:
+        target = slugify_safe(match.group(1))
+        page = wiki.pages.get(target)
+        if page is None:
+            return f'<span class="missing">{match.group(1).replace("<", "&lt;")}</span>'
+        return f"[{page.title}](/wiki/page/{page.slug})"
+
+    safe = text.replace("<", "&lt;")
+    safe = _RAW_LINK_RE.sub(r"](/item/\1)", safe)
+    safe = WIKILINK_RE.sub(link, safe)
+    return markdown.markdown(safe, extensions=["tables", "fenced_code", "sane_lists"])
 
 
 def _key_points(l2: dict | None, url: str) -> list[tuple[str, str | None]]:

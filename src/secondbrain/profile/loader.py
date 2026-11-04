@@ -131,3 +131,12 @@ def weak_prerequisites(profile: Profile, prerequisites: list[str]) -> list[str]:
         if len(core) >= 3 and core in weak_text:
             result.append(prereq)
     return result
+
+
+def mastery_for(profile: Profile, names: list[str], default: str = "接触过") -> str:
+    """名字（≥ 3 个字符）出现在某个领域的名称或说明里时，返回该领域的掌握度；否则返回 default。"""
+    for d in profile.domains:
+        text = f"{d.domain} {d.note}".lower()
+        if d.mastery and any(len(n) >= 3 and n.lower() in text for n in names):
+            return d.mastery
+    return default

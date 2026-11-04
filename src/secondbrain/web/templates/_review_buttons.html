@@ -1,0 +1,7 @@
+{# 概念复习按钮：POST /wiki/review，结果原地替换 #}
+<div class="feedback" id="review-{{ slug }}">
+  {% for grade, label in grades.items() %}
+  <button type="button" class="fb" hx-post="/wiki/review" hx-vals='{"slug": "{{ slug }}", "grade": "{{ grade }}"}'
+          hx-target="#review-{{ slug }}" hx-swap="outerHTML">{{ label }}</button>
+  {% endfor %}
+</div>

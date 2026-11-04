@@ -54,6 +54,7 @@ class Candidate:
     has_l2: bool = False
     deferred_from: str | None = None  # ISO 日期：首次被顺延的日期
     is_backfill: bool = False  # 经典回补条目：只进温故栏
+    is_concept: bool = False  # wiki 中到期复习的概念（item_id 为负数的占位 id）：只进温故栏
 
 
 @dataclass(frozen=True)
@@ -84,8 +85,8 @@ def eligible_lanes(c: Candidate, th: Thresholds) -> list[str]:
     """候选可进入的前排 lane。只有经过 L2 的条目才能进入前排；expansion 只进意外栏。"""
     if not c.has_l2:
         return []
-    if c.is_backfill:
-        return ["refresher"]  # 回补条目已按温故优先级挑选过，只占温故栏
+    if c.is_backfill or c.is_concept:
+        return ["refresher"]  # 回补条目 / 到期概念已按温故优先级挑选过，只占温故栏
     if c.role == "expansion":
         return ["serendipity"] if is_serendipity(c, th) else []
     lanes: list[str] = []
