@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}信源 · Second Brain{% endblock %}
+{% block content %}
+<h1>信源 <small class="meta">{{ sources | length }} 个</small></h1>
+<p class="meta">读取 {{ path }}{% if is_example %}（还没有个人配置；第一次修改时会先复制为 config/sources.yaml）{% endif %}。这里的修改写入 config/sources.yaml（gitignore），写回时注释不保留，字段说明见 config/sources.example.yaml。</p>
+{% if saved %}<p class="saved">已保存{% if saved != "deleted" %}：{{ saved }}{% else %}（已删除）{% endif %}</p>{% endif %}
+{% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+
+<section class="entry">
+  <table class="scores sources">
+    <tr><th>id</th><th>类型</th><th>trust</th><th>role</th><th>状态</th><th>最近抓取</th><th>入库</th><th>正 / 负</th><th></th></tr>
+    {% for s in sources %}{% set o = overview.get(s.id) %}
+    <tr data-source="{{ s.id }}">
+      <td><b>{{ s.id }}</b>{% if s.tags %}<br><span class="meta">{{ s.tags | join(", ") }}</span>{% endif %}</td>
+      <td>{{ s.type }}</td><td>{{ s.trust }}</td><td>{{ s.role }}</td>
+      <td>{% if not s.enabled %}停用{% elif s.needs_scraper %}needs_scraper{% else %}启用{% endif %}</td>
+      <td>{% if o and o.last_fetch_at %}{{ "✓" if o.last_fetch_status == "ok" else "✗" }} {{ o.last_fetch_at }}{% if o.last_fetch_status == "ok" %}（新增 {{ o.last_fetch_added }}）{% else %}<br><span class="meta">{{ o.last_fetch_message }}</span>{% endif %}{% else %}<span class="meta">—</span>{% endif %}</td>
+      <td>{{ o.items if o else 0 }}</td>
+      <td>{{ o.positive if o else 0 }} / {{ o.negative if o else 0 }}</td>
+      <td class="actions">
+        <form method="post" action="/sources/{{ s.id }}/toggle"><button type="submit" class="fb" title="切换启用 / 停用，写入 config/sources.yaml">{{ "停用" if s.enabled else "启用" }}</button></form>
+        <form method="post" action="/sources/{{ s.id }}/delete"><button type="submit" class="fb" title="从 config/sources.yaml 删除（需要再确认一次；已入库的条目保留）">删除</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section class="entry">
+  <h2>添加信源</h2>
+  <p class="meta">先「试抓」：只拉取并解析 feed / sitemap / API，列出前 10 条标题与日期，不抓正文、不写数据库（几秒）；确认无误后再保存。</p>
+  <form hx-post="/sources/preview" hx-target="#source-preview" hx-swap="innerHTML" class="source-form">
+    <label>id <input name="id" required pattern="[a-z0-9][a-z0-9-]*" placeholder="my-blog"></label>
+    <label>类型 <select name="type">{% for t in types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}</select></label>
+    <label class="wide">url <input name="url" placeholder="RSS / sitemap.xml / YouTube 频道 feed 地址"></label>
+    <label class="wide">query <input name="query" placeholder="arxiv 检索式，如 cat:cs.DC AND abs:inference"></label>
+    <label>trust <input name="trust" type="number" min="1" max="5" value="3"></label>
+    <label>role <select name="role"><option value="core">core</option><option value="expansion">expansion</option></select></label>
+    <label>max_age_days <input name="max_age_days" type="number" min="1" value="30"></label>
+    <label class="wide">tags <input name="tags" placeholder="逗号分隔，如 inference, serving"></label>
+    <label class="wide">url_pattern（sitemap）<input name="url_pattern" placeholder="只保留匹配该正则的 URL"></label>
+    <label>use_lastmod（sitemap）<input name="use_lastmod" type="checkbox" value="1"></label>
+    <p><button type="submit" class="fb">试抓</button></p>
+  </form>
+  <div id="source-preview"></div>
+</section>
+{% endblock %}

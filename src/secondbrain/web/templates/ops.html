@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}运维 · Second Brain{% endblock %}
+{% block content %}
+<h1>运维</h1>
+
+<section class="entry">
+  <h2>立即运行</h2>
+  <p class="meta">后台执行与 <code>sb run</code> 相同的流程：抓取全部信源 → L0 → L1 → L2 → 分级，写入今天的 digest。通常 2–5 分钟；费用取决于新条目数，单次 L2 预估超过 run.max_cost_usd=${{ max_cost }} 时不调用 L2。CLI、定时任务与这里共用一把锁，同一时间只跑一个。</p>
+  <p class="{{ 'refresh' if peak else 'meta' }}" data-peak="{{ 'true' if peak else 'false' }}">
+    {% if peak %}当前是 DeepSeek 高峰时段：按全价计费（非高峰为 ×{{ multiplier }}）。{% else %}当前不是 DeepSeek 高峰时段：费用 ×{{ multiplier }}。{% endif %}
+  </p>
+  {% if running and not (run_task and run_task.running) %}<p class="refresh">已有 sb run 在运行（CLI 或定时任务）。</p>{% endif %}
+  <button type="button" class="fb" hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML">立即运行</button>
+  {% with kind="run", task=run_task, message=None %}{% include "_task.html" %}{% endwith %}
+</section>
+
+<section class="entry">
+  <h2>LLM 用量</h2>
+  {% for label, rows, cost in (("今天", today_rows, today_cost), ("近 7 天", week_rows, week_cost)) %}
+  <h3>{{ label }} <small class="meta">估算 ${{ "%.4f" | format(cost) }}</small></h3>
+  {% if rows %}
+  <table class="scores">
+    <tr><th>阶段</th><th>模型</th><th>调用</th><th>prompt</th><th>cache hit</th><th>completion</th><th>费用</th></tr>
+    {% for r in rows %}
+    <tr><td>{{ r.stage }}</td><td>{{ r.model }}</td><td>{{ r.calls }}</td><td>{{ r.prompt_tokens }}</td><td>{{ r.cache_hit_tokens }}</td><td>{{ r.completion_tokens }}</td><td>${{ "%.4f" | format(r.cost_usd) }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="empty">（没有 LLM 调用记录）</p>{% endif %}
+  {% endfor %}
+</section>
+
+<section class="entry">
+  <h2>信源调整建议</h2>
+  <p class="meta">近 {{ pers.tune_window_days }} 天，每个条目取当前反馈：有收获为正，不感兴趣 / 没价值为负；样本 ≥ {{ pers.tune_min_samples }} 才给 trust ±1 建议。应用后写入 config/sources.yaml（只改 trust 行，保留注释），与 <code>sb sources tune --apply</code> 相同；不调用 LLM。</p>
+  {% if sources_error %}<p class="refresh">✗ {{ sources_error }}</p>{% endif %}
+  {% if stats %}
+  <table class="scores">
+    <tr><th>信源</th><th>正</th><th>负</th><th>trust</th><th>说明</th></tr>
+    {% for st in stats %}
+    <tr><td>{{ st.source_id }}</td><td>{{ st.positive }}</td><td>{{ st.negative }}</td><td>{{ st.trust }}{% if st.suggested %} → {{ st.suggested }}{% endif %}</td><td>{{ st.reason }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="empty">（还没有反馈）</p>{% endif %}
+  {% if silent %}<p class="meta">另有 {{ silent }} 个信源没有反馈。</p>{% endif %}
+  {% if suggestions %}
+  <button type="button" class="fb" hx-post="/ops/tune" hx-target="#tune-result" hx-confirm="把 {{ suggestions | length }} 条 trust 建议写入 config/sources.yaml？">应用 {{ suggestions | length }} 条建议</button>
+  {% else %}<p class="meta">没有 trust 调整建议。</p>{% endif %}
+  <div id="tune-result"></div>
+</section>
+
+<section class="entry">
+  <h2>画像调整建议</h2>
+  <p class="meta">在 <a href="/profile">画像</a> 页根据近期反馈生成 profile.md 修改提案（strong 模型，约几美分），确认后才写入并自动备份。</p>
+</section>
+{% endblock %}

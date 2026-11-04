@@ -25,6 +25,8 @@ user 消息开头可能附有"已知知识"段：用户 wiki 中与本批条目�
 - 掌握度为"接触过 / 想回炉"的概念：讲得好的讲解类内容提高 refresher_value；
 - 与已知概念直接相关的新进展（新方法、新结果、对已知做法的改进）提高 novelty 与 relevance。
 
+user 消息开头还可能附有"用户近期觉得太难的内容所需前置知识"：讲清这些前置知识的 explainer / survey 提高 refresher_value。
+
 ## 输出格式
 
 只输出一个 json 对象。items 中每个输入条目恰好一项，id 与输入一致，例如：

@@ -1,4 +1,7 @@
-"""把"学了"的条目编进 wiki：LLM 输出受限的编辑操作（WikiPlan），代码校验后落盘。"""
+"""把"有收获"的条目编进 wiki：LLM 输出受限的编辑操作（WikiPlan），代码校验后落盘。
+
+新建的概念页掌握度一律从"接触过"起步（ADR 0013：掌握度只在概念层由复习调整，
+不再从 profile 继承）；更新已有页面时不改掌握度。"""
 
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ from secondbrain.llm.schemas import PageUpdate, WikiPlan
 from secondbrain.llm.usage import estimate_cost
 from secondbrain.models import FilterSettings
 from secondbrain.pipeline.run import PROMPTS_DIR
-from secondbrain.profile.loader import Profile, mastery_for
+from secondbrain.profile.loader import Profile
 from secondbrain.wiki.store import (
     WIKILINK_RE,
     Page,
@@ -29,6 +32,7 @@ from secondbrain.wiki.store import (
 
 EST_CHARS_PER_TOKEN = 3
 EST_OUTPUT_TOKENS = 8000  # 实测一次 ingest 输出约 7–8k token
+NEW_CONCEPT_MASTERY = "接触过"
 
 
 @dataclass
@@ -113,8 +117,10 @@ def apply_plan(
     row: sqlite3.Row,
     profile: Profile,
     today: date,
+    first_review_days: int = 3,
 ) -> IngestResult:
-    """校验并执行编辑操作；非法操作被拒绝并记录原因。最后重建 index、追加 log。"""
+    """校验并执行编辑操作；非法操作被拒绝并记录原因。最后重建 index、追加 log。
+    profile 目前不参与（新概念页的掌握度固定从"接触过"起步），保留参数以兼容调用方。"""
     result = IngestResult(row["id"], row["title"])
     result.rejected.extend(f"解析时丢弃 {d}" for d in plan.dropped)
     source_line = f"[{row['title']}]({{raw}})（[原文]({row['url']})）"
@@ -145,16 +151,15 @@ def apply_plan(
             touched[existing.slug] = existing
             result.updated.append(existing.slug)
             continue
-        mastery = None
-        if op.type == "concept":
-            mastery = mastery_for(profile, [op.title, slug.replace("-", " "), *op.aliases])
+        concept = op.type == "concept"
         meta = new_meta(
             op.title,
             op.type,
             today,
             summary=op.summary.strip(),
             aliases=op.aliases,
-            mastery=mastery,
+            mastery=NEW_CONCEPT_MASTERY if concept else None,
+            interval_days=first_review_days if concept else 1,
         )
         page = Page(slug, meta, f"# {op.title}\n\n{_clean_links(op.body).strip()}\n")
         add_source(page)
@@ -210,8 +215,9 @@ def _apply_update(wiki: Wiki, page: Page, op: PageUpdate) -> str | None:
 
 
 def pending_items(conn: sqlite3.Connection) -> list[int]:
+    """当前状态为"有收获"且尚未编入 wiki 的条目。"""
     done = db.ingested_ids(conn)
-    return [i for i in db.learned_item_ids(conn) if i not in done]
+    return [i for i in db.gained_item_ids(conn) if i not in done]
 
 
 def ingest_item(
@@ -234,7 +240,7 @@ def ingest_item(
         return None, estimate, messages
     wiki.write_raw(row["id"], row["title"], row["url"], row["content"] or row["summary"] or "")
     plan, usage = backend.complete_json(messages, WikiPlan, "strong")
-    result = apply_plan(wiki, plan, row, profile, today)
+    result = apply_plan(wiki, plan, row, profile, today, s.wiki.first_review_days)
     result.usage = usage
     db.record_ingest(conn, row["id"], result.created + result.updated, datetime.now(UTC))
     conn.commit()

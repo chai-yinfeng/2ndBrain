@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}知识图谱 · Wiki{% endblock %}
+{% block content %}
+<p class="meta"><a href="/wiki">← Wiki</a></p>
+<h1>知识图谱 <small class="meta">{{ count }} 个页面</small></h1>
+{% if not count %}
+<p class="empty" id="graph-empty">在文章上点「有收获」并编进 wiki 后，这里会出现图谱。</p>
+{% else %}
+<div class="graph-filters">
+  <span class="meta">类型：</span>
+  {% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ t }}</label>{% endfor %}
+  <span class="meta">掌握度：</span>
+  {% for m in ("陌生", "接触过", "想回炉", "扎实", "无") %}<label><input type="checkbox" class="f-mastery" value="{{ m }}" checked> <span class="dot" data-mastery="{{ m }}"></span>{{ m }}</label>{% endfor %}
+  <span class="meta">粗边框 = 今天到期复习；节点大小 ~ 连接数；点击打开页面。</span>
+</div>
+<div id="graph" data-src="/wiki/graph.json"></div>
+<script src="/static/cytoscape.min.js"></script>
+<script>
+(function () {
+  const COLORS = {"陌生": "#d64545", "接触过": "#e0a030", "想回炉": "#7a5cd6", "扎实": "#2f9e5a", "无": "#9aa0a6"};
+  document.querySelectorAll(".dot").forEach(d => d.style.background = COLORS[d.dataset.mastery]);
+  fetch("/wiki/graph.json").then(r => r.json()).then(data => {
+    const elements = [];
+    data.nodes.forEach(n => elements.push({data: {
+      id: n.id, label: n.label, type: n.type, mastery: n.mastery || "无", due: n.due,
+      size: 18 + 8 * Math.sqrt(n.degree), url: n.url, color: COLORS[n.mastery || "无"] || COLORS["无"]
+    }}));
+    data.edges.forEach(e => elements.push({data: {id: e.source + "__" + e.target, source: e.source, target: e.target}}));
+    const fg = getComputedStyle(document.documentElement).getPropertyValue("--fg").trim() || "#1f2328";
+    const cy = cytoscape({
+      container: document.getElementById("graph"),
+      elements: elements,
+      layout: {name: "cose", animate: false, nodeRepulsion: 8000},
+      style: [
+        {selector: "node", style: {
+          "background-color": "data(color)", "label": "data(label)", "width": "data(size)",
+          "height": "data(size)", "font-size": 10, "color": fg, "text-valign": "bottom",
+          "text-margin-y": 3}},
+        {selector: "node[type = 'paper']", style: {"shape": "round-rectangle"}},
+        {selector: "node[type = 'entity']", style: {"shape": "diamond"}},
+        {selector: "node[?due]", style: {"border-width": 4, "border-color": "#d64545"}},
+        {selector: "edge", style: {"width": 1, "line-color": "#b8bcc2", "curve-style": "haystack"}}
+      ]
+    });
+    cy.on("tap", "node", evt => { window.location.href = evt.target.data("url"); });
+    function applyFilters() {
+      const types = new Set([...document.querySelectorAll(".f-type:checked")].map(x => x.value));
+      const levels = new Set([...document.querySelectorAll(".f-mastery:checked")].map(x => x.value));
+      cy.nodes().forEach(n => {
+        const show = types.has(n.data("type")) && levels.has(n.data("mastery"));
+        n.style("display", show ? "element" : "none");
+      });
+    }
+    document.querySelectorAll(".f-type, .f-mastery").forEach(x => x.addEventListener("change", applyFilters));
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

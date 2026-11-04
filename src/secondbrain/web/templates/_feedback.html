@@ -1,18 +1,23 @@
-{# 反馈按钮组；POST /feedback 返回本片段，HTMX 原地替换。 #}
+{# 文章反馈按钮（ADR 0013）：两组，当前状态高亮；再点一次高亮的按钮 = 撤销。
+   POST /feedback 返回本片段，HTMX 原地替换。 #}
 <div class="feedback" id="feedback-{{ item_id }}">
   {% if with_note %}
   <input type="text" name="note" placeholder="备注（可选）" maxlength="500">
   <input type="hidden" name="with_note" value="1">
   {% endif %}
-  {% for kind, label in feedback_kinds.items() %}
+  {% for group_label, group in feedback_groups %}
+  <span class="fb-group">{{ group_label }}</span>
+  {% for kind in group %}
   <button type="button"
-          class="fb{% if kind in kinds %} active{% endif %}"
+          class="fb{% if kind == state %} active{% endif %}"
+          title="{{ feedback_hints[kind] }}{% if kind == state %}（再点一次撤销）{% endif %}"
           hx-post="/feedback"
           hx-vals='{"item_id": "{{ item_id }}", "kind": "{{ kind }}"}'
           {% if with_note %}hx-include="#feedback-{{ item_id }} [name]"{% endif %}
           hx-target="#feedback-{{ item_id }}"
           hx-swap="outerHTML"
-          aria-pressed="{{ 'true' if kind in kinds else 'false' }}">{{ label }}</button>
+          aria-pressed="{{ 'true' if kind == state else 'false' }}">{{ feedback_kinds[kind] }}</button>
   {% endfor %}
-  {% if saved %}<span class="saved">已记录：{{ feedback_kinds[saved] }}</span>{% endif %}
+  {% endfor %}
+  {% if saved %}<span class="saved">{% if undone %}已撤销：{{ feedback_kinds[saved] }}{% else %}已记录：{{ feedback_kinds[saved] }}{% endif %}</span>{% endif %}
 </div>

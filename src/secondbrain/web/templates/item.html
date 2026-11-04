@@ -58,7 +58,7 @@
     <h2>反馈</h2>
     {% with item_id=item.id, with_note=True, saved=None %}{% include "_feedback.html" %}{% endwith %}
     {% if history %}
-    <ul class="history">{% for f in history %}<li>{{ f.ts }} · {{ feedback_kinds.get(f.kind, f.kind) }}{% if f.note %} · {{ f.note }}{% endif %}</li>{% endfor %}</ul>
+    <ul class="history">{% for f in history %}<li>{{ f.ts }} · {{ "撤销" if f.kind == "clear" else feedback_kinds.get(f.kind, f.kind) }}{% if f.note %} · {{ f.note }}{% endif %}</li>{% endfor %}</ul>
     {% else %}<p class="empty">还没有反馈。</p>{% endif %}
   </section>
 </article>

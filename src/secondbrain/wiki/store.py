@@ -4,11 +4,12 @@ data/wiki/
   index.md                    按类别列出所有页面：- [[slug]] — 一行摘要（由代码根据页面重建）
   log.md                      只追加：## [YYYY-MM-DD] ingest | Title
   pages/{concepts,entities,papers}/<slug>.md   YAML frontmatter + Markdown 正文
-data/raw/<item_id>.md         原文（标题、URL、正文）
+  raw/<item_id>.md            原文（标题、URL、正文）；不是 wiki 页面，lint / index / 图谱都忽略
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -130,9 +131,10 @@ class Wiki:
         return path
 
     def raw_link(self, item_id: int, page_type: str) -> str:
-        """从 pages/<type>/x.md 指向 data/raw/<id>.md 的相对链接（Obsidian 可点开）。"""
-        rel = Path("..", "..", "..", self.raw_root.name, f"{int(item_id)}.md")
-        return rel.as_posix()
+        """从 pages/<type>/x.md 指向原文的相对链接（Obsidian 可点开）；
+        原文在 data/wiki/raw 时为 ../../raw/<id>.md。"""
+        page_dir = self.root / "pages" / PAGE_TYPES[page_type]
+        return Path(os.path.relpath(self.raw_path(item_id), page_dir)).as_posix()
 
     def append_log(self, day: date, action: str, title: str, lines: list[str]) -> None:
         with self.log_path.open("a", encoding="utf-8") as f:
@@ -219,6 +221,7 @@ def new_meta(
     aliases: list[str] | None = None,
     mastery: str | None = None,
     sources: list[int] | None = None,
+    interval_days: int = 1,
 ) -> dict:
     return {
         "title": title,
@@ -228,7 +231,7 @@ def new_meta(
         "sources": sources or [],
         "mastery": mastery,
         "last_reviewed": today.isoformat(),
-        "interval_days": 1,
+        "interval_days": interval_days,
         "ease": DEFAULT_EASE,
         "created": today.isoformat(),
         "updated": today.isoformat(),

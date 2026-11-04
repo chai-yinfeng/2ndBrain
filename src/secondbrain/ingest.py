@@ -223,7 +223,8 @@ def fetch_sources(
                                 result.extract_failed += 1
                         else:
                             result.duplicates += 1
-                    conn.commit()
+                db.record_fetch(conn, source.id, result.status, result.added, result.message, now)
+                conn.commit()
             results.append(result)
             if on_result:
                 on_result(result)

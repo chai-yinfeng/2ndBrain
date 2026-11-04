@@ -82,3 +82,19 @@ pre.diff { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px
 .wiki-body h2 { font-size: 16px; }
 .wiki-body .missing { color: var(--warn); text-decoration: underline dotted; }
 .entry.concept { border-left: 3px solid var(--accent); }
+.fb-group { color: var(--muted); font-size: 12px; margin-left: 4px; }
+.fb-group:first-of-type { margin-left: 0; }
+pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px; white-space: pre-wrap; max-height: 320px; }
+.ingest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+.ingest .task { flex: 1 1 100%; }
+.sources td { vertical-align: top; }
+.sources .actions form { display: inline; }
+.source-form { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 14px; }
+.source-form label { display: flex; flex-direction: column; }
+.source-form label.wide { flex: 1 1 100%; }
+.source-form input, .source-form select { padding: 4px 6px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; }
+#graph { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.graph-filters { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 13px; margin: 8px 0; }
+.graph-filters .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 2px; }

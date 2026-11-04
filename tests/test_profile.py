@@ -90,17 +90,18 @@ def conn(env: Path):
 
 
 def seed_feedback(conn, when: datetime = NOW) -> dict[str, int]:
-    """构造反馈：已扎实（GPU kernels）、需要回炉、👎、👍、已读（不参与个性化）。
+    """构造反馈：太浅（GPU kernels）、太难、不感兴趣、有收获、稍后读（不参与个性化）。
     返回 kind → 反馈 id。CLI / Web 按真实时钟取时间窗，调用时传 datetime.now(UTC)。"""
     ids = {}
     gpu = add_item(conn, 1, "Writing fast GPU kernels in Triton", topics=["gpu kernels"])
     cons = add_item(conn, 2, "Raft consensus explained", topics=["consensus"], ctype="explainer")
     news = add_item(conn, 3, "Funding news roundup", source="news")
     good = add_item(conn, 4, "Paged attention deep dive", topics=["kv cache"])
-    for item, kind in ((gpu, "mastered"), (cons, "needs_refresh"), (news, "down"), (good, "up")):
+    later = add_item(conn, 5, "Saved for later")
+    for item, kind in ((gpu, "too_easy"), (cons, "too_hard"), (news, "dismiss"), (good, "gained")):
         db.add_feedback(conn, item, kind, None, when - timedelta(hours=1))
         ids[kind] = conn.execute("SELECT MAX(id) FROM feedback").fetchone()[0]
-    db.add_feedback(conn, good, "read", None, when)
+    db.add_feedback(conn, later, "later", None, when)
     return ids
 
 
@@ -110,10 +111,10 @@ def seed_feedback(conn, when: datetime = NOW) -> dict[str, int]:
 def test_recent_feedback_only_signals_in_window(conn):
     seed_feedback(conn)
     old = add_item(conn, 9, "Old post")
-    db.add_feedback(conn, old, "up", None, NOW - timedelta(days=60))
+    db.add_feedback(conn, old, "gained", None, NOW - timedelta(days=60))
     entries = recent_feedback(conn, NOW, window_days=30, limit=50)
-    assert [e.kind for e in entries] == ["up", "down", "needs_refresh", "mastered"]
-    gpu = next(e for e in entries if e.kind == "mastered")
+    assert [e.kind for e in entries] == ["gained", "dismiss", "too_hard", "too_easy"]
+    gpu = next(e for e in entries if e.kind == "too_easy")
     assert (gpu.topics, gpu.content_type, gpu.source_id) == (["gpu kernels"], "frontier", "blog")
     assert len(recent_feedback(conn, NOW, 30, limit=2)) == 2
 
@@ -123,19 +124,22 @@ def test_few_shot_block(conn):
     entries = recent_feedback(conn, NOW, 30, 50)
     block = few_shot_block(entries, per_polarity=5)
     assert block.startswith("## 最近反馈样例")
-    assert "[👍] Paged attention deep dive" in block
-    assert "[👎] Funding news roundup" in block
-    assert "需要回炉" not in block  # 掌握度信号不作为 few-shot 样例
+    assert "用户有收获（正例）：\n- [有收获] Paged attention deep dive" in block
+    assert "（反例）：\n- [不感兴趣] Funding news roundup" in block
+    assert "- [太浅] Writing fast GPU kernels in Triton" in block  # 校准样例
+    assert "- [太难] Raft consensus explained" in block
+    assert "稍后" not in block  # 稍后读不是偏好信号
     assert few_shot_block(entries, per_polarity=0) == ""
     assert few_shot_block([], per_polarity=5) == ""
 
 
 def test_polarity_examples_dedupe_and_cap(conn):
     item = add_item(conn, 1, "Same item")
-    db.add_feedback(conn, item, "up", None, NOW - timedelta(hours=3))
-    db.add_feedback(conn, item, "down", None, NOW - timedelta(hours=1))  # 最新为 👎
+    db.add_feedback(conn, item, "gained", None, NOW - timedelta(hours=3))
+    db.add_feedback(conn, item, "dismiss", None, NOW - timedelta(hours=1))  # 当前状态为不感兴趣
     for n in range(2, 6):
-        db.add_feedback(conn, add_item(conn, n, f"Liked {n}"), "up", None, NOW - timedelta(hours=n))
+        liked = add_item(conn, n, f"Liked {n}")
+        db.add_feedback(conn, liked, "gained", None, NOW - timedelta(hours=n))
     pos, neg = polarity_examples(recent_feedback(conn, NOW, 30, 50), per_polarity=2)
     assert [e.title for e in neg] == ["Same item"]
     assert len(pos) == 2 and all(e.title.startswith("Liked") for e in pos)
@@ -170,7 +174,7 @@ def test_l1_prompt_contains_feedback_examples(conn):
     for system in backend.systems:
         assert system.startswith(base.rstrip())  # profile + 规则在前，前缀稳定
         assert "## 最近反馈样例" in system
-        assert "[👍] Paged attention deep dive" in system
+        assert "[有收获] Paged attention deep dive" in system
     assert len(set(backend.systems)) == 1
 
 
@@ -195,36 +199,54 @@ def _apply(fb, changes=(), edits=()):
     return apply_proposal(parse_profile(PROFILE_TEXT), proposal, fb)
 
 
-def test_upgrade_requires_mastered_or_learned_evidence(conn):
+def test_upgrade_requires_too_easy_evidence(conn):
     ids, fb = _feedback(conn)
     ok = _apply(
         fb,
         [
             MasteryChange(
-                action="update", row=3, mastery="扎实", reason="r", evidence=[ids["mastered"]]
+                action="update", row=3, mastery="想回炉", reason="r", evidence=[ids["too_easy"]]
             )
         ],
     )
     assert ok.applied and not ok.rejected
-    assert "| GPU kernels | 扎实 | 高 | 带补充说明 |" in ok.new_text
+    assert "| GPU kernels | 想回炉 | 高 | 带补充说明 |" in ok.new_text
     # 未修改的行保留原文（包括空单元格的写法），diff 只有一行改动
     assert "| Consensus protocols | 陌生 | 中 | |" in ok.new_text
     changed = [x for x in ok.diff().splitlines() if x[:1] in "+-" and x[:3] not in ("+++", "---")]
     assert changed == [
         "-| GPU kernels | 接触过（偶尔写） | 高 | 带补充说明 |",
-        "+| GPU kernels | 扎实 | 高 | 带补充说明 |",
+        "+| GPU kernels | 想回炉 | 高 | 带补充说明 |",
     ]
+    ev = [ids["gained"]]
     bad = _apply(
-        fb,
-        [MasteryChange(action="update", row=3, mastery="扎实", reason="r", evidence=[ids["up"]])],
+        fb, [MasteryChange(action="update", row=3, mastery="想回炉", reason="r", evidence=ev)]
     )
-    assert not bad.applied and "升级缺少" in bad.rejected[0]
+    assert not bad.applied and "升级缺少" in bad.rejected[0]  # 有收获 只能用于 陌生 → 接触过
     assert not bad.changed
+    two = _apply(
+        fb,
+        [
+            MasteryChange(
+                action="update", row=3, mastery="扎实", reason="r", evidence=[ids["too_easy"]]
+            )
+        ],
+    )
+    assert "每次只能升一级" in two.rejected[0]  # 不再有"已扎实可直升扎实"的特例
 
 
-def test_downgrade_one_level_with_needs_refresh(conn):
+def test_gained_only_supports_first_step(conn):
     ids, fb = _feedback(conn)
-    ev = [ids["needs_refresh"]]
+    ev = [ids["gained"]]
+    ok = _apply(
+        fb, [MasteryChange(action="update", row=2, mastery="接触过", reason="r", evidence=ev)]
+    )
+    assert ok.applied and "| Consensus protocols | 接触过 | 中 |" in ok.new_text
+
+
+def test_downgrade_one_level_with_too_hard(conn):
+    ids, fb = _feedback(conn)
+    ev = [ids["too_hard"]]
     one = _apply(
         fb, [MasteryChange(action="update", row=1, mastery="接触过", reason="r", evidence=ev)]
     )
@@ -235,7 +257,11 @@ def test_downgrade_one_level_with_needs_refresh(conn):
     assert "每次只能降一级" in two.rejected[0]
     no_ev = _apply(
         fb,
-        [MasteryChange(action="update", row=1, mastery="接触过", reason="r", evidence=[ids["up"]])],
+        [
+            MasteryChange(
+                action="update", row=1, mastery="接触过", reason="r", evidence=[ids["gained"]]
+            )
+        ],
     )
     assert "降级缺少" in no_ev.rejected[0]
 
@@ -248,10 +274,10 @@ def test_evidence_is_required_and_must_exist(conn):
             MasteryChange(action="update", row=3, mastery="扎实", reason="r", evidence=[]),
             MasteryChange(action="update", row=3, mastery="扎实", reason="r", evidence=[99999]),
             MasteryChange(
-                action="update", row=42, mastery="扎实", reason="r", evidence=[ids["mastered"]]
+                action="update", row=42, mastery="扎实", reason="r", evidence=[ids["too_easy"]]
             ),
             MasteryChange(
-                action="add", domain="X", mastery="精通", reason="r", evidence=[ids["up"]]
+                action="add", domain="X", mastery="精通", reason="r", evidence=[ids["gained"]]
             ),
         ],
     )
@@ -273,9 +299,9 @@ def test_add_remove_and_section_edits(conn):
                 mastery="接触过",
                 priority="中",
                 reason="r",
-                evidence=[ids["up"]],
+                evidence=[ids["gained"]],
             ),
-            MasteryChange(action="remove", row=4, reason="r", evidence=[ids["down"]]),
+            MasteryChange(action="remove", row=4, reason="r", evidence=[ids["dismiss"]]),
         ],
         [
             SectionEdit(
@@ -283,21 +309,21 @@ def test_add_remove_and_section_edits(conn):
                 action="append",
                 text="行业新闻汇总",
                 reason="r",
-                evidence=[ids["down"]],
+                evidence=[ids["dismiss"]],
             ),
             SectionEdit(
                 section="不想看的内容",
                 action="remove",
                 text="- 融资新闻",
                 reason="r",
-                evidence=[ids["down"]],
+                evidence=[ids["dismiss"]],
             ),
             SectionEdit(
                 section="不存在的段落",
                 action="append",
                 text="x",
                 reason="r",
-                evidence=[ids["down"]],
+                evidence=[ids["dismiss"]],
             ),
         ],
     )
@@ -319,7 +345,7 @@ def test_profile_without_table_rejects_mastery_changes(conn):
     proposal = ProfileProposal(
         mastery_changes=[
             MasteryChange(
-                action="add", domain="X", mastery="陌生", reason="r", evidence=[ids["up"]]
+                action="add", domain="X", mastery="陌生", reason="r", evidence=[ids["gained"]]
             )
         ],
         section_edits=[
@@ -328,7 +354,7 @@ def test_profile_without_table_rejects_mastery_changes(conn):
                 action="append",
                 text="新闻",
                 reason="r",
-                evidence=[ids["down"]],
+                evidence=[ids["dismiss"]],
             )
         ],
     )
@@ -341,7 +367,7 @@ def test_generate_update_with_fake_backend(conn):
     _, fb = _feedback(conn)
     res = generate_update(FakeBackend(), PROFILE_TEXT, fb)
     assert res.changed
-    assert "+| GPU kernels | 扎实 | 高 | 带补充说明 |" in res.diff()
+    assert "+| GPU kernels | 想回炉 | 高 | 带补充说明 |" in res.diff()
     assert "+- 类似《Funding news roundup》的内容" in res.diff()
     assert res.usage is not None
 
@@ -380,7 +406,7 @@ def test_profile_update_dry_run_and_apply(env: Path, conn):
 
     result = runner.invoke(cli_app, ["profile", "update"])  # 默认 dry-run
     assert result.exit_code == 0, result.output
-    assert "+| GPU kernels | 扎实 |" in result.output
+    assert "+| GPU kernels | 想回炉 |" in result.output
     assert "dry-run：未写入" in result.output
     assert (env / "profile.md").read_text(encoding="utf-8") == before
     assert not (env / "profile_history").exists()
@@ -389,7 +415,7 @@ def test_profile_update_dry_run_and_apply(env: Path, conn):
     assert result.exit_code == 0, result.output
     backups = list((env / "profile_history").glob("profile-*.md"))
     assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == before
-    assert "| GPU kernels | 扎实 |" in (env / "profile.md").read_text(encoding="utf-8")
+    assert "| GPU kernels | 想回炉 |" in (env / "profile.md").read_text(encoding="utf-8")
     calls = conn.execute("SELECT stage, backend FROM llm_calls").fetchall()
     assert [tuple(r) for r in calls] == [("PROFILE", "fake"), ("PROFILE", "fake")]
 
@@ -400,7 +426,8 @@ def test_profile_update_dry_run_and_apply(env: Path, conn):
 def _votes(conn, source: str, up: int, down: int, start: int = 100, when: datetime = NOW):
     for n in range(up + down):
         item = add_item(conn, start + n, f"{source} post {n}", source=source)
-        db.add_feedback(conn, item, "up" if n < up else "down", None, when - timedelta(hours=1))
+        kind = "gained" if n < up else "dismiss"
+        db.add_feedback(conn, item, kind, None, when - timedelta(hours=1))
 
 
 def test_source_stats_and_suggestions(conn):
@@ -423,7 +450,7 @@ def test_source_stats_and_suggestions(conn):
 
 def test_source_stats_use_latest_signal_per_item(conn):
     item = add_item(conn, 1, "flip-flop")
-    for kind in ("up", "up", "down"):
+    for kind in ("gained", "gained", "dismiss"):
         db.add_feedback(conn, item, kind, None, NOW - timedelta(hours=1))
     (st,) = source_stats(
         conn, [SourceConfig(id="blog", type="rss", url="u")], NOW, PersonalizeSettings()
@@ -513,7 +540,7 @@ def test_profile_propose_and_apply(client: TestClient, env: Path, conn):
     conn.commit()
     resp = client.post("/profile/propose")
     assert resp.status_code == 200
-    assert "+| GPU kernels | 扎实 |" in resp.text
+    assert "+| GPU kernels | 想回炉 |" in resp.text
     assert 'hx-post="/profile/apply"' in resp.text
 
     stale = client.post("/profile/apply", data={"new_text": "x", "base_sha": "0" * 64})

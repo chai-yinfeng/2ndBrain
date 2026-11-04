@@ -19,7 +19,7 @@ from secondbrain.pipeline import tiering
 from secondbrain.pipeline.l0_rules import l0_reason
 from secondbrain.pipeline.l1_screen import interleave_by_source, l1_messages, match_results
 from secondbrain.pipeline.l2_deep import DeepResult, deep_read, estimate_deep_cost, is_paper
-from secondbrain.profile.feedback import few_shot_block, recent_feedback
+from secondbrain.profile.feedback import few_shot_block, recent_feedback, too_hard_prerequisites
 from secondbrain.profile.loader import Profile, render_mastery, weak_prerequisites
 from secondbrain.wiki.loop import known_knowledge, related_item
 from secondbrain.wiki.review import due_concepts
@@ -78,6 +78,7 @@ class _Runner:
     def __init__(self, conn, fs, backend, profile, now, clock, report, wiki=None):
         self.conn, self.fs, self.backend, self.profile = conn, fs, backend, profile
         self.now, self.clock, self.report, self.wiki = now, clock, report, wiki
+        self.hard_prereqs = ""  # 近期"太难"条目的前置知识（L1 user 消息，ADR 0013）
 
     def record(self, stage: str, usage: Usage | None) -> float:
         if usage is None:
@@ -122,6 +123,7 @@ class _Runner:
                 known = known_knowledge(
                     self.wiki, pending, fs.l1.item_chars, fs.wiki.known_max_chars
                 )
+                known = "\n\n".join(part for part in (known, self.hard_prereqs) if part)
                 messages = l1_messages(system, pending, fs.l1.item_chars, known)
                 try:
                     response, usage = backend.complete_json(messages, L1Response, "cheap")
@@ -245,6 +247,9 @@ def run_pipeline(
     pers = fs.personalize
     recent = recent_feedback(conn, now, pers.feedback_window_days, pers.summary_max_items)
     examples = few_shot_block(recent, pers.few_shot_per_polarity)
+    run.hard_prereqs = too_hard_prerequisites(
+        conn, now, pers.feedback_window_days, pers.too_hard_prereq_max_chars
+    )
     l1_system = system_prompt("l1_system", profile, examples)
     report.l1_assessed, report.l1_failed = run.screen(selected, l1_system, "l1")
 

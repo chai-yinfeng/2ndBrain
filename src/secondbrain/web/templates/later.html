@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}稍后再看 · Second Brain{% endblock %}
+{% block content %}
+<h1>稍后再看 <small class="meta">{{ rows | length }} 条</small></h1>
+<p class="meta">在文章上点「稍后读」的条目：不计入积压、不降级、没有期限。读完后点读完后的反馈，或再点一次「稍后读」移出列表。</p>
+{% for r in rows %}
+<article class="entry" data-item-id="{{ r.id }}">
+  <h3><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a></h3>
+  <p class="meta">{{ r.source_id }} · 标记于 {{ r.state_ts }} · <a href="/item/{{ r.id }}">详情</a></p>
+  {% with item_id=r.id, state="later", with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
+</article>
+{% else %}
+<p class="empty">（空）</p>
+{% endfor %}
+{% endblock %}

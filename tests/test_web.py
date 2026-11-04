@@ -141,31 +141,31 @@ def test_static_htmx_is_vendored(client: TestClient):
 
 def test_feedback_is_recorded_and_returns_partial(client: TestClient):
     item_id = _first_item()
-    resp = client.post("/feedback", data={"item_id": item_id, "kind": "up", "note": " 好文 "})
+    resp = client.post("/feedback", data={"item_id": item_id, "kind": "gained", "note": " 好文 "})
     assert resp.status_code == 200
     assert f'id="feedback-{item_id}"' in resp.text
     assert 'class="fb active"' in resp.text
-    assert "已记录：👍" in resp.text
+    assert "已记录：有收获" in resp.text
     conn = db.connect()
     rows = db.feedback_for(conn, item_id)
     conn.close()
-    assert [(r["kind"], r["note"]) for r in rows] == [("up", "好文")]
+    assert [(r["kind"], r["note"]) for r in rows] == [("gained", "好文")]
 
 
-def test_up_and_down_are_exclusive(client: TestClient):
+def test_latest_feedback_is_the_state(client: TestClient):
     item_id = _first_item()
-    client.post("/feedback", data={"item_id": item_id, "kind": "up"})
-    resp = client.post("/feedback", data={"item_id": item_id, "kind": "down"})
+    client.post("/feedback", data={"item_id": item_id, "kind": "gained"})
+    resp = client.post("/feedback", data={"item_id": item_id, "kind": "worthless"})
     conn = db.connect()
-    kinds = db.feedback_kinds(conn, [item_id])[item_id]
+    state = db.feedback_state(conn, [item_id])[item_id]
     conn.close()
-    assert kinds == {"down"}
+    assert state == "worthless"
     assert resp.text.count('class="fb active"') == 1
 
 
-def test_read_feedback_marks_item_read(client: TestClient):
+def test_after_read_feedback_marks_item_read(client: TestClient):
     item_id = _first_item()
-    assert client.post("/feedback", data={"item_id": item_id, "kind": "read"}).status_code == 200
+    assert client.post("/feedback", data={"item_id": item_id, "kind": "gained"}).status_code == 200
     conn = db.connect()
     read_at = conn.execute("SELECT read_at FROM items WHERE id = ?", (item_id,)).fetchone()[0]
     conn.close()
@@ -175,9 +175,10 @@ def test_read_feedback_marks_item_read(client: TestClient):
 def test_feedback_validation(client: TestClient):
     item_id = _first_item()
     assert client.post("/feedback", data={"item_id": item_id, "kind": "love"}).status_code == 400
-    assert client.post("/feedback", data={"item_id": "abc", "kind": "up"}).status_code == 400
-    assert client.post("/feedback", data={"item_id": 999999, "kind": "up"}).status_code == 404
-    assert client.post("/feedback", data={"kind": "up"}).status_code == 422
+    assert client.post("/feedback", data={"item_id": item_id, "kind": "up"}).status_code == 400
+    assert client.post("/feedback", data={"item_id": "abc", "kind": "gained"}).status_code == 400
+    assert client.post("/feedback", data={"item_id": 999999, "kind": "gained"}).status_code == 404
+    assert client.post("/feedback", data={"kind": "gained"}).status_code == 422
     conn = db.connect()
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
     conn.close()
@@ -210,7 +211,7 @@ def test_backlog_only_counts_unread_must_reads(data_dir: Path):
         r[0] for r in conn.execute("SELECT item_id FROM digests WHERE lane = 'must_read'")
     ]
     assert must_reads
-    db.add_feedback(conn, must_reads[0], "read", None, NOW)
+    db.add_feedback(conn, must_reads[0], "too_easy", None, NOW)
     later = (TODAY + timedelta(days=2)).isoformat()
     assert [i for i, _ in db.past_must_reads(conn, later)] == must_reads[1:]
     conn.close()

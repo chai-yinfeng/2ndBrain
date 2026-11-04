@@ -15,7 +15,6 @@ from secondbrain import __version__, config, db, ingest, schedule
 from secondbrain.llm.base import LLMError, make_backend
 from secondbrain.llm.usage import summarize
 from secondbrain.net import HttpClient
-from secondbrain.pipeline.run import run_pipeline
 from secondbrain.profile.loader import load_profile
 from secondbrain.wiki.store import open_wiki
 
@@ -247,80 +246,18 @@ def run(
     limit: int | None = typer.Option(None, "--limit", min=1, help="进入 L1 的候选条目上限"),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="跳过抓取，只处理库中已有条目"),
 ) -> None:
-    """抓取 → L0 规则 → L1 粗筛 → L2 精读 → 分级，写入当天 digest。"""
-    config.load_env()
-    settings, fs, fetch_fs = _load_pipeline_settings()
-    backend_name = config.llm_backend(settings)
+    """抓取 → L0 规则 → L1 粗筛 → L2 精读 → 分级，写入当天 digest。
+
+    与 Web /ops 的"立即运行"、定时任务共用一把锁（data/run.lock），已在运行时直接退出。"""
+    from secondbrain import ops
+
     try:
-        backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
-    except LLMError as exc:
+        report = ops.run_once(typer.echo, limit=limit, no_fetch=no_fetch)
+    except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
-
-    profile_file, created = config.ensure_profile()
-    if created:
-        typer.echo(f"{WARN} 已从 example 生成 {profile_file}，请按自己的情况修改")
-    profile = load_profile(profile_file)
-    for warning in profile.warnings:
-        typer.echo(f"{WARN} profile：{warning}")
-    typer.echo(f"LLM 后端：{backend_name}；profile 解析到 {len(profile.domains)} 个领域")
-
-    conn = db.connect()
-    try:
-        if not no_fetch:
-            sources = _load_sources_or_exit()
-            with HttpClient(fetch_fs) as client:
-                results = ingest.fetch_sources(
-                    conn, sources, client, fetch_fs, limit=fs.run.fetch_limit
-                )
-            added = sum(r.added for r in results)
-            failed = [r for r in results if r.status == "failed"]
-            typer.echo(f"抓取：新增 {added} 条，失败 {len(failed)} 个信源")
-            for r in failed:
-                typer.echo(f"  {FAIL} {r.source_id}：{r.message}")
-        now = datetime.now(UTC)
-        report = run_pipeline(
-            conn,
-            fs,
-            backend,
-            profile,
-            limit=limit,
-            now=now,
-            today=datetime.now().date(),
-            clock=lambda: datetime.now(UTC),
-            wiki=open_wiki(config.wiki_dir(), config.raw_dir()),
-        )
-    finally:
-        conn.close()
-
-    rejected = "，".join(f"{k} {v}" for k, v in report.l0_rejected.most_common()) or "无"
-    typer.echo(
-        f"L0：检查 {report.l0_checked} 条，排除 {sum(report.l0_rejected.values())} 条（{rejected}）"
-    )
-    r = report
-    typer.echo(f"L1：送入 {r.l1_selected} 条，完成 {r.l1_assessed} 条，失败 {r.l1_failed} 条")
-    typer.echo(f"L2：选中 {r.l2_selected} 条，完成 {r.l2_assessed} 条，失败 {r.l2_failed} 条")
-    if r.concepts_placed:
-        typer.echo(f"wiki：到期概念 {r.concepts_placed} 个放入温故栏")
-    if r.backfill_screened or r.backfill_picked:
-        typer.echo(
-            f"回补：粗筛 {r.backfill_screened} 条，选中 {r.backfill_picked} 条，"
-            f"放入温故 {r.backfill_placed} 条"
-        )
-    for error in report.errors:
-        typer.echo(f"  {FAIL} {error}")
-    typer.echo(f"本次 LLM 调用 {report.calls} 次，估算费用 ${report.cost_usd:.4f}")
     if report.aborted:
-        typer.echo(f"{FAIL} {report.aborted}")
         raise typer.Exit(code=1)
-    lanes = "，".join(
-        f"{LANE_TITLES[k].split()[0]} {report.lanes[k]}" for k in LANE_TITLES if report.lanes[k]
-    )
-    typer.echo(f"分级：{lanes or '无新条目'}")
-    typer.echo(
-        f"今日已排 {report.minutes_used} / {fs.daily_budget_minutes} 分钟；"
-        f"积压必读 {report.backlog_kept} 条，降级 {report.backlog_demoted} 条"
-    )
 
 
 def _flat(text: str) -> str:
@@ -537,7 +474,7 @@ def profile_update(
         if len(feedback) < pers.min_feedback_for_update:
             typer.echo(
                 f"无足够反馈，不提议修改（近 {pers.feedback_window_days} 天内 "
-                f"👍 / 👎 / 学了 / 需要回炉 / 已扎实 共 {len(feedback)} 条，"
+                f"不感兴趣 / 太浅 / 有收获 / 太难 / 没价值 共 {len(feedback)} 条，"
                 f"至少需要 {pers.min_feedback_for_update} 条）"
             )
             return
@@ -591,8 +528,8 @@ def profile_update(
 def sources_tune(
     apply: bool = typer.Option(False, "--apply", help="把建议写入 config/sources.yaml"),
 ) -> None:
-    """按信源的 👍 / 👎 / 学了 比例给出 trust 调整建议（±1，限 1–5）。"""
-    from secondbrain.profile.tune import apply_trust_changes, source_stats
+    """按信源的 有收获 / 不感兴趣 / 没价值 比例给出 trust 调整建议（±1，限 1–5）。"""
+    from secondbrain.profile.tune import source_stats
 
     _, fs, _ = _load_pipeline_settings()
     sources = _load_sources_or_exit()
@@ -603,7 +540,7 @@ def sources_tune(
     finally:
         conn.close()
     typer.echo(
-        f"近 {pers.tune_window_days} 天；每个条目取最新一次 👍 / 👎 / 学了；"
+        f"近 {pers.tune_window_days} 天；每个条目取当前反馈（有收获为正，不感兴趣 / 没价值为负）；"
         f"样本 ≥ {pers.tune_min_samples} 才给建议"
     )
     width = max(len(st.source_id) for st in stats) if stats else 0
@@ -611,7 +548,7 @@ def sources_tune(
     for st in shown:
         change = f"trust {st.trust} → {st.suggested}" if st.suggested else f"trust {st.trust}"
         typer.echo(
-            f"{st.source_id.ljust(width)}  👍/学了 {st.positive:>3}  👎 {st.negative:>3}  "
+            f"{st.source_id.ljust(width)}  正 {st.positive:>3}  负 {st.negative:>3}  "
             f"{change:<14}  {st.reason}"
         )
     silent = len(stats) - len(shown)
@@ -624,16 +561,9 @@ def sources_tune(
     if not apply:
         typer.echo(f"\n共 {len(changes)} 条建议；用 --apply 写入 config/sources.yaml")
         return
-    target = config.CONFIG_DIR / "sources.yaml"
-    if not target.exists():
-        example = config.CONFIG_DIR / "sources.example.yaml"
-        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
-        typer.echo(f"{WARN} 已从 {example.name} 生成 {target}（个人配置，已在 .gitignore 中）")
-    new_text, missing = apply_trust_changes(target.read_text(encoding="utf-8"), changes)
-    target.write_text(new_text, encoding="utf-8")
-    for source_id in missing:
-        typer.echo(f"{FAIL} {source_id}：在 {target.name} 中找不到 trust 行，未修改")
-    typer.echo(f"{OK} 已更新 {target}：{len(changes) - len(missing)} 个信源")
+    from secondbrain import ops
+
+    ops.apply_trust(changes, typer.echo)
 
 
 @app.command()
@@ -696,17 +626,17 @@ def _open_wiki():
 @wiki_app.command("ingest")
 def wiki_ingest(
     item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
-    pending: bool = typer.Option(False, "--pending", help='编入所有已标"学了"但尚未编入的条目'),
+    pending: bool = typer.Option(
+        False, "--pending", help='编入所有当前标为"有收获"但尚未编入的条目'
+    ),
     force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
 ) -> None:
     """把条目编进 wiki：strong 模型输出受限的页面操作，由代码校验后写入 data/wiki。"""
-    from secondbrain.llm.usage import record_call
-    from secondbrain.wiki.ingest import ingest_item, pending_items
+    from secondbrain import ops
+    from secondbrain.wiki.ingest import pending_items
 
     if (item_id is None) == (not pending):
         raise typer.BadParameter("请给出 item_id，或使用 --pending（二选一）")
-    config.load_env()
-    settings, fs, _ = _load_pipeline_settings()
     wiki = _open_wiki()
     conn = db.connect()
     try:
@@ -720,59 +650,17 @@ def wiki_ingest(
             ids = [item_id]
         typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
         if not ids:
-            typer.echo('0 条待 ingest（没有已标"学了"且尚未编入的条目）')
+            typer.echo('0 条待 ingest（没有标为"有收获"且尚未编入的条目）')
             return
-        backend_name = config.llm_backend(settings)
-        try:
-            backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
-        except LLMError as exc:
-            typer.echo(f"{FAIL} {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-        profile_file, _ = config.ensure_profile()
-        profile = load_profile(profile_file)
-        total = 0.0
-        failures = 0
-        for iid in ids:
-            row = db.item_detail(conn, iid)
-            if row is None:
-                typer.echo(f"{FAIL} 条目不存在：{iid}")
-                failures += 1
-                continue
-            today = datetime.now().date()
-            _, estimate, _ = ingest_item(
-                conn, wiki, backend, profile, row, fs, today, estimate_only=True
-            )
-            typer.echo(f"#{iid} {row['title']}：预估 ${estimate:.4f}")
-            if total + estimate > fs.run.max_cost_usd:
-                typer.echo(f"{FAIL} 预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
-                failures += 1
-                break
-            now = datetime.now(UTC)
-            try:
-                result, _, _ = ingest_item(conn, wiki, backend, profile, row, fs, today)
-            except LLMError as exc:
-                if exc.usage:
-                    total += record_call(
-                        conn, backend.name, "WIKI", exc.usage, now, fs.pricing, fs.pricing_schedule
-                    )
-                    conn.commit()
-                typer.echo(f"{FAIL} #{iid}：{exc}")
-                failures += 1
-                continue
-            cost = record_call(
-                conn, backend.name, "WIKI", result.usage, now, fs.pricing, fs.pricing_schedule
-            )
-            conn.commit()
-            total += cost
-            typer.echo(f"  新建：{', '.join(result.created) or '无'}")
-            typer.echo(f"  更新：{', '.join(result.updated) or '无'}")
-            for line in result.rejected:
-                typer.echo(f"  {FAIL} 已拒绝：{line}")
-            typer.echo(f"  费用 ${cost:.4f}")
-        typer.echo(f"\n合计估算费用 ${total:.4f}；wiki 现有 {len(wiki.pages)} 个页面")
     finally:
         conn.close()
-    if failures:
+    try:
+        summary = ops.ingest_items(ids, typer.echo)
+    except ops.OpsError as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"\n合计估算费用 ${summary.cost:.4f}；wiki 现有 {summary.pages} 个页面")
+    if summary.failures:
         raise typer.Exit(code=1)
 
 
@@ -781,28 +669,12 @@ def wiki_lint(
     use_llm: bool = typer.Option(False, "--llm", help="另用 cheap 模型检查可能矛盾的说法"),
 ) -> None:
     """检查断链 / 缺失页面、孤立页、frontmatter 缺字段、index 不一致。只报告，不修改。"""
-    from secondbrain.wiki.lint import lint, llm_contradictions
+    from secondbrain.wiki.lint import lint, llm_contradictions, report_sections
 
     wiki = _open_wiki()
     report = lint(wiki)
     typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
-    sections = [
-        (
-            "断链（指向不存在的页面）",
-            [f"[[{s}]] → {', '.join(t)}" for s, t in report.broken_links.items()],
-        ),
-        (
-            "缺失页面（被链接但不存在）",
-            [f"[[{s}]]（{n} 处）" for s, n in report.missing_pages.items()],
-        ),
-        ("孤立页（没有其他页面链接到它）", [f"[[{s}]]" for s in report.orphans]),
-        (
-            "frontmatter 缺字段",
-            [f"[[{s}]]：{', '.join(f)}" for s, f in report.missing_fields.items()],
-        ),
-        ("不在 index 中的页面", [f"[[{s}]]" for s in report.index_missing]),
-        ("index 中指向不存在页面的条目", [f"[[{s}]]" for s in report.index_dangling]),
-    ]
+    sections = report_sections(report)
     if use_llm and wiki.pages:
         config.load_env()
         settings, fs, _ = _load_pipeline_settings()
@@ -849,26 +721,32 @@ def wiki_due(
         )
     if due:
         typer.echo(
-            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot（或在 Web /wiki 点按钮）"
+            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered"
+            "（或在 Web /wiki 点按钮）"
         )
 
 
 @wiki_app.command("review")
 def wiki_review(
     slug: str = typer.Argument(..., help="概念页 slug"),
-    grade: str = typer.Argument(..., help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"),
+    grade: str = typer.Argument(
+        ...,
+        help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"
+        "| needs_refresh（需要回炉）| mastered（已扎实）",
+    ),
 ) -> None:
     """记录一次概念复习，按 SM-2 简化版更新间隔、ease 与掌握度。"""
     from secondbrain.wiki.review import GRADES, review
 
     if grade not in GRADES:
-        raise typer.BadParameter("结果应为 remembered / fuzzy / forgot")
+        raise typer.BadParameter("结果应为 " + " / ".join(GRADES))
+    _, fs, _ = _load_pipeline_settings()
     wiki = _open_wiki()
     page = wiki.find(slug)
     if page is None or page.type != "concept":
         typer.echo(f"{FAIL} 找不到概念页：{slug}", err=True)
         raise typer.Exit(code=1)
-    out = review(wiki, page, grade, datetime.now().date())
+    out = review(wiki, page, grade, datetime.now().date(), fs.wiki.mastered_interval_days)
     interval = f"间隔 {out.interval_before} → {out.interval_after} 天"
     mastery = f"掌握度 {out.mastery_before} → {out.mastery_after}"
     typer.echo(

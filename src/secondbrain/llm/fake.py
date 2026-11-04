@@ -173,41 +173,54 @@ def _match_row(table: list[dict], fb: dict) -> dict | None:
     return None
 
 
+_LEVELS = ("陌生", "接触过", "想回炉", "扎实")
+
+
+def _shift_level(raw: str, delta: int) -> str | None:
+    """raw 掌握度（可能带括号说明）升 / 降一级；无法识别或已到端点时返回 None。"""
+    current = next((lv for lv in _LEVELS if raw.startswith(lv)), None)
+    if current is None:
+        return None
+    rank = _LEVELS.index(current) + delta
+    return _LEVELS[rank] if 0 <= rank < len(_LEVELS) else None
+
+
 def _profile_proposal(payload: dict) -> dict:
-    """确定性的 profile 提案：
-    - 已扎实 → 对应领域改为"扎实"（无对应领域则新增一行）；
-    - 需要回炉 → 对应领域若为"扎实"则降为"想回炉"（无对应领域则新增"想回炉"行）；
-    - 👎 → 在含"不想看"的段落末尾追加一行。"""
+    """确定性的 profile 提案（ADR 0013 的证据规则）：
+    - 太浅 → 对应领域升一级（无对应领域则新增"接触过"行）；
+    - 太难 → 对应领域降一级（无对应领域则新增"陌生"行）；
+    - 不感兴趣 / 没价值 → 在含"不想看"的段落末尾追加一行。"""
     table = payload.get("table", [])
     sections = [s["section"] for s in payload.get("sections", [])]
     dislike = next((s for s in sections if "不想看" in s), None)
     changes: dict[str, dict] = {}
     edits = []
+    labels = {"too_easy": "太浅", "too_hard": "太难"}
     for fb in payload.get("feedback", []):
         kind, fid = fb["kind"], fb["id"]
-        if kind in ("mastered", "needs_refresh"):
-            target = "扎实" if kind == "mastered" else "想回炉"
+        if kind in labels:
             row = _match_row(table, fb)
             if row is not None:
-                if kind == "needs_refresh" and not row["mastery"].startswith("扎实"):
+                target = _shift_level(row["mastery"], 1 if kind == "too_easy" else -1)
+                if target is None:
                     continue
                 key = f"row-{row['row']}"
                 change = {"action": "update", "row": row["row"], "mastery": target}
             else:
                 domain = (fb.get("topics") or [fb["title"][:40]])[0]
                 key = f"add-{domain}"
+                target = "接触过" if kind == "too_easy" else "陌生"
                 change = {"action": "add", "domain": domain, "mastery": target, "priority": "中"}
             entry = changes.setdefault(key, {**change, "reason": "（fake）", "evidence": []})
             entry["evidence"].append(fid)
-            label = "已扎实" if kind == "mastered" else "需要回炉"
-            entry["reason"] = f"（fake）{len(entry['evidence'])} 次标记{label}"
-        elif kind == "down" and dislike:
+            entry["reason"] = f"（fake）{len(entry['evidence'])} 次标记{labels[kind]}"
+        elif kind in ("dismiss", "worthless") and dislike:
             edits.append(
                 {
                     "section": dislike,
                     "action": "append",
                     "text": f"- 类似《{fb['title'][:40]}》的内容",
-                    "reason": "（fake）标记 👎",
+                    "reason": "（fake）标记不感兴趣 / 没价值",
                     "evidence": [fid],
                 }
             )

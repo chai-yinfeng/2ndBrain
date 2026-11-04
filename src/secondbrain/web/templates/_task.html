@@ -1,0 +1,22 @@
+{# 后台任务状态片段：运行中每 2 秒轮询 GET /tasks/<kind>，结束后停止轮询。 #}
+<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="/tasks/{{ kind }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if message %}<p class="refresh">{{ message }}</p>{% endif %}
+  {% if task %}
+  <p class="meta" data-task-status="{{ task.status }}">
+    {{ task.title }} ·
+    {% if task.running %}运行中…{% elif task.status == "done" %}✓ 完成{% else %}✗ 失败{% endif %}
+    · 用时 {{ task.elapsed_seconds }} 秒
+  </p>
+  {% if task.lines %}<pre class="log">{{ task.lines[-15:] | join("\n") }}</pre>{% endif %}
+  {% if task.error %}<p class="refresh">✗ {{ task.error }}</p>{% endif %}
+  {% if task.status == "done" %}
+    {% if kind == "wiki_ingest" %}
+      <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+      <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
+    {% elif kind == "run" %}
+      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/">查看今日 digest</a></p>
+    {% endif %}
+  {% endif %}
+  {% endif %}
+</div>

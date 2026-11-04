@@ -198,6 +198,8 @@ class PersonalizeSettings(BaseModel):
     tune_min_samples: int = Field(default=5, ge=1)  # 信源有反馈的条目数少于该值不给建议
     tune_raise_ratio: float = Field(default=0.7, ge=0, le=1)  # 正向比例 ≥ 该值建议 trust +1
     tune_lower_ratio: float = Field(default=0.3, ge=0, le=1)  # 正向比例 ≤ 该值建议 trust −1
+    # 近期"太难"条目的前置知识注入 L1 user 消息的长度上限（0 关闭；ADR 0013）
+    too_hard_prereq_max_chars: int = Field(default=600, ge=0)
 
 
 class BackfillSettings(BaseModel):
@@ -218,6 +220,8 @@ class WikiSettings(BaseModel):
     review_minutes: int = Field(default=5, ge=1)  # 概念复习在时间预算中的估计耗时
     review_slots: int = Field(default=1, ge=0)  # 每天最多放入温故栏的到期概念数
     recent_days: int = Field(default=30, ge=1)  # 为到期概念找"近期相关条目"的时间窗
+    first_review_days: int = Field(default=3, ge=1)  # 新建概念页的首次复习间隔（ADR 0013）
+    mastered_interval_days: int = Field(default=30, ge=1)  # 复习时点"已扎实"后的最短间隔
 
 
 class FilterSettings(BaseModel):

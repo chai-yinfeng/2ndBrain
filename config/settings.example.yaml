@@ -131,14 +131,15 @@ filter:
 
 # 个性化（M4）：反馈汇总、L1 few-shot、profile 修改提案、信源 trust 调整建议。
 personalize:
-  feedback_window_days: 30       # 汇总近 N 天的 👍 / 👎 / 学了 / 需要回炉 / 已扎实
+  feedback_window_days: 30       # 汇总近 N 天的文章反馈（不感兴趣 / 太浅 / 有收获 / 太难 / 没价值）
   summary_max_items: 50          # 送入 profile 修改提案的反馈条数上限
-  few_shot_per_polarity: 5       # L1 prompt 中正 / 负反馈样例各最多几条（0 关闭）
+  few_shot_per_polarity: 5       # L1 prompt 中正例 / 反例 / 太浅 / 太难样例各最多几条（0 关闭）
   min_feedback_for_update: 1     # 反馈少于该数时 sb profile update 不调用 LLM
   tune_window_days: 90           # sb sources tune 统计的时间窗
   tune_min_samples: 5            # 信源有反馈的条目数少于该值时不给建议
-  tune_raise_ratio: 0.7          # 正向（👍 / 学了）比例 ≥ 该值建议 trust +1
+  tune_raise_ratio: 0.7          # 正向（有收获）比例 ≥ 该值建议 trust +1；负向为不感兴趣 / 没价值
   tune_lower_ratio: 0.3          # 正向比例 ≤ 该值建议 trust −1
+  too_hard_prereq_max_chars: 600 # 近期"太难"条目的前置知识注入 L1 的长度上限（0 关闭）
 
 # 经典回补（M5，ADR 0009）：backfill: true 的信源的历史条目进入回补池，
 # 每天挑少量（优先 explainer / survey、与"接触过 / 想回炉"领域相关的）经 L1 / L2 后放进温故栏。
@@ -156,3 +157,5 @@ wiki:
   review_minutes: 5              # 到期概念复习在时间预算中的估计耗时
   review_slots: 1                # 每天最多放入温故栏的到期概念数
   recent_days: 30                # 为到期概念附上近期相关条目的时间窗
+  first_review_days: 3           # 新建概念页（掌握度从"接触过"起步）的首次复习间隔
+  mastered_interval_days: 30     # 复习时点"已扎实"后的最短复习间隔
