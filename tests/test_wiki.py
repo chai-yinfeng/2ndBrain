@@ -408,3 +408,41 @@ def test_digest_shows_concepts_and_wiki_refresh_links(client):
     # 前置知识命中 wiki 中不扎实的概念 → 链接到 wiki 页面
     assert '<a href="/wiki/page/kv-cache">KV cache</a>' in html
     assert 'href="/wiki"' in html
+
+
+# ---------- 宽容解析（ADR 0011） ----------
+
+
+def test_wiki_plan_lenient_parsing_drops_only_bad_ops():
+    raw = (FIXTURES / "wiki_plan_malformed.json").read_text(encoding="utf-8")
+    plan = WikiPlan.model_validate_json(raw)
+    assert [c.slug for c in plan.creates] == ["concept-a", "Concept B"]
+    a, b = plan.creates
+    assert (a.type, a.aliases) == ("concept", ["concept a"])  # 大小写 / 空白、字符串别名被修正
+    assert b.summary == ""  # 缺一行摘要：留空
+    assert len(plan.updates) == 1 and plan.updates[0].action == "add_links"
+    assert plan.updates[0].links == ["concept-b"]
+    assert len(plan.dropped) == 2
+    assert any(d.startswith("creates[2]：body: Field required") for d in plan.dropped)
+    assert any(d.startswith("creates[3]：type:") for d in plan.dropped)
+
+
+def test_dropped_ops_are_reported_and_rest_applied(env, conn):
+    item = add_item(conn, 1, "Example", l2=L2)
+    plan = WikiPlan.model_validate_json(
+        (FIXTURES / "wiki_plan_malformed.json").read_text(encoding="utf-8")
+    )
+    result = apply_plan(_wiki(env), plan, db.item_detail(conn, item), PROFILE, TODAY)
+    assert result.created == ["concept-a", "concept-b"]
+    assert result.updated == []  # 对新建页的 add_links 计入新建
+    assert "[[concept-b]]" in _wiki(env).pages["concept-a"].body
+    assert sum("解析时丢弃" in r for r in result.rejected) == 2
+
+
+def test_truncated_plan_is_not_partially_applied():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        WikiPlan.model_validate_json(
+            (FIXTURES / "wiki_plan_truncated.json").read_text(encoding="utf-8")
+        )

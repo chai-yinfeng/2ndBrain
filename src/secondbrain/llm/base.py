@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from secondbrain.models import LLMSettings
 
@@ -26,6 +26,18 @@ class Usage:
         self.cache_hit_tokens += other.cache_hit_tokens
         self.cache_miss_tokens += other.cache_miss_tokens
         self.completion_tokens += other.completion_tokens
+
+
+def format_validation_error(exc: ValidationError, limit: int = 5) -> str:
+    """字段路径 + 原因的简短说明，如 "creates.1.body: Field required"。"""
+    parts = []
+    for err in exc.errors()[:limit]:
+        loc = ".".join(str(x) for x in err.get("loc", ())) or "<root>"
+        parts.append(f"{loc}: {err.get('msg', '')}")
+    more = len(exc.errors()) - limit
+    if more > 0:
+        parts.append(f"……另有 {more} 处")
+    return "；".join(parts)
 
 
 class LLMError(Exception):

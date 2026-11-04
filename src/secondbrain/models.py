@@ -89,9 +89,11 @@ class LLMSettings(BaseModel):
     timeout_seconds: float = 120.0
     max_retries: int = Field(default=3, ge=0)  # 网络错误 / 429 / 5xx，由 openai SDK 指数退避
     concurrency: int = Field(default=4, ge=1)  # 同时进行的 LLM 调用数
+    # strong 模型（deepseek-v4-pro）是推理模型：reasoning token 也计入 max_tokens（ADR 0011）
     max_tokens: dict[Literal["cheap", "strong"], int] = Field(
-        default_factory=lambda: {"cheap": 4096, "strong": 4096}
+        default_factory=lambda: {"cheap": 4096, "strong": 8192}
     )
+    max_tokens_cap: int = Field(default=16384, ge=1)  # 输出被截断时重试翻倍的上限
 
 
 class ModelPrice(BaseModel):

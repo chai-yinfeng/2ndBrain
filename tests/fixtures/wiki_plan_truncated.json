@@ -1,0 +1,1 @@
+{"summary": "新建 1 个 paper 页、2 个概念页", "creates": [{"slug": "example-paper", "type": "paper", "title": "Example Paper", "summary": "示例摘要", "aliases": [], "body": "## 要点\n\n- 示例要点\n\n## 相关\n\n- [[concept-a]]"}, {"slug": "concept-a", "type": "concept", "title": "Concept A", "summary": "示例", "aliases": ["concept a"], "body": "## 是什么\n\n示例正文\n\n## 相关\n\n- [[example-paper]]"},

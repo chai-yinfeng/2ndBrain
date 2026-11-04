@@ -116,6 +116,7 @@ def apply_plan(
 ) -> IngestResult:
     """校验并执行编辑操作；非法操作被拒绝并记录原因。最后重建 index、追加 log。"""
     result = IngestResult(row["id"], row["title"])
+    result.rejected.extend(f"解析时丢弃 {d}" for d in plan.dropped)
     source_line = f"[{row['title']}]({{raw}})（[原文]({row['url']})）"
     touched: dict[str, Page] = {}
 

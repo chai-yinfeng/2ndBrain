@@ -12,9 +12,10 @@ llm:
   timeout_seconds: 120
   max_retries: 3               # 网络错误 / 429 / 5xx 的退避重试次数
   concurrency: 4               # 同时进行的 LLM 调用数
-  max_tokens:
+  max_tokens:                  # 推理模型的 reasoning token 也计入（ADR 0011）
     cheap: 4096
-    strong: 4096
+    strong: 8192
+  max_tokens_cap: 16384        # 输出被截断（finish_reason=length）时重试翻倍的上限
 
 # 价格表：USD / 1M tokens，均为高峰价。
 # 非高峰时段半价。高峰时段（UTC）：周一至周五 01:00–04:00 与 06:00–10:00。
