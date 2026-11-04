@@ -208,15 +208,17 @@ sources:
     enabled: true
 
   # ---------- core / harness ----------
-  - id: anthropic-engineering
-    type: rss
-    url: https://www.anthropic.com/engineering
+  - id: anthropic-research  # 原 anthropic-engineering：engineering 文章已迁到 /research/ 下（ADR 0012）
+    type: sitemap
+    url: https://www.anthropic.com/sitemap.xml
+    # 只取 /research/<slug> 文章页：排除 /research 列表页与 /research/team/* 团队页；混入的研究文章由 L1 过滤
+    url_pattern: '^https://www\.anthropic\.com/research/[^/]+$'
+    use_lastmod: true  # lastmod 是"最后修改"，老文章会被刷新；入库时以页面日期为准
     trust: 4
     role: core
-    tags: [harness, agents]
+    tags: [research, harness, agents]
     max_age_days: 60
     enabled: true
-    needs_scraper: true
 
   - id: simon-willison
     type: rss
