@@ -182,5 +182,5 @@ uv run sb wiki lint
 - [ ] Anthropic / `claude -p` 后端
 - [ ] wiki 图谱可视化增强
 - [ ] `needs_scraper` 信源的页面抓取支持（LMSYS、Hazy Research、Anthropic engineering / news、Meta AI、DeepSeek）
-  - [x] sitemap 部分（`type: sitemap`，ADR 0012）：LMSYS、Anthropic news 已接入
-  - [ ] 其余仍待：Anthropic engineering（sitemap 中文章与 research 混在 `/research/` 下，无法区分）、Hazy Research、Meta AI（均无 sitemap）、DeepSeek
+  - [x] sitemap 部分（`type: sitemap`，ADR 0012）：LMSYS、Anthropic news、Anthropic engineering（改为 `anthropic-research`，经 `/research/` 接入，混入研究文章由 L1 过滤）已接入
+  - [ ] 其余仍待：Hazy Research、Meta AI（均无 sitemap）、DeepSeek

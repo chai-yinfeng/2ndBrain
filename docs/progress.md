@@ -12,7 +12,7 @@
 
 ## 已处理（原待决）
 
-- **`needs_scraper` 信源的页面抓取支持**：原 6 个信源没有可用 RSS，放入 roadmap Backlog。2026-11-04：LMSYS 与 Anthropic news 已通过新的 `type: sitemap` 接入（ADR 0012）；Anthropic engineering（sitemap 中文章与 research 混在 `/research/` 下，无法区分）、Hazy Research、Meta AI（均无 sitemap）、DeepSeek 仍在 Backlog。
+- **`needs_scraper` 信源的页面抓取支持**：原 6 个信源没有可用 RSS，放入 roadmap Backlog。2026-11-04：LMSYS、Anthropic news 与 Anthropic engineering 已通过新的 `type: sitemap` 接入（ADR 0012）；engineering 文章已迁到 `/research/` 下，信源改名为 `anthropic-research`，混入的研究文章由 L1 过滤。Hazy Research、Meta AI（均无 sitemap）、DeepSeek 仍在 Backlog。
 - **发布时间异常的条目（M5 遗留）**：早于 1990 年、晚于当前 + 1 天（如 0001-01-01）的发布时间按未知处理；回补信源中时间未知且正文短于 `fetch.backfill_min_content_chars`（2000）的条目视为非文章页，不入库（M6 已实现）。默认 data 中已入库的 item 271（lilian-weng "FAQ"）：用户同意删除，已删除（删前备份 `data/brain.db.bak-before-del271`）。该 feed 每次都包含这一页，但会被上述非文章页规则拦截：临时目录实测新增 52 条，FAQ 被跳过。
 - **"GPU 性能与 kernel"的掌握度**：用户确认为"接触过"，已更新 `data/profile.md`。
 - **定时任务**：用户同意，已安装每日本地 07:00 运行（EST 下为 UTC 12:00，非高峰时段）。
@@ -76,7 +76,7 @@
 
 **信源实测（2026-11）**
 - 修正 URL：vllm-blog → `https://vllm.ai/blog/rss.xml`（原 `blog.vllm.ai/feed.xml` 重定向后 404）；martin-kleppmann → `https://martin.kleppmann.com/feed.rss`（原 `feed.xml` 404）。
-- 改为 `needs_scraper`：lmsys-sglang-blog（`lmsys.org` 常见 feed 路径均 404，页面无 feed 链接）。原本已标 `needs_scraper` 的 hazy-research、anthropic-engineering、anthropic-news、meta-ai、deepseek-news 实测确认无 RSS。
+- 改为 `needs_scraper`：lmsys-sglang-blog（`lmsys.org` 常见 feed 路径均 404，页面无 feed 链接）。原本已标 `needs_scraper` 的 hazy-research、anthropic-engineering（2026-11-04 改名 `anthropic-research`）、anthropic-news、meta-ai、deepseek-news 实测确认无 RSS。
 - 改为 `enabled: false`：gwern（gwern.net 的 feed 指向 substack，2021-06 后未更新）。
 - 其余 rss / arxiv / hf_papers 信源均实测可用，已去掉 `# TODO verify`；本次新增 0 条的信源（horace-he、tri-dao、aphyr-jepsen、karpathy-github、lilian-weng、chip-huyen、colah、eugene-yan、qwen-blog、alignment-forum、hillel-wayne）是时间窗内没有新文章，不是故障。
 
@@ -298,7 +298,7 @@
 - `sources/sitemap.py`：新信源类型 `type: sitemap`。用标准库 `xml.etree` 解析 urlset（不支持 sitemap index，遇到时报错）；按 `url_pattern` 正则筛选 URL；发布时间优先级为 URL 中的日期 → 正文页日期 → `<lastmod>`（仅 `use_lastmod: true`），都经过 `plausible()`。
 - `models.py`：`SourceType` 加 `sitemap`；`SourceConfig` 加 `url_pattern`、`use_lastmod`（只允许用于 sitemap，正则在加载时校验）；`RawEntry` 加 `page_meta`。
 - `extract/html.py`：`extract_page_meta`（trafilatura 提取标题 / 作者 / 日期）；`ingest.extract_content` 在 HTML 分支对 sitemap 条目补全标题 / 作者，URL 无日期时用页面日期覆盖 lastmod。其余流程（时间窗、每源最新 N 再去重、已入库 URL 不抓正文页、日期未知条目的非文章页判断）沿用 `ingest.collect`，没有另设规则。
-- `config/sources.example.yaml`：`lmsys-sglang-blog`、`anthropic-news` 改为 `type: sitemap`，去掉 `needs_scraper`。`anthropic-engineering` 保持 `needs_scraper`（见遗留问题）。
+- `config/sources.example.yaml`：`lmsys-sglang-blog`、`anthropic-news` 改为 `type: sitemap`，去掉 `needs_scraper`。`anthropic-engineering` 当时保持 `needs_scraper`（后续改为 `anthropic-research`，见下）。
 - 测试：`tests/test_sitemap.py`（22 个离线 + 1 个 live），fixture `sitemap_dated.xml`、`sitemap_lastmod.xml`、`sitemap_article.html`。
 
 **实测（2026-11）**
@@ -313,6 +313,11 @@
   - anthropic-news：新增 5（"Expanding our partnership with GSA …" 2026-10-27 等，日期为页面日期而非 lastmod）；再跑一次新增 0、重复 5。`--limit 20` 时再新增 2 条，其中 1 条是 lastmod 被刷新的老文章（页面日期 2026-09-01），之后由 L0 时间窗过滤。
 
 **遗留问题**
-- Anthropic engineering 仍为 `needs_scraper`：可选方案是用 `/research/` 前缀接入（会混入研究文章），或者以后做列表页抓取。
+- ~~Anthropic engineering 仍为 `needs_scraper`~~：已按用户选择改为经 `/research/` 接入（见下）。
 - Hazy Research、Meta AI（无 sitemap）、DeepSeek 仍在 Backlog。
 - `anthropic-news` 的 `url_pattern` 里排除了 8 个分类页，站点新增分类页时需要更新。
+
+**后续：`anthropic-research`（2026-11-04，分支 `backlog-anthropic-research`）**
+- 用户选择用 `/research/` 前缀接入 engineering 文章。`config/sources.example.yaml` 中 `anthropic-engineering` 改名为 `anthropic-research`（内容已不只是 engineering；默认 DB 中该 id 从未入库过条目，改名不影响数据）：`type: sitemap`、`use_lastmod: true`、`url_pattern: '^https://www\.anthropic\.com/research/[^/]+$'`，tags 改为 `[research, harness, agents]`，trust / role / max_age_days 不变，去掉 `needs_scraper`。
+- 实测 sitemap 中 `/research` 下 213 个 URL 全部有 lastmod：1 个 `/research` 列表页、5 个 `/research/team/*` 团队页由正则排除，其余 207 个单段 slug 都是文章页。
+- 临时目录（`SB_LLM_BACKEND=fake`）`sb fetch --source anthropic-research --limit 5`：新增 5（"Progress on provable inference for large language models" 2026-11-02 等；另外 4 条是 lastmod 被批量刷新的老文章，页面日期 2026-03-23 至 2026-10-01，与页面 `datePublished` 一致）；再跑一次新增 0、重复 5。

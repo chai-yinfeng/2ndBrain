@@ -267,3 +267,23 @@ def test_live_lmsys_sitemap():
     assert len(entries) > 10
     assert all(e.published_at is not None for e in entries)
     assert all("/blog/" in e.url and not e.url.endswith("/blog") for e in entries)
+
+
+def test_example_anthropic_research_pattern():
+    from secondbrain import config
+
+    sources = config.load_sources(config.CONFIG_DIR / "sources.example.yaml")
+    (src,) = [s for s in sources if s.id == "anthropic-research"]
+    assert src.type == "sitemap" and src.use_lastmod and not src.needs_scraper
+    data = b"""<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://www.anthropic.com/research</loc><lastmod>2026-10-13T18:34:55Z</lastmod></url>
+<url><loc>https://www.anthropic.com/research/team/alignment</loc>
+<lastmod>2026-10-18T19:42:27Z</lastmod></url>
+<url><loc>https://www.anthropic.com/research/managed-agents</loc>
+<lastmod>2026-10-30T15:51:07Z</lastmod></url>
+<url><loc>https://www.anthropic.com/news/managed-agents</loc>
+<lastmod>2026-10-30T15:51:07Z</lastmod></url>
+</urlset>"""
+    entries = parse_sitemap(data, src.url_pattern, src.use_lastmod)
+    assert [e.url for e in entries] == ["https://www.anthropic.com/research/managed-agents"]
