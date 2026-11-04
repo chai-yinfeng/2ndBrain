@@ -55,7 +55,7 @@
 
   <section id="prereq">
     <h2>补前置</h2>
-    <p class="meta">前置知识来自 L2{% if summary %}与深度速读{% endif %}（共 {{ prereq_count }} 个）：wiki 已有的给出链接与掌握度；没有的用一次 strong 调用生成简短讲解（{{ hints.prereq(prereq_count) }}，约半分钟{% if prereq_cached %}；已有缓存的讲解不再调用{% endif %}），并列出库中讲这个知识点的文章。</p>
+    <p class="meta">前置知识来自{% if summary %}深度速读{% else %} L2（生成深度速读后改用速读中更具体的前置知识）{% endif %}（共 {{ prereq_count }} 个）：wiki 已有的给出链接与掌握度；没有的用一次 strong 调用生成简短讲解（{{ hints.prereq(prereq_count) }}，约半分钟{% if prereq_cached %}；已有缓存的讲解不再调用{% endif %}），并列出库中讲这个知识点的文章。</p>
     <button type="button" class="fb" hx-post="/prereq/{{ item.id }}" hx-target="#prereq-result" hx-swap="innerHTML" hx-indicator="#prereq-loading">补前置</button>
     <span id="prereq-loading" class="htmx-indicator meta">生成中…</span>
     <div id="prereq-result"></div>

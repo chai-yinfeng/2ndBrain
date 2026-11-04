@@ -368,16 +368,26 @@ class PrereqReport:
     generated: int = 0  # 本次新生成的讲解数
 
 
+def _prereq_key(name: str) -> str:
+    """去重用的轻量归一：小写、去首尾空白、去掉末尾复数 s（induction heads ≡ induction head）。"""
+    key = name.strip().lower()
+    return key[:-1] if len(key) > 3 and key.endswith("s") else key
+
+
 def prereq_names(conn, item_id: int) -> list[tuple[str, str]]:
-    """L2 prerequisites 与深度速读的前置知识合并去重（不区分大小写）：[(名字, 为什么需要)]。"""
-    l2 = db.item_assessment(conn, item_id, "L2") or {}
-    summary = db.get_ai(conn, item_id, "summary") or {}
+    """前置知识 [(名字, 为什么需要)]：已有深度速读时只用速读的（更具体、带 why），
+    否则用 L2 的 prerequisites；按名字轻量归一后去重。"""
+    summary = db.get_ai(conn, item_id, "summary")
+    if summary is not None:
+        pairs = [(p["name"].strip(), p.get("why", "")) for p in summary.get("prerequisites", [])]
+    else:
+        l2 = db.item_assessment(conn, item_id, "L2") or {}
+        pairs = [(name.strip(), "") for name in l2.get("prerequisites", [])]
     merged: dict[str, tuple[str, str]] = {}
-    for p in summary.get("prerequisites", []):
-        merged.setdefault(p["name"].strip().lower(), (p["name"].strip(), p.get("why", "")))
-    for name in l2.get("prerequisites", []):
-        merged.setdefault(name.strip().lower(), (name.strip(), ""))
-    return [v for k, v in merged.items() if k]
+    for name, why in pairs:
+        if name:
+            merged.setdefault(_prereq_key(name), (name, why))
+    return list(merged.values())
 
 
 def find_explainers(conn, item_id: int, name: str, limit: int) -> list[dict]:

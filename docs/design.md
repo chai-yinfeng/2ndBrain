@@ -153,7 +153,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - 读全文（论文也不截取章节，上限 `summary.max_total_chars`）；超过 `summary.single_max_chars` 时 cheap 分块提要（SUMMARY_MAP）→ strong 汇总（SUMMARY）。
   - 输出 `DeepSummary`：问题与动机、核心方法、关键结果、局限、与已有知识的关系（输入为 profile + `known_knowledge`）、值得精读的章节、前置知识。
   - 缓存在 `item_ai`（kind = summary），不影响分级。
-- 补前置：L2 与速读的前置知识合并去重。
+- 补前置：有深度速读时只用速读的前置知识，否则用 L2 的；名字按小写、去首尾空白、去末尾复数 s 去重。
   - wiki 已有的给出链接与掌握度；
   - 没有的用一次 strong 调用（PREREQ）批量生成讲解，缓存为 kind = prereq；
   - 列出库中讲解类条目；

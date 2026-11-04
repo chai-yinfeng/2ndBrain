@@ -250,6 +250,7 @@ def prereq_item(env):
         "prerequisites": [
             {"name": "roofline model", "why": "算强度"},
             {"name": "PagedAttention", "why": "分页"},
+            {"name": "KV cache", "why": "缓存"},
         ],
     }
     db.set_ai(conn, item, "summary", summary, "fake-strong", NOW)
@@ -261,8 +262,8 @@ def prereq_item(env):
 def test_prereq_merges_sources_links_wiki_and_caches(prereq_item):
     out = runner.invoke(cli_app, ["prereq", str(prereq_item)])
     assert out.exit_code == 0, out.output
-    # 深度速读与 L2 的前置合并去重（roofline model ≡ Roofline model）
-    assert out.output.count("## ") == 3
+    # 已有深度速读：只用速读的前置知识（3 个，带 why）
+    assert out.output.count("## ") == 3 and "（算强度）" in out.output
     assert "✓ wiki 已有：[[kv-cache]] KV cache（掌握度 想回炉）" in out.output
     assert "AI 讲解（AI 生成）：（fake）PagedAttention" in out.output
     assert "讲解类条目 #1 Understanding the Roofline model" in out.output
@@ -318,3 +319,27 @@ def test_summary_task_runs_one_per_item(env):
     resp = TestClient(app).post(f"/summary/{item}")
     assert "正在运行" in resp.text
     gate.set()
+
+
+def test_prereq_names_prefer_summary_and_normalize(env):
+    from secondbrain.ops import prereq_names
+
+    item = add_item("Interp paper", PAPER, l2=l2_with(["Transformer", "induction heads"]))
+    conn = db.connect()
+    assert prereq_names(conn, item) == [("Transformer", ""), ("induction heads", "")]
+    summary = {
+        "problem": "p",
+        "prerequisites": [
+            {"name": "Induction heads", "why": "核心电路"},
+            {"name": " induction head ", "why": "重复"},
+            {"name": "Activation patching", "why": "因果验证"},
+        ],
+    }
+    db.set_ai(conn, item, "summary", summary, "fake-strong", NOW)
+    conn.commit()
+    # 有速读时不再混入 L2 的 Transformer；单复数 / 大小写 / 空白视为同一个
+    assert prereq_names(conn, item) == [
+        ("Induction heads", "核心电路"),
+        ("Activation patching", "因果验证"),
+    ]
+    conn.close()
