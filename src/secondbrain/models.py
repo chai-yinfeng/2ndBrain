@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SourceType = Literal["rss", "arxiv", "hf_papers", "youtube"]
+SourceType = Literal["rss", "arxiv", "hf_papers", "youtube", "sitemap"]
 
 
 class SourceConfig(BaseModel):
@@ -27,6 +28,8 @@ class SourceConfig(BaseModel):
     enabled: bool = True
     backfill: bool = False  # M5 实现，M1 只解析并入库
     needs_scraper: bool = False
+    url_pattern: str | None = None  # sitemap：只保留匹配该正则的 URL（re.search）
+    use_lastmod: bool = False  # sitemap：URL 无日期时按 <lastmod> 选最新条目（页面日期优先）
 
     @model_validator(mode="after")
     def _check_location(self) -> SourceConfig:
@@ -34,6 +37,13 @@ class SourceConfig(BaseModel):
             raise ValueError("arxiv 信源需要 query")
         if self.type != "arxiv" and not self.url:
             raise ValueError(f"{self.type} 信源需要 url")
+        if self.type != "sitemap" and (self.url_pattern is not None or self.use_lastmod):
+            raise ValueError("url_pattern / use_lastmod 只用于 sitemap 信源")
+        if self.url_pattern is not None:
+            try:
+                re.compile(self.url_pattern)
+            except re.error as exc:
+                raise ValueError(f"url_pattern 不是有效的正则：{exc}") from exc
         return self
 
 
@@ -75,6 +85,8 @@ class RawEntry:
     published_at: datetime | None = None
     arxiv_id: str | None = None
     video_id: str | None = None  # YouTube 视频 id
+    # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
+    page_meta: bool = False
 
 
 # ---------- M2：LLM 与过滤 / 分级设置 ----------

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://blog.example.com</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/about</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/blog</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/blog/2026-10-20-radix-cache</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/blog/2026-11-02-hicache</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/blog/2026-10-28-spec-decoding</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+<url><loc>https://blog.example.com/blog/2025-01-15-old-post</loc><lastmod>2026-11-04T06:05:52.497Z</lastmod></url>
+</urlset>

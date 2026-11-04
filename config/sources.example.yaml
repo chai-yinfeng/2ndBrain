@@ -3,8 +3,8 @@
 #
 # 每个条目字段：
 #   id:            唯一标识（小写、短横线）
-#   type:          rss | arxiv | hf_papers | youtube
-#   url:           rss / hf_papers / youtube 使用的地址
+#   type:          rss | arxiv | hf_papers | youtube | sitemap
+#   url:           rss / hf_papers / youtube / sitemap 使用的地址（sitemap 为 sitemap.xml）
 #   query:         arxiv 使用的检索式（分类 + 关键词）
 #   trust:         1–5，信源可信度，参与排序加权
 #                  建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
@@ -14,6 +14,9 @@
 #   enabled:       是否启用
 #   backfill:      是否把 feed 中时间窗以外的历史条目放进回补池（默认 false；ADR 0004 / 0009）
 #   needs_scraper: 站点没有可用 RSS，需要页面抓取支持（默认 false；M1 记录为待支持，不阻塞）
+#   url_pattern:   sitemap 专用，只保留匹配该正则的 URL（排除列表页、About 等）
+#   use_lastmod:   sitemap 专用，URL 中没有日期时按 <lastmod> 选最新条目，入库时页面日期优先
+#                  （默认 false；ADR 0012）
 
 sources:
   # ---------- core / 推理 infra ----------
@@ -27,14 +30,14 @@ sources:
     enabled: true
 
   - id: lmsys-sglang-blog
-    type: rss
-    url: https://www.lmsys.org/blog  # 实测无 RSS（2026-11，常见 feed 路径均 404）
+    type: sitemap
+    url: https://lmsys.org/sitemap.xml
+    url_pattern: '^https://www\.lmsys\.org/blog/\d{4}-\d{2}-\d{2}-'  # 发布日期在 slug 里
     trust: 5
     role: core
     tags: [inference, serving, sglang]
     max_age_days: 30
     enabled: true
-    needs_scraper: true
 
   - id: pytorch-blog
     type: rss
@@ -253,14 +256,16 @@ sources:
     enabled: true
 
   - id: anthropic-news
-    type: rss
-    url: https://www.anthropic.com/news
+    type: sitemap
+    url: https://www.anthropic.com/sitemap.xml
+    # 排除分类列表页（/news/product 等，sitemap 中没有 lastmod）
+    url_pattern: '^https://www\.anthropic\.com/news/(?!(announcements|features|models|partnerships|policy|product|safeguards|security)$)[^/]+$'
+    use_lastmod: true  # lastmod 是"最后修改"，老文章会被刷新；入库时以页面日期为准
     trust: 4
     role: core
     tags: [lab]
     max_age_days: 14
     enabled: true
-    needs_scraper: true
 
   - id: google-deepmind
     type: rss

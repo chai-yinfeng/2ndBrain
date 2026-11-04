@@ -17,7 +17,7 @@ from secondbrain.extract.html import extract_main_text, html_fragment_to_text
 from secondbrain.extract.pdf import extract_pdf_text
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
 from secondbrain.net import FetchError, HttpClient
-from secondbrain.sources import FETCHERS
+from secondbrain.sources import FETCHERS, sitemap
 from secondbrain.urls import canonicalize_url, content_hash
 
 # arXiv HTML 版提取到的正文短于该值时视为无效，改用 PDF。
@@ -53,7 +53,9 @@ def _pdf_text(client: HttpClient, url: str, fs: FetchSettings) -> str:
 
 
 def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> tuple[str, str]:
-    """返回 (正文, 提取方式)。拿不到正文时退回摘要。"""
+    """返回 (正文, 提取方式)。拿不到正文时退回摘要。
+
+    sitemap 条目（`entry.page_meta`）会顺带用正文页元数据补全 entry 的标题 / 作者 / 发布时间。"""
     if entry.arxiv_id:
         try:
             resp = client.get(f"https://arxiv.org/html/{entry.arxiv_id}")
@@ -80,6 +82,8 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
             else:
                 text = extract_main_text(resp.text, url=str(resp.url)) or ""
                 method = "html"
+                if entry.page_meta:
+                    sitemap.apply_page_meta(entry, resp.text, str(resp.url))
             if text:
                 return text, method
         except (FetchError, PyPdfError):

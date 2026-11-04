@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import trafilatura
 
 
@@ -26,3 +28,18 @@ def html_fragment_to_text(fragment: str) -> str:
     if not text:
         text = trafilatura.html2txt(fragment)
     return (text or "").strip()
+
+
+@dataclass
+class PageMeta:
+    title: str | None = None
+    author: str | None = None
+    date: str | None = None  # trafilatura 识别的发布日期（YYYY-MM-DD）
+
+
+def extract_page_meta(html: str | bytes, url: str | None = None) -> PageMeta:
+    """从完整网页中提取标题 / 作者 / 发布日期；识别不到的字段为 None。"""
+    meta = trafilatura.extract_metadata(html, default_url=url)
+    if meta is None:
+        return PageMeta()
+    return PageMeta(title=meta.title or None, author=meta.author or None, date=meta.date or None)

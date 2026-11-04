@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hierarchical KV cache for distributed serving | Example Blog</title>
+  <meta property="og:title" content="Hierarchical KV cache for distributed serving">
+  <meta name="author" content="Alice Chen">
+  <meta property="article:published_time" content="2026-11-01T00:00:00Z">
+</head>
+<body>
+  <nav><a href="/">Home</a> <a href="/blog">Blog</a></nav>
+  <main>
+    <article>
+      <h1>Hierarchical KV cache for distributed serving</h1>
+      <p>A hierarchical KV cache keeps hot prefixes in GPU memory, warm prefixes in host memory and cold prefixes on remote storage.</p>
+      <p>When a request arrives, the scheduler looks up the longest cached prefix across all tiers and prefetches the missing blocks before prefill starts.</p>
+      <p>Under tensor and pipeline parallelism every rank stores its own shard of the cache, so the lookup and the prefetch have to stay consistent across ranks.</p>
+    </article>
+  </main>
+  <footer>Copyright fixture.</footer>
+</body>
+</html>
