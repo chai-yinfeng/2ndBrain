@@ -61,21 +61,21 @@ uv run sb items list --since 7d | head
 
 ## M2 — LLM 后端 + 分层过滤流水线 + 分级
 
-- [ ] `llm/base.py`：`complete_json(messages, schema, tier="cheap"|"strong") -> (obj, usage)`
-- [ ] `llm/deepseek.py`：openai SDK、JSON 模式、重试、schema 校验失败重试一次
-- [ ] `llm/fake.py`：按 fixture / 规则返回确定性结果
-- [ ] `llm/usage.py`：`llm_calls` 表记录模型、tokens（含 cache hit）、按 config 价格估算 $
-- [ ] `profile.md`：首次运行从 `config/profile.example.md` 复制到 `data/profile.md`
-- [ ] L0 规则（零 token）：时间窗、include / exclude 关键词、最短长度、已处理跳过
-- [ ] 读取 profile 中的领域掌握度表（`陌生 / 接触过 / 想回炉 / 扎实`，ADR 0003）
-- [ ] L1 粗筛（cheap 模型，批量 ~10 条 / 调用，profile 放 system 前缀以吃缓存）：输出 `relevance, novelty, quality (0–10), content_type(frontier|explainer|survey|tutorial|opinion), refresher_value (0–10), topics[], one_line_reason`；"接触过 / 想回炉"领域的好 explainer / survey 加分，"扎实"领域只推 frontier；分数 × 信源 trust 取 top-N 进 L2
-- [ ] L2 精读（strong 模型）：全文截断（论文取 abstract + intro + conclusion，上限可配，默认 ~24k token），输出中文 `tldr, key_points[], why_for_you(两句), est_minutes, prerequisites[], scores`
-- [ ] `tiering.py`（纯代码）：以每日时间预算为主约束（`daily_budget_minutes`，默认 105，ADR 0004），条数配额为上限；lanes：`must_read / worth_it / refresher(温故) / serendipity / fyi / archived`；refresher 默认 1–2 条且不占 must_read 名额；serendipity 只从高质量低相关或 `role: expansion` 候选中选；允许为空
-- [ ] 深读标记：`est_minutes` > 预算 × `deep_read_ratio`（默认 0.6）的条目标"深读"，可顺延到预算有余的日子
-- [ ] 积压：未读 must_read 计入积压，超过 `backlog_max_days`（默认 3）天降级到 fyi
-- [ ] 表：`assessments`、`digests`
-- [ ] CLI：`sb run [--limit N] [--no-fetch]`、`sb digest show [--date]`、`sb usage [--since 7d]`
-- [ ] prompts 放 `llm/prompts/*.md`
+- [x] `llm/base.py`：`complete_json(messages, schema, tier="cheap"|"strong") -> (obj, usage)`
+- [x] `llm/deepseek.py`：openai SDK、JSON 模式、重试、schema 校验失败重试一次
+- [x] `llm/fake.py`：按 fixture / 规则返回确定性结果
+- [x] `llm/usage.py`：`llm_calls` 表记录模型、tokens（含 cache hit）、按 config 价格估算 $
+- [x] `profile.md`：首次运行从 `config/profile.example.md` 复制到 `data/profile.md`
+- [x] L0 规则（零 token）：时间窗、include / exclude 关键词、最短长度、已处理跳过
+- [x] 读取 profile 中的领域掌握度表（`陌生 / 接触过 / 想回炉 / 扎实`，ADR 0003）
+- [x] L1 粗筛（cheap 模型，批量 ~10 条 / 调用，profile 放 system 前缀以吃缓存）：输出 `relevance, novelty, quality (0–10), content_type(frontier|explainer|survey|tutorial|opinion), refresher_value (0–10), topics[], one_line_reason`；"接触过 / 想回炉"领域的好 explainer / survey 加分，"扎实"领域只推 frontier；分数 × 信源 trust 取 top-N 进 L2
+- [x] L2 精读（strong 模型）：全文截断（论文取 abstract + intro + conclusion，上限可配，默认 ~24k token），输出中文 `tldr, key_points[], why_for_you(两句), est_minutes, prerequisites[], scores`
+- [x] `tiering.py`（纯代码）：以每日时间预算为主约束（`daily_budget_minutes`，默认 105，ADR 0004），条数配额为上限；lanes：`must_read / worth_it / refresher(温故) / serendipity / fyi / archived`；refresher 默认 1–2 条且不占 must_read 名额；serendipity 只从高质量低相关或 `role: expansion` 候选中选；允许为空
+- [x] 深读标记：`est_minutes` > 预算 × `deep_read_ratio`（默认 0.6）的条目标"深读"，可顺延到预算有余的日子
+- [x] 积压：未读 must_read 计入积压，超过 `backlog_max_days`（默认 3）天降级到 fyi
+- [x] 表：`assessments`、`digests`
+- [x] CLI：`sb run [--limit N] [--no-fetch]`、`sb digest show [--date]`、`sb usage [--since 7d]`
+- [x] prompts 放 `llm/prompts/*.md`
 
 **模块**：`llm/`、`pipeline/`、`db.py`、`cli.py`、`config/settings.example.yaml`
 
@@ -181,3 +181,4 @@ uv run sb wiki lint
 - [ ] embedding 语义去重 + 同一事件多信源聚合（sqlite-vec）
 - [ ] Anthropic / `claude -p` 后端
 - [ ] wiki 图谱可视化增强
+- [ ] `needs_scraper` 信源的页面抓取支持（LMSYS、Hazy Research、Anthropic engineering / news、Meta AI、DeepSeek）

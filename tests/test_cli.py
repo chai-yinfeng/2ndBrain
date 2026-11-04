@@ -130,3 +130,24 @@ def test_items_list(isolated_env: Path) -> None:
 def test_items_list_rejects_bad_since(isolated_env: Path) -> None:
     result = runner.invoke(app, ["items", "list", "--since", "yesterday"])
     assert result.exit_code == 2
+
+
+def test_run_requires_key_for_deepseek(isolated_env: Path) -> None:
+    result = runner.invoke(app, ["run", "--no-fetch"])
+    assert result.exit_code == 1
+    assert "DEEPSEEK_API_KEY 未设置" in result.output
+
+
+def test_run_digest_usage_with_fake_backend(
+    isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SB_LLM_BACKEND", "fake")
+    result = runner.invoke(app, ["digest", "show"])
+    assert "还没有 digest" in result.output
+    result = runner.invoke(app, ["run", "--no-fetch"])
+    assert result.exit_code == 0, result.output
+    assert "LLM 后端：fake" in result.output
+    assert (isolated_env / "profile.md").is_file()  # 从 example 生成
+    result = runner.invoke(app, ["usage", "--since", "1d"])
+    assert result.exit_code == 0
+    assert "没有 LLM 调用记录" in result.output

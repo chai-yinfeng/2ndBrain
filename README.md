@@ -27,7 +27,7 @@ uv run pytest -q
 
 - [x] M0 仓库与骨架：`sb --help`、`sb doctor`、配置示例、文档
 - [x] M1 采集层（RSS/Atom、arXiv、HF Daily Papers）：`sb sources list`、`sb fetch`、`sb items list`
-- [ ] M2 LLM 后端 + 分层过滤 + 分级
+- [x] M2 LLM 后端 + 分层过滤 + 分级：`sb run`、`sb digest show`、`sb usage`
 - [ ] M3 本地 Web UI + 反馈 + 定时运行
 - [ ] M4 个性化与记忆
 - [ ] M5 视频讲座与长内容

@@ -2,6 +2,10 @@
 
 每个 milestone 完成时追加一条：做了什么、验收结果、遗留问题。
 
+## 待决
+
+- **`needs_scraper` 信源的页面抓取支持**：6 个信源（LMSYS、Hazy Research、Anthropic engineering、Anthropic news、Meta AI、DeepSeek）没有可用 RSS，目前跳过。推荐默认：放入 roadmap Backlog，不进 M1–M6。（已加入 Backlog，待用户确认）
+
 ## M0 — 仓库与骨架（2026-11-04）
 
 **做了什么**
@@ -69,3 +73,39 @@
 - 视频源的 `channel_id` 仍待 M5 确认（两个为占位符 `TODO`）。
 - 跨信源重复的论文只归属先处理的信源（见 ADR 0005）。
 - `sb items list | head` 在管道提前关闭时返回码为 1（Click 对 EPIPE 的默认处理，无报错输出）。
+
+## M2 — LLM 后端 + 分层过滤 + 分级（2026-11-04，分支 `m2-filter`）
+
+**做了什么**
+- 新增依赖 openai（DeepSeek 的 OpenAI 兼容 API）。
+- `llm/`：
+  - `base.py`：统一接口 `complete_json`，`Usage`，`LLMError`。
+  - `deepseek.py`：JSON 模式；SDK 对网络错误 / 429 / 5xx 退避重试；pydantic 校验失败重试一次；错误信息中的密钥替换为 `***`。
+  - `fake.py`：按关键词与标题哈希确定性打分。
+  - `usage.py`：`llm_calls` 表，费用按价格表估算，非高峰时段半价。
+  - `schemas.py`：L1 / L2 输出 schema。
+  - `prompts/l1_system.md`、`l2_system.md`。
+- `profile/loader.py`：解析领域掌握度表，掌握度带补充说明（如"接触过（……）"）也能识别；解析失败时给出警告，退回 profile 全文。`data/profile.md` 不存在时才从 example 复制，已存在时从不覆盖。
+- `pipeline/`：
+  - `l0_rules.py`：时间窗、最短正文、include / exclude 关键词、已处理跳过。
+  - `l1_screen.py`：按信源轮询选候选、批量打分；模型漏掉的条目单独补评一次。
+  - `l2_deep.py`：论文取 abstract + introduction + conclusion。
+  - `tiering.py`：纯函数，负责排序分、时间预算、lanes、深读 / 顺延、积压。
+  - `run.py`：编排；L2 前预估费用，超过 `run.max_cost_usd` 就停止；第一个调用先单独执行以预热上下文缓存。
+- `db.py`：迁移 v2，新增 `assessments`、`digests`、`llm_calls` 三张表。
+- CLI：`sb run [--limit N] [--no-fetch]`、`sb digest show [--date]`、`sb usage [--since 7d]`。
+- settings：`llm` 补充超时 / 重试 / 并发 / max_tokens；新增 `pricing_schedule`、`run`、`filter`（l0 / l1 / l2 / score / thresholds / estimate）。
+- 新增测试 `test_tiering.py`、`test_pipeline_fake.py`、`test_llm_deepseek_parse.py`，并补充 `test_cli.py`；测试用的 profile 是自造的 `tests/fixtures/profile.md`。
+- 实现取舍见 ADR 0006；排序分公式与分级规则写入 `docs/design.md`。
+
+**验收结果**
+- `uv run pytest -q`：96 passed；`uv run ruff check .`：通过。
+- fake 全链路（临时 `SB_DATA_DIR`，profile 从 example 生成）：L1 30 / L2 15，必读 3、值得读 6、温故 2、意外 1、速览 18，排了 99 / 105 分钟，费用 $0。
+- live（DeepSeek，UTC 高峰时段）：
+  - 默认 data 目录的第一次 run 发生在修复之前：L1 30 条只完成 21 条（模型漏条）；估时偏高，一篇博客被估成 90 分钟，导致只有必读 2 条和顺延 2 条；费用 $0.2209。
+  - 修复（漏条补评、缓存预热、L2 prompt 增加估时锚点）后，在重置过的 scratch 副本上重跑：L1 30 / 30，L1 缓存命中 32k / 40k token；必读 3、值得读 1、温故 1、意外 1、顺延 1、速览 21、归档 2；排了 102 / 105 分钟；费用 $0.2370（L1 $0.0132，L2 $0.2238）。
+
+**遗留问题**
+- 默认 data 目录中今天的 digest 来自修复前的那次 run。未做重置（需要清空 M2 的三张表并把条目状态改回 new，属于覆盖数据，等待确认）。
+- L2 占费用的约 95%；单次约 $0.22（高峰），非高峰约减半。
+- 时间预算常被 1–2 篇长文占满，此时温故 / 意外 / 值得读可能为空，这是"预算为主约束"的预期行为；若希望这些 lane 有保底，需要另行决定是否为其预留预算。

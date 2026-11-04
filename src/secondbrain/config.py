@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from secondbrain.models import FetchSettings, SourceConfig
+from secondbrain.models import FetchSettings, FilterSettings, SourceConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -118,3 +118,39 @@ def fetch_settings(settings: dict[str, Any]) -> FetchSettings:
         return FetchSettings.model_validate(settings.get("fetch") or {})
     except ValidationError as exc:
         raise ConfigError(f"settings 中 fetch 段不合法：{exc}") from exc
+
+
+def pipeline_settings(settings: dict[str, Any]) -> FilterSettings:
+    """把 settings 顶层的 llm / pricing / 预算 / lanes 与 `filter:` 段组装成 FilterSettings。"""
+    keys = (
+        "llm",
+        "pricing",
+        "pricing_schedule",
+        "daily_budget_minutes",
+        "lanes",
+        "deep_read_ratio",
+        "backlog_max_days",
+        "run",
+    )
+    data = {k: settings[k] for k in keys if settings.get(k) is not None}
+    data.update(settings.get("filter") or {})
+    try:
+        return FilterSettings.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigError(f"settings 不合法：{exc}") from exc
+
+
+def profile_path() -> Path:
+    return data_dir() / "profile.md"
+
+
+def ensure_profile() -> tuple[Path, bool]:
+    """返回 (profile 路径, 是否刚从 example 复制)。已存在时绝不覆盖。"""
+    path = profile_path()
+    if path.exists():
+        return path, False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (CONFIG_DIR / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return path, True
