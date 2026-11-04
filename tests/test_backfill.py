@@ -193,3 +193,61 @@ def test_backfill_item_that_does_not_fit_stays_in_pool(pool):
     lane = pool.execute("SELECT lane FROM digests WHERE item_id = ?", (survey_id,)).fetchone()
     assert lane is not None and lane[0] in ("refresher", "deferred")
     assert calls_after == calls_before  # 常规条目已处理过，回补条目复用 L2
+
+
+# ---------- 发布时间异常 / 非文章页（M5 遗留） ----------
+
+
+def test_implausible_dates_are_unknown():
+    from datetime import UTC, datetime
+
+    from secondbrain.sources.base import parse_iso_datetime, plausible
+
+    assert plausible(datetime(1, 1, 1, tzinfo=UTC)) is None
+    assert plausible(datetime(1989, 12, 31, tzinfo=UTC)) is None
+    assert plausible(datetime.now(UTC) + timedelta(days=3)) is None
+    assert plausible(datetime(2024, 5, 1, tzinfo=UTC)) is not None
+    assert parse_iso_datetime("0001-01-01T00:00:00Z") is None
+
+
+UNDATED_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>t</title>
+<item><title>FAQ</title><link>https://blog.example.com/faq</link>
+<pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><description>short faq</description></item>
+<item><title>A classic undated essay</title><link>https://blog.example.com/essay</link>
+<description>essay</description></item>
+<item><title>Fresh post</title><link>https://blog.example.com/fresh</link>
+<pubDate>Tue, 03 Nov 2026 08:00:00 +0000</pubDate><description>fresh</description></item>
+</channel></rss>"""
+
+
+def test_undated_non_article_pages_stay_out_of_backfill(conn, make_client):
+    essay = (
+        b"<html><body><article>"
+        + b"<p>A long classic essay paragraph.</p>" * 120
+        + b"</article></body></html>"
+    )
+    routes = {
+        BLOG_FEED: httpx.Response(200, content=UNDATED_FEED),
+        "https://blog.example.com/faq": httpx.Response(
+            200, content=b"<html><body><p>Contact me.</p></body></html>"
+        ),
+        "https://blog.example.com/essay": httpx.Response(200, content=essay),
+        "https://blog.example.com/fresh": httpx.Response(
+            200, content=fixture_bytes("article.html")
+        ),
+    }
+    client, _ = make_client(routes)
+    src = SourceConfig(id="blog", type="rss", url=BLOG_FEED, max_age_days=7, backfill=True)
+    (result,) = fetch_sources(conn, [src], client, client.settings, now=NOW)
+    rows = dict(conn.execute("SELECT title, is_backfill FROM items").fetchall())
+    assert rows == {"Fresh post": 0, "A classic undated essay": 1}
+    assert any("疑似非文章页" in n and "FAQ" in n for n in result.notes)
+
+
+def test_undated_items_of_regular_sources_are_kept(conn, make_client):
+    routes = {BLOG_FEED: httpx.Response(200, content=UNDATED_FEED)}
+    client, _ = make_client(routes)
+    src = SourceConfig(id="blog", type="rss", url=BLOG_FEED, max_age_days=7)
+    (result,) = fetch_sources(conn, [src], client, client.settings, now=NOW)
+    assert result.added == 3 and result.backfilled == 0

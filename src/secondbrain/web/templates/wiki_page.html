@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} · Wiki{% endblock %}
+{% block content %}
+<article class="detail" data-wiki-page="{{ page.slug }}">
+  <p class="meta"><a href="/wiki">← Wiki</a></p>
+  <p class="meta">
+    {{ page.type }}
+    {% if page.meta.mastery %}· 掌握度 {{ page.meta.mastery }}{% endif %}
+    {% if page.type == "concept" and due %}· 下次复习 {{ due }}（间隔 {{ page.meta.interval_days }} 天，ease {{ page.meta.ease }}）{% endif %}
+    {% if page.aliases %}· 别名：{{ page.aliases | join("、") }}{% endif %}
+    {% if page.meta.sources %}· 来源：{% for sid in page.meta.sources %}<a href="/item/{{ sid }}">#{{ sid }}</a>{% if not loop.last %} {% endif %}{% endfor %}{% endif %}
+  </p>
+  {% if page.type == "concept" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
+  <section class="wiki-body">{{ body_html | safe }}</section>
+</article>
+{% endblock %}

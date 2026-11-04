@@ -82,3 +82,43 @@ class ChunkPoint(BaseModel):
 class ChunkNotes(BaseModel):
     summary: str
     points: list[ChunkPoint] = Field(default_factory=list)
+
+
+# ---------- M6：wiki ingest / lint ----------
+
+PageType = Literal["concept", "entity", "paper"]
+
+
+class PageCreate(BaseModel):
+    slug: str
+    type: PageType
+    title: str
+    summary: str  # 一行摘要，写入 index.md
+    aliases: list[str] = Field(default_factory=list)
+    body: str  # Markdown 正文（## 小节，可含 [[slug]]）
+
+
+class PageUpdate(BaseModel):
+    """对已有页面的受限修改。"""
+
+    slug: str
+    action: Literal["append_section", "replace_section", "add_links", "add_aliases"]
+    section: str | None = None  # append_section / replace_section 的小节标题
+    text: str | None = None
+    links: list[str] = Field(default_factory=list)  # add_links：要链接的 slug
+    aliases: list[str] = Field(default_factory=list)  # add_aliases
+
+
+class WikiPlan(BaseModel):
+    summary: str = ""
+    creates: list[PageCreate] = Field(default_factory=list)
+    updates: list[PageUpdate] = Field(default_factory=list)
+
+
+class LintIssue(BaseModel):
+    pages: list[str]
+    description: str
+
+
+class LintFindings(BaseModel):
+    issues: list[LintIssue] = Field(default_factory=list)

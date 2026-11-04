@@ -27,7 +27,7 @@
     <ul>{% for text, link in key_points %}<li>{% if link %}<a href="{{ link }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}</li>{% endfor %}</ul>
     <p class="reason"><b>为什么推荐</b> {{ l2.why_for_you }}</p>
     <p class="meta">预计 {{ l2.est_minutes }} 分钟</p>
-    {% if refresh_first %}<p class="refresh"><b>建议先回炉：</b>{{ refresh_first | join("、") }}</p>{% endif %}
+    {% if refresh_first %}<p class="refresh"><b>建议先回炉：</b>{% for name, link in refresh_first %}{% if link %}<a href="{{ link }}">{{ name }}</a>{% else %}{{ name }}{% endif %}{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
     {% if l2.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ l2.prerequisites | join("、") }}</p>{% endif %}
   </section>
   {% endif %}

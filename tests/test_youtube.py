@@ -235,3 +235,19 @@ def test_l0_video_rules():
     assert l0_reason(_row(content_len=5000), s, NOW) is None
     # 没有字幕：不按正文长度排除（交给 L1 看标题与简介，但不会进 L2）
     assert l0_reason(_row(extract_method="no_transcript", duration_seconds=None), s, NOW) is None
+
+
+def test_transcripts_use_their_own_length_cap(conn, make_client, monkeypatch):
+    long_segs = [Segment(i, 1, "word " * 50) for i in range(3000)]  # 远超 content_max_chars
+    monkeypatch.setattr(
+        tr, "fetch_transcript", lambda vid, fs: Transcript(long_segs, "transcript", "en", False)
+    )
+    client, _ = make_client(
+        {FEED: httpx.Response(200, content=fixture_bytes("youtube_feed.xml"))},
+        content_max_chars=10_000,
+        transcript_max_chars=50_000,
+    )
+    src = SourceConfig(id="yt", type="youtube", url=FEED, max_age_days=30)
+    fetch_sources(conn, [src], client, client.settings, now=NOW)
+    lengths = [r[0] for r in conn.execute("SELECT length(content) FROM items")]
+    assert lengths and all(length == 50_000 for length in lengths)

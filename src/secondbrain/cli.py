@@ -17,6 +17,7 @@ from secondbrain.llm.usage import summarize
 from secondbrain.net import HttpClient
 from secondbrain.pipeline.run import run_pipeline
 from secondbrain.profile.loader import load_profile
+from secondbrain.wiki.store import open_wiki
 
 app = typer.Typer(help="Second Brain：知识过滤 + 分级推荐 + 知识 wiki。", no_args_is_help=True)
 sources_app = typer.Typer(help="信源管理。", no_args_is_help=True)
@@ -24,11 +25,13 @@ items_app = typer.Typer(help="已采集条目。", no_args_is_help=True)
 digest_app = typer.Typer(help="每日分级推荐。", no_args_is_help=True)
 schedule_app = typer.Typer(help="macOS launchd 定时运行 sb run。", no_args_is_help=True)
 profile_app = typer.Typer(help="用户画像（profile.md）。", no_args_is_help=True)
+wiki_app = typer.Typer(help="知识 wiki（data/wiki，Obsidian 兼容）。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(profile_app, name="profile")
+app.add_typer(wiki_app, name="wiki")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -285,6 +288,7 @@ def run(
             now=now,
             today=datetime.now().date(),
             clock=lambda: datetime.now(UTC),
+            wiki=open_wiki(config.wiki_dir(), config.raw_dir()),
         )
     finally:
         conn.close()
@@ -296,6 +300,8 @@ def run(
     r = report
     typer.echo(f"L1：送入 {r.l1_selected} 条，完成 {r.l1_assessed} 条，失败 {r.l1_failed} 条")
     typer.echo(f"L2：选中 {r.l2_selected} 条，完成 {r.l2_assessed} 条，失败 {r.l2_failed} 条")
+    if r.concepts_placed:
+        typer.echo(f"wiki：到期概念 {r.concepts_placed} 个放入温故栏")
     if r.backfill_screened or r.backfill_picked:
         typer.echo(
             f"回补：粗筛 {r.backfill_screened} 条，选中 {r.backfill_picked} 条，"
@@ -359,6 +365,7 @@ def digest_show(
         l1 = db.latest_assessments(conn, "L1")
         l2 = db.latest_assessments(conn, "L2")
         backlog = [d for _, d in db.past_must_reads(conn, day)]
+        concept_rows = db.digest_concepts(conn, day)
     finally:
         conn.close()
     if not rows:
@@ -375,6 +382,13 @@ def digest_show(
         typer.echo(f"## {LANE_TITLES[lane]}（{len(entries)}）")
         if not entries:
             typer.echo("（空）")
+        if lane == "refresher":
+            for c in concept_rows:
+                mastery = c["mastery"] or "—"
+                typer.echo(f"* 概念复习：{c['title']}（掌握度 {mastery}）· {c['est_minutes']} 分钟")
+                typer.echo(f"   wiki：[[{c['slug']}]]；复习：sb wiki review {c['slug']} <结果>")
+                if c["related_title"]:
+                    typer.echo(f"   相关条目：{c['related_title']}  {c['related_url']}")
         for position, row in enumerate(entries, start=1):
             item = row["item_id"]
             for line in _lane_line(position, row, l1.get(item, {}), l2.get(item)):
@@ -389,6 +403,7 @@ def digest_show(
         typer.echo(f"- …… 另有 {len(fyi) - FYI_SHOWN} 条")
     typer.echo(f"\n归档 {len(by_lane.get('archived', []))} 条")
     used = sum(r["est_minutes"] for r in rows if r["lane"] in TOP_LANES)
+    used += sum(c["est_minutes"] for c in concept_rows)
     typer.echo(
         f"总耗时 {used} / 预算 {fs.daily_budget_minutes} 分钟；此前未读的必读积压 {len(backlog)} 条"
     )
@@ -672,3 +687,191 @@ def _print_l2(l2: dict, url: str, key_point_link) -> None:
     typer.echo(f"预计 {l2['est_minutes']} 分钟")
     if l2.get("prerequisites"):
         typer.echo(f"前置知识：{'、'.join(l2['prerequisites'])}")
+
+
+def _open_wiki():
+    return open_wiki(config.wiki_dir(), config.raw_dir())
+
+
+@wiki_app.command("ingest")
+def wiki_ingest(
+    item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
+    pending: bool = typer.Option(False, "--pending", help='编入所有已标"学了"但尚未编入的条目'),
+    force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
+) -> None:
+    """把条目编进 wiki：strong 模型输出受限的页面操作，由代码校验后写入 data/wiki。"""
+    from secondbrain.llm.usage import record_call
+    from secondbrain.wiki.ingest import ingest_item, pending_items
+
+    if (item_id is None) == (not pending):
+        raise typer.BadParameter("请给出 item_id，或使用 --pending（二选一）")
+    config.load_env()
+    settings, fs, _ = _load_pipeline_settings()
+    wiki = _open_wiki()
+    conn = db.connect()
+    try:
+        if pending:
+            ids = pending_items(conn)
+        else:
+            done = db.ingested_ids(conn)
+            if item_id in done and not force:
+                typer.echo(f"{WARN} #{item_id} 已编入 wiki（如需重新编入加 --force）")
+                return
+            ids = [item_id]
+        typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
+        if not ids:
+            typer.echo('0 条待 ingest（没有已标"学了"且尚未编入的条目）')
+            return
+        backend_name = config.llm_backend(settings)
+        try:
+            backend = make_backend(backend_name, fs.llm, os.environ.get("DEEPSEEK_API_KEY"))
+        except LLMError as exc:
+            typer.echo(f"{FAIL} {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        profile_file, _ = config.ensure_profile()
+        profile = load_profile(profile_file)
+        total = 0.0
+        failures = 0
+        for iid in ids:
+            row = db.item_detail(conn, iid)
+            if row is None:
+                typer.echo(f"{FAIL} 条目不存在：{iid}")
+                failures += 1
+                continue
+            today = datetime.now().date()
+            _, estimate, _ = ingest_item(
+                conn, wiki, backend, profile, row, fs, today, estimate_only=True
+            )
+            typer.echo(f"#{iid} {row['title']}：预估 ${estimate:.4f}")
+            if total + estimate > fs.run.max_cost_usd:
+                typer.echo(f"{FAIL} 预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
+                failures += 1
+                break
+            now = datetime.now(UTC)
+            try:
+                result, _, _ = ingest_item(conn, wiki, backend, profile, row, fs, today)
+            except LLMError as exc:
+                if exc.usage:
+                    total += record_call(
+                        conn, backend.name, "WIKI", exc.usage, now, fs.pricing, fs.pricing_schedule
+                    )
+                    conn.commit()
+                typer.echo(f"{FAIL} #{iid}：{exc}")
+                failures += 1
+                continue
+            cost = record_call(
+                conn, backend.name, "WIKI", result.usage, now, fs.pricing, fs.pricing_schedule
+            )
+            conn.commit()
+            total += cost
+            typer.echo(f"  新建：{', '.join(result.created) or '无'}")
+            typer.echo(f"  更新：{', '.join(result.updated) or '无'}")
+            for line in result.rejected:
+                typer.echo(f"  {FAIL} 已拒绝：{line}")
+            typer.echo(f"  费用 ${cost:.4f}")
+        typer.echo(f"\n合计估算费用 ${total:.4f}；wiki 现有 {len(wiki.pages)} 个页面")
+    finally:
+        conn.close()
+    if failures:
+        raise typer.Exit(code=1)
+
+
+@wiki_app.command("lint")
+def wiki_lint(
+    use_llm: bool = typer.Option(False, "--llm", help="另用 cheap 模型检查可能矛盾的说法"),
+) -> None:
+    """检查断链 / 缺失页面、孤立页、frontmatter 缺字段、index 不一致。只报告，不修改。"""
+    from secondbrain.wiki.lint import lint, llm_contradictions
+
+    wiki = _open_wiki()
+    report = lint(wiki)
+    typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
+    sections = [
+        (
+            "断链（指向不存在的页面）",
+            [f"[[{s}]] → {', '.join(t)}" for s, t in report.broken_links.items()],
+        ),
+        (
+            "缺失页面（被链接但不存在）",
+            [f"[[{s}]]（{n} 处）" for s, n in report.missing_pages.items()],
+        ),
+        ("孤立页（没有其他页面链接到它）", [f"[[{s}]]" for s in report.orphans]),
+        (
+            "frontmatter 缺字段",
+            [f"[[{s}]]：{', '.join(f)}" for s, f in report.missing_fields.items()],
+        ),
+        ("不在 index 中的页面", [f"[[{s}]]" for s in report.index_missing]),
+        ("index 中指向不存在页面的条目", [f"[[{s}]]" for s in report.index_dangling]),
+    ]
+    if use_llm and wiki.pages:
+        config.load_env()
+        settings, fs, _ = _load_pipeline_settings()
+        try:
+            backend = make_backend(
+                config.llm_backend(settings), fs.llm, os.environ.get("DEEPSEEK_API_KEY")
+            )
+            findings = llm_contradictions(wiki, backend)
+            sections.append(
+                (
+                    "可能矛盾（LLM）",
+                    [f"{', '.join(i.pages)}：{i.description}" for i in findings.issues],
+                )
+            )
+        except LLMError as exc:
+            typer.echo(f"{FAIL} LLM 检查失败：{exc}")
+    for title, lines in sections:
+        typer.echo(f"\n## {title}（{len(lines)}）")
+        for line in lines:
+            typer.echo(f"- {line}")
+    typer.echo(f"\n共 {sum(len(lines) for _, lines in sections)} 项")
+
+
+@wiki_app.command("due")
+def wiki_due(
+    day: str | None = typer.Option(None, "--date", help="日期 YYYY-MM-DD，默认今天"),
+) -> None:
+    """列出到期复习的概念。"""
+    from datetime import date as date_cls
+
+    from secondbrain.wiki.review import due_concepts, due_date
+
+    try:
+        target = date_cls.fromisoformat(day) if day else datetime.now().date()
+    except ValueError as exc:
+        raise typer.BadParameter("日期格式应为 YYYY-MM-DD") from exc
+    wiki = _open_wiki()
+    due = due_concepts(wiki, target)
+    typer.echo(f"{target} 到期的概念：{len(due)} 个（共 {len(wiki.concepts())} 个概念页）")
+    for page in due:
+        typer.echo(
+            f"- [[{page.slug}]] {page.title}（掌握度 {page.meta.get('mastery') or '—'}；"
+            f"间隔 {page.meta.get('interval_days')} 天；到期 {due_date(page)}）"
+        )
+    if due:
+        typer.echo(
+            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot（或在 Web /wiki 点按钮）"
+        )
+
+
+@wiki_app.command("review")
+def wiki_review(
+    slug: str = typer.Argument(..., help="概念页 slug"),
+    grade: str = typer.Argument(..., help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"),
+) -> None:
+    """记录一次概念复习，按 SM-2 简化版更新间隔、ease 与掌握度。"""
+    from secondbrain.wiki.review import GRADES, review
+
+    if grade not in GRADES:
+        raise typer.BadParameter("结果应为 remembered / fuzzy / forgot")
+    wiki = _open_wiki()
+    page = wiki.find(slug)
+    if page is None or page.type != "concept":
+        typer.echo(f"{FAIL} 找不到概念页：{slug}", err=True)
+        raise typer.Exit(code=1)
+    out = review(wiki, page, grade, datetime.now().date())
+    interval = f"间隔 {out.interval_before} → {out.interval_after} 天"
+    mastery = f"掌握度 {out.mastery_before} → {out.mastery_after}"
+    typer.echo(
+        f"{OK} [[{out.slug}]] {GRADES[grade]}：{interval}，ease {out.ease_after}，"
+        f"{mastery}，下次 {out.next_due}"
+    )

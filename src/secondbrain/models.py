@@ -56,6 +56,11 @@ class FetchSettings(BaseModel):
     transcript_retries: int = Field(default=2, ge=0)  # 字幕请求遇到 HTTP 错误时的重试次数
     transcript_paragraph_seconds: int = Field(default=30, ge=5)  # 字幕按约 N 秒合并为一段
     backfill_max_per_source: int = Field(default=100, ge=0)  # 每次 fetch 每源最多回补条数
+    # 回补池中发布时间未知的条目，正文短于该值视为非文章页（如 FAQ、About），不入库
+    backfill_min_content_chars: int = Field(default=2000, ge=0)
+    transcript_max_chars: int = Field(
+        default=400_000, ge=1
+    )  # 视频字幕的长度上限（代替 content_max_chars）
 
 
 @dataclass
@@ -188,6 +193,19 @@ class BackfillSettings(BaseModel):
     screen_size: int = Field(default=10, ge=1)  # 回补池中保持多少条已粗筛的候选
 
 
+class WikiSettings(BaseModel):
+    """M6：知识 wiki（ADR 0010）。"""
+
+    ingest_max_chars: int = Field(default=12_000, ge=500)  # 正文短于该值才整篇送入；否则用 L2 要点
+    index_max_chars: int = Field(default=8_000, ge=500)  # 送入 ingest 的 index.md 上限
+    related_pages: int = Field(default=5, ge=0)  # 送入 ingest 的候选相关页面数
+    related_page_chars: int = Field(default=2_000, ge=200)  # 每个相关页面的截断长度
+    known_max_chars: int = Field(default=2_000, ge=0)  # L1 "已知知识"段的上限（0 关闭）
+    review_minutes: int = Field(default=5, ge=1)  # 概念复习在时间预算中的估计耗时
+    review_slots: int = Field(default=1, ge=0)  # 每天最多放入温故栏的到期概念数
+    recent_days: int = Field(default=30, ge=1)  # 为到期概念找"近期相关条目"的时间窗
+
+
 class FilterSettings(BaseModel):
     """settings 中与流水线相关的全部配置（由 config.pipeline_settings 组装）。"""
 
@@ -211,3 +229,4 @@ class FilterSettings(BaseModel):
     estimate: EstimateSettings = Field(default_factory=EstimateSettings)
     personalize: PersonalizeSettings = Field(default_factory=PersonalizeSettings)
     backfill: BackfillSettings = Field(default_factory=BackfillSettings)
+    wiki: WikiSettings = Field(default_factory=WikiSettings)

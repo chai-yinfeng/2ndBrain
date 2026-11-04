@@ -78,6 +78,8 @@ fetch:
   transcript_retries: 2          # 字幕请求遇到 HTTP 错误时的退避重试次数（被封禁时不重试）
   transcript_paragraph_seconds: 30  # 字幕约每 N 秒合并为一段，段首带 [mm:ss]
   backfill_max_per_source: 100   # backfill 信源每次 fetch 最多放入回补池的历史条目
+  backfill_min_content_chars: 2000  # 发布时间未知且正文短于该值的回补条目视为非文章页，不入库
+  transcript_max_chars: 400000   # 视频字幕长度上限（超长讲座由 map-reduce 处理）
 
 # `sb run`（M2）。
 run:
@@ -142,3 +144,14 @@ personalize:
 backfill:
   daily_limit: 1                 # 每天最多放入温故栏的回补条目
   screen_size: 10                # 回补池中保持多少条已粗筛的候选
+
+# 知识 wiki（M6，ADR 0010）：data/wiki/（随 SB_DATA_DIR 移动），Obsidian 兼容。
+wiki:
+  ingest_max_chars: 12000        # 正文短于该值时整篇送入 ingest；更长的用 L2 的 TL;DR 与要点
+  index_max_chars: 8000          # 送入 ingest 的 index.md 上限
+  related_pages: 5               # 送入 ingest 的候选相关页面数
+  related_page_chars: 2000       # 每个相关页面的截断长度
+  known_max_chars: 2000          # L1 中"已知知识"段的上限（0 关闭）
+  review_minutes: 5              # 到期概念复习在时间预算中的估计耗时
+  review_slots: 1                # 每天最多放入温故栏的到期概念数
+  recent_days: 30                # 为到期概念附上近期相关条目的时间窗

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Wiki · Second Brain{% endblock %}
+{% block content %}
+<h1>Wiki <small class="meta">{{ count }} 个页面</small></h1>
+<section class="entry">
+  <h2>今日到期复习 <small>{{ due | length }}</small></h2>
+  {% for d in due %}
+  <div class="fyi" data-concept="{{ d.page.slug }}">
+    <a href="/wiki/page/{{ d.page.slug }}">{{ d.page.title }}</a>
+    <span class="meta">（掌握度 {{ d.page.meta.mastery or "—" }} · 间隔 {{ d.page.meta.interval_days }} 天 · 到期 {{ d.due }}）</span>
+    {% with slug=d.page.slug %}{% include "_review_buttons.html" %}{% endwith %}
+  </div>
+  {% else %}<p class="empty">（没有到期的概念）</p>{% endfor %}
+</section>
+<section class="entry wiki-body">{{ index_html | safe }}</section>
+{% endblock %}

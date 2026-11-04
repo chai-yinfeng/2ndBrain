@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from secondbrain import db
@@ -21,6 +21,9 @@ from secondbrain.pipeline.l1_screen import interleave_by_source, l1_messages, ma
 from secondbrain.pipeline.l2_deep import DeepResult, deep_read, estimate_deep_cost, is_paper
 from secondbrain.profile.feedback import few_shot_block, recent_feedback
 from secondbrain.profile.loader import Profile, render_mastery, weak_prerequisites
+from secondbrain.wiki.loop import known_knowledge, related_item
+from secondbrain.wiki.review import due_concepts
+from secondbrain.wiki.store import Page, Wiki
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts"
 
@@ -44,6 +47,7 @@ class RunReport:
     backfill_screened: int = 0
     backfill_picked: int = 0
     backfill_placed: int = 0
+    concepts_placed: int = 0  # 放入温故栏的到期概念
     lanes: Counter = field(default_factory=Counter)
     minutes_used: int = 0
     backlog_kept: int = 0
@@ -71,9 +75,9 @@ def _scores(data: dict) -> dict:
 class _Runner:
     """一次 run 中共享的状态：数据库、设置、后端、用量记录。"""
 
-    def __init__(self, conn, fs, backend, profile, now, clock, report):
+    def __init__(self, conn, fs, backend, profile, now, clock, report, wiki=None):
         self.conn, self.fs, self.backend, self.profile = conn, fs, backend, profile
-        self.now, self.clock, self.report = now, clock, report
+        self.now, self.clock, self.report, self.wiki = now, clock, report, wiki
 
     def record(self, stage: str, usage: Usage | None) -> float:
         if usage is None:
@@ -115,10 +119,12 @@ class _Runner:
             results, usages, error = {}, [], None
             pending = batch
             for _ in range(L1_ATTEMPTS):
+                known = known_knowledge(
+                    self.wiki, pending, fs.l1.item_chars, fs.wiki.known_max_chars
+                )
+                messages = l1_messages(system, pending, fs.l1.item_chars, known)
                 try:
-                    response, usage = backend.complete_json(
-                        l1_messages(system, pending, fs.l1.item_chars), L1Response, "cheap"
-                    )
+                    response, usage = backend.complete_json(messages, L1Response, "cheap")
                 except LLMError as exc:
                     usages.append(exc.usage)
                     error = str(exc)
@@ -223,9 +229,11 @@ def run_pipeline(
     now: datetime,
     today: date,
     clock: Callable[[], datetime] | None = None,
+    wiki: Wiki | None = None,
 ) -> RunReport:
+    """wiki：用于 L1 的"已知知识"与到期概念复习（M6）；为 None 时跳过这两项。"""
     report = RunReport()
-    run = _Runner(conn, fs, backend, profile, now, clock or (lambda: now), report)
+    run = _Runner(conn, fs, backend, profile, now, clock or (lambda: now), report, wiki)
     day = today.isoformat()
 
     # ---------- L0（常规条目；回补池单独处理） ----------
@@ -276,8 +284,22 @@ def run_pipeline(
     ]
     backfill_ids = {c.item_id for c in cands if c.is_backfill}
     counts, minutes = db.day_usage(conn, day, tiering.TOP_LANES, {c.item_id for c in cands})
-    placements = tiering.tier(cands, fs, today, counts, minutes)
+    concept_rows = db.digest_concepts(conn, day)
+    counts["refresher"] = counts.get("refresher", 0) + len(concept_rows)
+    minutes += sum(r["est_minutes"] for r in concept_rows)
+    concepts = _concept_candidates(run, today, {r["slug"] for r in concept_rows}, len(cands))
+    placements = tiering.tier(cands + concepts.candidates(), fs, today, counts, minutes)
     for p in placements:
+        if p.item_id in concepts:
+            if p.lane == "refresher":
+                page, related = concepts[p.item_id].page, concepts[p.item_id].related
+                mastery = page.meta.get("mastery")
+                db.upsert_digest_concept(
+                    conn, day, page.slug, page.title, mastery, p.est_minutes, related, now
+                )
+                report.lanes["refresher"] += 1
+                report.concepts_placed += 1
+            continue
         if p.item_id in backfill_ids and p.lane not in ("refresher", "deferred"):
             # 回补条目今天没排进温故栏：留在回补池（已有 L2，下次不再花费）
             db.set_status(conn, [p.item_id], "backfill_l1")
@@ -290,7 +312,9 @@ def run_pipeline(
     report.minutes_used = minutes + sum(
         p.est_minutes
         for p in placements
-        if p.lane in tiering.TOP_LANES and not (p.item_id in backfill_ids and p.lane != "refresher")
+        if p.lane in tiering.TOP_LANES
+        and not (p.item_id in backfill_ids and p.lane != "refresher")
+        and (p.item_id not in concepts or p.lane == "refresher")
     )
 
     kept, demoted = tiering.apply_backlog(db.past_must_reads(conn, day), today, fs.backlog_max_days)
@@ -298,6 +322,58 @@ def run_pipeline(
     report.backlog_kept, report.backlog_demoted = len(kept), len(demoted)
     conn.commit()
     return report
+
+
+@dataclass(frozen=True)
+class _ConceptCandidate:
+    page: Page
+    related: int | None
+
+
+class _Concepts(dict):
+    """占位 item_id（负数）→ _ConceptCandidate；迭代时产出 tiering.Candidate。"""
+
+    def __init__(self, fs: FilterSettings):
+        super().__init__()
+        self.fs = fs
+
+    def candidates(self) -> list[tiering.Candidate]:
+        return [
+            tiering.Candidate(
+                item_id=item_id,
+                score=100.0,  # 到期复习优先于普通温故条目
+                relevance=10,
+                quality=10,
+                novelty=0,
+                refresher_value=10,
+                content_type="explainer",
+                role="core",
+                est_minutes=self.fs.wiki.review_minutes,
+                has_l2=True,
+                is_concept=True,
+            )
+            for item_id in self
+        ]
+
+
+def _concept_candidates(run: _Runner, today: date, already: set[str], offset: int) -> _Concepts:
+    """到期概念（最多 wiki.review_slots 个，当天已排过的不再排），附上近期讲到它的条目。"""
+    concepts = _Concepts(run.fs)
+    if run.wiki is None or run.fs.wiki.review_slots <= 0:
+        return concepts
+    due = [p for p in due_concepts(run.wiki, today) if p.slug not in already]
+    if not due:
+        return concepts
+    since = db.format_time(run.now - timedelta(days=run.fs.wiki.recent_days))
+    recent = [
+        r
+        for r in db.items_by_status(run.conn, ("l1", "l2", "tiered", "deferred"))
+        if r["fetched_at"] >= since
+    ]
+    l1, l2 = db.latest_assessments(run.conn, "L1"), db.latest_assessments(run.conn, "L2")
+    for n, page in enumerate(due[: run.fs.wiki.review_slots], start=1):
+        concepts[-(offset + n)] = _ConceptCandidate(page, related_item(page, recent, l1, l2))
+    return concepts
 
 
 def _backfill(run: _Runner, day: str, l1_system: str, l2_system: str) -> None:

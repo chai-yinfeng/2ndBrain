@@ -27,7 +27,10 @@ def interleave_by_source(rows: list[sqlite3.Row], limit: int | None) -> list[sql
     return picked
 
 
-def l1_messages(system: str, batch: list[sqlite3.Row], item_chars: int) -> list[dict[str, str]]:
+def l1_messages(
+    system: str, batch: list[sqlite3.Row], item_chars: int, known: str = ""
+) -> list[dict[str, str]]:
+    """known：与本批相关的"已知知识"段，放在 user 消息开头（system 前缀保持不变，利于缓存）。"""
     items = [
         {
             "id": row["id"],
@@ -40,6 +43,8 @@ def l1_messages(system: str, batch: list[sqlite3.Row], item_chars: int) -> list[
     user = "请评估以下条目，按规定格式输出 json：\n" + json.dumps(
         {"items": items}, ensure_ascii=False
     )
+    if known:
+        user = f"{known}\n\n{user}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 

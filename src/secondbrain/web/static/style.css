@@ -78,3 +78,7 @@ pre.diff { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px
   border-radius: 6px; padding: 8px; white-space: pre-wrap; }
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
+.wiki-body h1 { font-size: 20px; }
+.wiki-body h2 { font-size: 16px; }
+.wiki-body .missing { color: var(--warn); text-decoration: underline dotted; }
+.entry.concept { border-left: 3px solid var(--accent); }

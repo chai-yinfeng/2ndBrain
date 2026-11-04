@@ -134,6 +134,7 @@ def pipeline_settings(settings: dict[str, Any]) -> FilterSettings:
         "run",
         "personalize",
         "backfill",
+        "wiki",
     )
     data = {k: settings[k] for k in keys if settings.get(k) is not None}
     data.update(settings.get("filter") or {})
@@ -157,3 +158,11 @@ def ensure_profile() -> tuple[Path, bool]:
         (CONFIG_DIR / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8"
     )
     return path, True
+
+
+def wiki_dir() -> Path:
+    return data_dir() / "wiki"
+
+
+def raw_dir() -> Path:
+    return data_dir() / "raw"
