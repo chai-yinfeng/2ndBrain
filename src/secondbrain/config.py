@@ -165,4 +165,5 @@ def wiki_dir() -> Path:
 
 
 def raw_dir() -> Path:
-    return data_dir() / "raw"
+    """原文目录 data/wiki/raw：用 Obsidian 打开 data/wiki 时链接可点（ADR 0013）。"""
+    return wiki_dir() / "raw"

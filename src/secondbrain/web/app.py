@@ -450,7 +450,7 @@ _RAW_LINK_RE = re.compile(r"\]\((?:\.\./)+raw/(\d+)\.md\)")
 
 def render_markdown(text: str, wiki: Wiki) -> str:
     """wiki Markdown → HTML：先转义 "<"（不渲染任何原始 HTML），[[slug]] 变为站内链接，
-    指向 data/raw 的原文链接变为条目详情页。"""
+    指向原文（raw/<id>.md）的链接变为条目详情页。"""
 
     def link(match: re.Match) -> str:
         target = slugify_safe(match.group(1))

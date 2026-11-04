@@ -83,7 +83,7 @@ def conn(env):
 
 
 def _wiki(env):
-    return open_wiki(env / "wiki", env / "raw")
+    return open_wiki(env / "wiki", env / "wiki" / "raw")
 
 
 # ---------- 存储与安全 ----------
@@ -147,8 +147,10 @@ def test_ingest_pending_creates_pages_index_log(env, conn):
     paper = wiki.pages["pagedattention-explained"]
     assert paper.type == "paper" and paper.meta["sources"] == [item]
     assert "[[kv-cache]]" in paper.body
-    assert f"(../../../raw/{item}.md)" in paper.body  # 链接回原文
-    assert (env / "raw" / f"{item}.md").read_text(encoding="utf-8").startswith("# PagedAttention")
+    assert f"(../../raw/{item}.md)" in paper.body  # 链接回原文（data/wiki/raw，ADR 0013）
+    raw = env / "wiki" / "raw" / f"{item}.md"
+    assert raw.read_text(encoding="utf-8").startswith("# PagedAttention")
+    assert not (env / "raw").exists()
     kv = wiki.pages["kv-cache"]
     # 新概念页一律从"接触过"起步（不继承 profile 中"想回炉"的领域），首次复习间隔 3 天
     assert kv.meta["mastery"] == "接触过" and kv.meta["interval_days"] == 3
@@ -448,3 +450,20 @@ def test_truncated_plan_is_not_partially_applied():
         WikiPlan.model_validate_json(
             (FIXTURES / "wiki_plan_truncated.json").read_text(encoding="utf-8")
         )
+
+
+def test_raw_lives_inside_wiki_and_is_ignored(env, conn):
+    """原文在 data/wiki/raw（ADR 0013）：不是页面，lint / index 都不受影响。"""
+    from secondbrain import config
+    from secondbrain.wiki.lint import lint
+
+    assert config.raw_dir() == env / "wiki" / "raw"
+    wiki = _wiki(env)
+    wiki.write_raw(5, "Some [[broken-link]] title", "https://x", "body [[nope]]")
+    wiki.save_page(Page("kv-cache", new_meta("KV cache", "concept", TODAY), "# KV cache"))
+    wiki.rebuild_index()
+    reopened = _wiki(env)
+    assert set(reopened.pages) == {"kv-cache"}
+    assert reopened.raw_link(5, "concept") == "../../raw/5.md"
+    assert "raw" not in reopened.index_path.read_text(encoding="utf-8")
+    assert lint(reopened).broken_links == {}
