@@ -7,6 +7,12 @@ import time
 from datetime import UTC, datetime, timedelta
 
 
+class Fetched(list):
+    """fetcher 的返回值：条目列表，另带从 feed 中读到的主页链接（RSS channel <link>）。"""
+
+    homepage: str | None = None
+
+
 def clean_title(title: str | None) -> str:
     return re.sub(r"\s+", " ", title or "").strip()
 

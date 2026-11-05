@@ -13,10 +13,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode, urlsplit
 
 import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -40,6 +41,8 @@ from secondbrain.profile.loader import Profile, load_profile, parse_profile, wea
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import source_stats, source_yields
 from secondbrain.sources import FETCHERS
+from secondbrain.sources.homepage import source_homepage
+from secondbrain.web import filters
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
 from secondbrain.wiki.graph import build_graph
 from secondbrain.wiki.ingest import pending_items
@@ -181,6 +184,66 @@ def _schedule_checks(fs: FilterSettings, at: str) -> list[str]:
     ]
 
 
+def _filtered_days(conn: sqlite3.Connection, form: str | None, ctype: str | None) -> list[dict]:
+    """历史页：按形式 / 类型筛选后各日期各 lane 的条数（与 db.digest_dates 同样的列）。"""
+    l1 = db.latest_assessments(conn, "L1")
+    days: dict[str, dict] = {}
+    for r in db.digest_lane_rows(conn):
+        item_form = filters.item_form(r["source_type"], r["url"], r["extract_method"])
+        content_type = l1.get(r["item_id"], {}).get("content_type")
+        if not filters.matches(item_form, content_type, form, ctype):
+            continue
+        day = days.setdefault(
+            r["date"],
+            {"date": r["date"], "total": 0}
+            | dict.fromkeys(
+                ("must_read", "worth_it", "refresher", "serendipity", "deferred", "fyi"), 0
+            ),
+        )
+        day["total"] += 1
+        if r["lane"] in day:
+            day[r["lane"]] += 1
+    return list(days.values())
+
+
+def _filter_bar(
+    path: str, keep: dict[str, str | None], form: str | None, ctype: str | None
+) -> dict:
+    """两排 chip（形式 / 类型），用普通链接组合筛选，不需要 JS。"""
+    params = {**keep, "form": form, "ctype": ctype}
+    return {
+        "forms": filters.chips(path, params, "form", filters.FORMS),
+        "ctypes": filters.chips(path, params, "ctype", filters.CTYPES),
+        "active": bool(form or ctype),
+    }
+
+
+def _setting_context() -> dict:
+    """运维页"设置"区：只给出 key 是否已设置与来源，绝不包含 key 的值。"""
+    config.load_env()
+    try:
+        settings = config.load_settings()
+        fs = config.pipeline_settings(settings)
+    except (config.ConfigError, OSError, ValueError):
+        settings, fs = {}, FilterSettings()
+    backend = config.llm_backend(settings)
+    key = ops.KEY_NAMES.get(backend, "DEEPSEEK_API_KEY")
+    source = config.env_source(key)
+    return {
+        "key": key,
+        "key_source": source,
+        "key_in_dotenv": key in config.parse_env_file(config.env_file()),
+        "shell_override": source == "环境变量",
+        "backend": backend,
+        "backend_setting": (settings.get("llm") or {}).get("backend") or config.DEFAULT_LLM_BACKEND,
+        "env_backend": os.environ.get("SB_LLM_BACKEND"),
+        "backends": config.KNOWN_LLM_BACKENDS,
+        "models": fs.llm.models,
+        "choices": sorted(fs.pricing),
+        "env_file": config.env_file(),
+    }
+
+
 def _active_sources() -> int:
     try:
         return sum(1 for s in config.load_sources() if s.enabled and not s.needs_scraper)
@@ -305,8 +368,53 @@ def _usage_rows(conn: sqlite3.Connection, since: datetime) -> tuple[list[sqlite3
     return rows, sum(r["cost_usd"] for r in rows)
 
 
-def create_app() -> FastAPI:
+# Host 头白名单（防 DNS rebinding，ADR 0017）；`sb serve --host X` 时额外允许 X
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _hostname(netloc: str) -> str:
+    """ "127.0.0.1:8765" → "127.0.0.1"；"[::1]:8765" → "::1"；小写。"""
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        return netloc[1 : netloc.find("]")] if "]" in netloc else netloc
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+
+
+def request_problem(
+    method: str, host: str | None, origin: str | None, referer: str | None, allowed: frozenset
+) -> str | None:
+    """返回拒绝原因；放行时返回 None。规则见 ADR 0017：
+    - Host 必须是本机地址或显式 --host 的值；
+    - 非 GET / HEAD / OPTIONS：有 Origin 时必须与 Host 同源；没有 Origin 时看 Referer；
+      两者都没有时放行（非浏览器客户端，如 curl / 测试；CSRF 需要浏览器发起）。"""
+    if not host or _hostname(host) not in allowed:
+        return "Host 不被允许"
+    if method.upper() in SAFE_METHODS:
+        return None
+    source = origin if origin is not None else referer
+    if source is None:
+        return None
+    parsed = urlsplit(source)
+    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != host.strip().lower():
+        return "跨源请求被拒绝"
+    return None
+
+
+def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     app = FastAPI(title="Second Brain", docs_url=None, redoc_url=None, openapi_url=None)
+    allowed = LOCAL_HOSTS | {_hostname(h) for h in extra_hosts}
+
+    @app.middleware("http")
+    async def same_origin_only(request: Request, call_next):
+        h = request.headers
+        problem = request_problem(
+            request.method, h.get("host"), h.get("origin"), h.get("referer"), allowed
+        )
+        if problem:
+            return PlainTextResponse(f"403 Forbidden：{problem}", status_code=403)
+        return await call_next(request)
+
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     tasks = TaskRegistry()
     app.state.tasks = tasks
@@ -347,8 +455,15 @@ def create_app() -> FastAPI:
             later = len(db.items_in_state(conn, "later"))
             summarized = db.ai_item_ids(conn, "summary")
             to_ingest = len(pending_items(conn))
+        form, ctype = filters.clean_filters(
+            request.query_params.get("form"), request.query_params.get("ctype")
+        )
         lanes: dict[str, list[dict]] = {}
         for row in rows:
+            content_type = l1.get(row["item_id"], {}).get("content_type")
+            item_form = filters.item_form(row["source_type"], row["url"], row["extract_method"])
+            if not filters.matches(item_form, content_type, form, ctype):
+                continue  # 筛选只影响显示，不改 digest / 预算
             entry = _entry(
                 row,
                 l1.get(row["item_id"], {}),
@@ -381,8 +496,11 @@ def create_app() -> FastAPI:
                 "to_ingest": to_ingest,
                 "ingest_task": tasks.get("wiki_ingest"),
                 "archived": len(lanes.get("archived", [])),
-                "concepts": concept_rows,
+                "concepts": [] if (form or ctype) else concept_rows,
                 "grades": GRADES,
+                "filter_bar": _filter_bar(
+                    "/", {"date": request.query_params.get("date")}, form, ctype
+                ),
             },
         )
 
@@ -429,9 +547,24 @@ def create_app() -> FastAPI:
 
     @app.get("/history", response_class=HTMLResponse)
     def history(request: Request) -> HTMLResponse:
+        form, ctype = filters.clean_filters(
+            request.query_params.get("form"), request.query_params.get("ctype")
+        )
         with _conn() as conn:
-            days = db.digest_dates(conn)
-        return templates.TemplateResponse(request, "history.html", {"days": days})
+            if form or ctype:
+                days = _filtered_days(conn, form, ctype)
+            else:
+                days = db.digest_dates(conn)
+        query = urlencode({k: v for k, v in (("form", form), ("ctype", ctype)) if v})
+        return templates.TemplateResponse(
+            request,
+            "history.html",
+            {
+                "days": days,
+                "filter_bar": _filter_bar("/history", {}, form, ctype),
+                "filter_query": f"&{query}" if query else "",
+            },
+        )
 
     @app.get("/later", response_class=HTMLResponse)
     def later(request: Request) -> HTMLResponse:
@@ -707,6 +840,7 @@ def create_app() -> FastAPI:
                 "pers": fs.personalize,
                 "sources_error": sources_error,
                 "sched": schedule.status(),
+                "setting": _setting_context(),
                 "sched_checks": _schedule_checks(fs, schedule.DEFAULT_TIME),
                 "default_time": schedule.DEFAULT_TIME,
             },
@@ -735,6 +869,79 @@ def create_app() -> FastAPI:
         else:
             lines = ["当前已经是手动模式（没有安装定时任务）。"]
         return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
+
+    def lines(request: Request, items: list[str]) -> HTMLResponse:
+        return templates.TemplateResponse(request, "_lines.html", {"lines": items})
+
+    def busy_note() -> list[str]:
+        if ops.is_running() or (tasks.get("run") and tasks.get("run").running):
+            return ["当前有运行在进行：本次保存对下次运行生效。"]
+        return []
+
+    @app.post("/ops/settings/key", response_class=HTMLResponse)
+    def settings_key(request: Request, value: str = Form("")) -> HTMLResponse:
+        """写入 .env（保留其他行与注释，原子写入，chmod 600）。响应中绝不包含 key。"""
+        key = _setting_context()["key"]
+        value = value.strip()
+        if not value:
+            return lines(request, ["没有输入，未做修改。"])
+        try:
+            effective = config.set_env_var(key, value)
+        except (config.ConfigError, OSError) as exc:
+            reason = exc if isinstance(exc, config.ConfigError) else type(exc).__name__
+            return lines(request, [f"✗ 写入 .env 失败：{reason}"])
+        out = [f"✓ 已写入 .env：{key} 已设置"]
+        if not effective:
+            out.append(
+                "! 该变量来自环境变量，环境变量优先；.env 的修改需要重启服务或 unset 后才生效。"
+            )
+        return lines(request, out + busy_note())
+
+    @app.post("/ops/settings/key/clear", response_class=HTMLResponse)
+    def settings_key_clear(request: Request) -> HTMLResponse:
+        key = _setting_context()["key"]
+        try:
+            effective = config.set_env_var(key, None)
+        except OSError as exc:
+            return lines(request, [f"✗ 修改 .env 失败：{type(exc).__name__}"])
+        out = [f"✓ 已从 .env 删除 {key}"]
+        if not effective:
+            out.append("! 该变量仍在环境变量中（环境变量优先），需要重启服务或 unset。")
+        return lines(request, out)
+
+    @app.post("/ops/settings/ping", response_class=HTMLResponse)
+    def settings_ping(request: Request) -> HTMLResponse:
+        r = ops.ping()
+        if r["ok"]:
+            text = f"✓ 连接正常：{r['backend']} / {r['model']}，耗时 {r['ms']} ms"
+        else:
+            text = f"✗ 连接失败：{r['backend']} / {r['model']}：{r['error']}"
+        return lines(request, [text])
+
+    @app.post("/ops/settings/models", response_class=HTMLResponse)
+    def settings_models(
+        request: Request, cheap: str = Form(...), strong: str = Form(...), backend: str = Form(...)
+    ) -> HTMLResponse:
+        try:
+            changes = ops.save_llm_choice(cheap, strong, backend)
+        except (ops.OpsError, config.ConfigError, OSError, ValueError) as exc:
+            return lines(request, [f"✗ {exc}"])
+        out = [
+            "✓ 已保存（只把与 example 不同的键写入 config/settings.yaml）：" + "，".join(changes)
+        ]
+        if os.environ.get("SB_LLM_BACKEND"):
+            out.append("! 环境变量 SB_LLM_BACKEND 已设置，会覆盖这里的 backend。")
+        return lines(request, out + busy_note())
+
+    @app.post("/ops/settings/models/reset", response_class=HTMLResponse)
+    def settings_models_reset(request: Request) -> HTMLResponse:
+        try:
+            ops.reset_llm_choice()
+        except (config.ConfigError, OSError, ValueError) as exc:
+            return lines(request, [f"✗ {exc}"])
+        return lines(
+            request, ["✓ 已恢复默认：从 config/settings.yaml 删除了模型与后端设置。"] + busy_note()
+        )
 
     @app.post("/ops/tune", response_class=HTMLResponse)
     def ops_tune(request: Request) -> HTMLResponse:
@@ -775,6 +982,12 @@ def create_app() -> FastAPI:
                 "sources": sources,
                 "overview": overview,
                 "yields": yields,
+                "homepages": {
+                    s.id: source_homepage(
+                        s, overview[s.id]["homepage"] if s.id in overview else None
+                    )
+                    for s in sources
+                },
                 "pers": pers,
                 "path": path,
                 "is_example": is_example,

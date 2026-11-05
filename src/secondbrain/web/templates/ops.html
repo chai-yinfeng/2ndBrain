@@ -17,6 +17,38 @@
   {% with kind="run", task=run_task, message=None %}{% include "_task.html" %}{% endwith %}
 </section>
 
+<section class="entry" id="settings">
+  <h2>设置</h2>
+  <h3>API key</h3>
+  <p>{{ setting.key }}：{% if setting.key_source %}<b>已设置</b>（来源：{{ setting.key_source }}）{% else %}<b>未设置</b>{% endif %}{% if setting.backend == "fake" %} · 当前后端 fake 不需要 key{% endif %}</p>
+  {% if setting.shell_override %}<p class="refresh">环境变量优先：该 key 来自启动服务时的环境变量，.env 的修改需要重启服务或 unset 后才生效。</p>{% endif %}
+  <form hx-post="/ops/settings/key" hx-target="#key-result" class="start-form" autocomplete="off">
+    <input type="password" name="value" placeholder="粘贴新的 {{ setting.key }}" autocomplete="new-password">
+    <button type="submit" class="fb">保存到 .env</button>
+  </form>
+  <p class="meta">写入 {{ setting.env_file }}：只替换这一行，保留其他行与注释，原子写入并设为仅本人可读（600），立即生效；页面与日志都不会显示 key。留空提交不做修改。</p>
+  {% if setting.key_in_dotenv %}<button type="button" class="fb" hx-post="/ops/settings/key/clear" hx-target="#key-result" hx-confirm="从 .env 删除 {{ setting.key }} 这一行？">清除</button>{% endif %}
+  <div id="key-result"></div>
+
+  <h3>测试连接</h3>
+  <button type="button" class="fb" hx-post="/ops/settings/ping" hx-target="#ping-result" hx-indicator="#ping-loading">测试连接</button>
+  <span class="meta">用当前后端与 cheap 模型发一个极小请求（max_tokens=1，不到 $0.0001），记入用量（阶段 PING）；只显示成功与否、模型与耗时。</span>
+  <span id="ping-loading" class="htmx-indicator meta">测试中…</span>
+  <div id="ping-result"></div>
+
+  <h3>模型与后端</h3>
+  {% if setting.env_backend %}<p class="refresh">环境变量 SB_LLM_BACKEND={{ setting.env_backend }} 会覆盖这里的 backend 设置。</p>{% endif %}
+  <form hx-post="/ops/settings/models" hx-target="#models-result" class="start-form">
+    <label>cheap <select name="cheap">{% for m in setting.choices %}<option value="{{ m }}"{% if m == setting.models.cheap %} selected{% endif %}>{{ m }}</option>{% endfor %}</select></label>
+    <label>strong <select name="strong">{% for m in setting.choices %}<option value="{{ m }}"{% if m == setting.models.strong %} selected{% endif %}>{{ m }}</option>{% endfor %}</select></label>
+    <label>backend <select name="backend">{% for b in setting.backends %}<option value="{{ b }}"{% if b == setting.backend_setting %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></label>
+    <button type="submit" class="fb">保存</button>
+  </form>
+  <button type="button" class="fb" hx-post="/ops/settings/models/reset" hx-target="#models-result" hx-confirm="从 config/settings.yaml 删除模型与后端设置，恢复 example 的默认值？">恢复默认</button>
+  <p class="meta">cheap 用于 L1 粗筛与分块提要，strong 用于 L2、深度速读、补前置、wiki ingest、profile 提案；选项来自价格表。只把与 settings.example.yaml 不同的键写入 config/settings.yaml，保存后下一次请求 / 运行立即生效（有运行在进行时对下次运行生效）。</p>
+  <div id="models-result"></div>
+</section>
+
 <section class="entry" id="schedule" data-mode="{{ 'auto' if sched.installed else 'manual' }}">
   <h2>运行方式</h2>
   {% if sched.installed %}

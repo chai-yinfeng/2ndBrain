@@ -110,6 +110,9 @@ class FakeBackend:
     def model_name(self, tier: Tier) -> str:
         return f"fake-{tier}"  # 不在价格表中，费用计 0
 
+    def ping(self) -> Usage:
+        return Usage(self.model_name("cheap"))
+
     def complete_json(
         self, messages: list[dict[str, str]], schema: type[T], tier: Tier
     ) -> tuple[T, Usage]:

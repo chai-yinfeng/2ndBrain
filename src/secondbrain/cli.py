@@ -71,7 +71,7 @@ def doctor() -> None:
         report(FAIL, f"settings 不可读（{kind}）：{path}（{exc}）")
 
     for name in ("sources.example.yaml", "profile.example.md"):
-        example = config.CONFIG_DIR / name
+        example = config.config_dir() / name
         if example.is_file():
             report(OK, f"{name} 存在")
         else:
@@ -393,7 +393,7 @@ def serve(
     if host not in ("127.0.0.1", "localhost", "::1"):
         typer.echo(f"{WARN} 监听 {host}：局域网内其他设备也能访问，且没有登录保护")
     typer.echo(f"Second Brain：http://{host}:{port}/  （Ctrl+C 退出）")
-    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+    uvicorn.run(create_app(extra_hosts=(host,)), host=host, port=port, log_level="info")
 
 
 def _peak_note(local, fs) -> list[str]:
@@ -559,11 +559,11 @@ def sources_tune(
     low = [y for y in yields.values() if y.low_yield]
     typer.echo(
         f"\n低产出信源（近 {pers.yield_window_days} 天入库 ≥ {pers.low_yield_min_items} 条、"
-        f"进入前排 0 条）：{len(low)} 个"
+        f"进入推荐 0 条）：{len(low)} 个"
     )
     for y in low:
         typer.echo(
-            f"{WARN} {y.source_id}：入库 {y.items}，精读 {y.l2}，前排 0 —— 建议停用"
+            f"{WARN} {y.source_id}：入库 {y.items}，精读 {y.l2}，进入推荐 0 —— 建议停用"
             "（在 Web /sources 一键停用，或改 config/sources.yaml）"
         )
     changes = {st.source_id: st.suggested for st in stats if st.suggested}

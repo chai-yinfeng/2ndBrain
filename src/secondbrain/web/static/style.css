@@ -105,3 +105,7 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 .start-run { margin: 4px 0 12px; }
 .start-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .fb.primary { font-size: 15px; padding: 6px 16px; background: var(--accent); color: #fff; border-color: var(--accent); }
+.filters { margin: 6px 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; font-size: 13px; }
+.chip { border: 1px solid var(--border); border-radius: 12px; padding: 0 9px; color: var(--fg); }
+.chip.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }

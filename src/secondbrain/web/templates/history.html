@@ -2,12 +2,13 @@
 {% block title %}历史 · Second Brain{% endblock %}
 {% block content %}
 <h1>历史</h1>
+{% include "_filters.html" %}
 {% if days %}
 <table class="days">
   <tr><th>日期</th><th>必读</th><th>温故</th><th>意外</th><th>值得读</th><th>顺延</th><th>速览</th><th>合计</th></tr>
   {% for d in days %}
   <tr>
-    <td><a href="/?date={{ d.date }}">{{ d.date }}</a></td>
+    <td><a href="/?date={{ d.date }}{{ filter_query }}">{{ d.date }}</a></td>
     <td>{{ d.must_read }}</td><td>{{ d.refresher }}</td><td>{{ d.serendipity }}</td>
     <td>{{ d.worth_it }}</td><td>{{ d.deferred }}</td><td>{{ d.fyi }}</td><td>{{ d.total }}</td>
   </tr>
