@@ -1,6 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Digest {{ day or "" }} · Second Brain{% endblock %}
 {% block content %}
+<section class="start-run" id="start-run" data-run-state="{% if (run_task and run_task.running) or run_locked %}running{% elif ran_today %}done{% else %}todo{% endif %}">
+  {% if run_task and run_task.running %}
+    {% with kind="run", task=run_task, message=None, refresh_on_done=True %}{% include "_task.html" %}{% endwith %}
+  {% elif run_locked %}
+    <p class="refresh">正在运行：已有 sb run 在进行（CLI 或定时任务），完成后刷新本页查看。</p>
+  {% elif not ran_today %}
+    <form hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML" class="start-form">
+      <input type="hidden" name="refresh" value="1">
+      <button type="submit" class="fb primary">开始今日过滤</button>
+      <label class="meta"><input type="checkbox" name="all_time" value="1"> 不限时间窗（只去重）</label>
+    </form>
+    <p class="meta">抓取 {{ active_sources }} 个信源 → L0 → L1 → L2 → 分级，与 <code>sb run</code> 相同；通常 3–10 分钟，{{ hints.run(active_sources) }}（L2 预估超过 run.max_cost_usd 时不调用 L2）。完成后自动刷新。</p>
+    {% with kind="run", task=run_task, message=None, refresh_on_done=True %}{% include "_task.html" %}{% endwith %}
+  {% else %}
+    <p class="meta">今天已运行过 · <a href="/ops">再运行一次</a>（同一天多次运行共享预算）</p>
+  {% endif %}
+</section>
 {% if not day %}
   <p class="empty">还没有 digest，先运行 <code>uv run sb run</code>。</p>
 {% else %}
@@ -38,17 +55,21 @@
   {% endfor %}
 
   {% set fyi = lanes.get("fyi", []) %}
-  <details class="lane" id="lane-fyi">
-    <summary><h2>速览 <small>{{ fyi | length }}</small></h2></summary>
-    {% for e in fyi %}
+  {# 速览与归档默认折叠（不依赖 JS）；折叠区域内的反馈按钮照常可用 #}
+  {% for lane, title in (("fyi", "速览"), ("archived", "归档")) %}
+  {% set rest = lanes.get(lane, []) %}
+  <details class="lane" id="lane-{{ lane }}">
+    <summary><h2>{{ title }}（{{ rest | length }} 条）</h2></summary>
+    {% for e in rest %}
     <div class="fyi" data-item-id="{{ e.item_id }}">
       <a href="/item/{{ e.item_id }}">{{ e.title }}</a>
       <span class="meta">（{{ e.source_id }} · {{ e.est_minutes }} 分钟）</span>
       <span class="reason">{{ e.reason }}</span>
       {% if not e.has_l2 %}{% with item_id=e.item_id, no_transcript=e.no_transcript, hint=hints.l2(e.content_len) %}{% include "_deep_button.html" %}{% endwith %}{% endif %}
+      {% with item_id=e.item_id, state=e.state, with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
     </div>
     {% else %}<p class="empty">（空）</p>{% endfor %}
   </details>
-  <p class="meta">归档 {{ archived }} 条</p>
+  {% endfor %}
 {% endif %}
 {% endblock %}

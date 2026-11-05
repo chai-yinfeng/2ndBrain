@@ -690,3 +690,34 @@ def set_ai(
 
 def ai_item_ids(conn: sqlite3.Connection, kind: str) -> set[int]:
     return {r[0] for r in conn.execute("SELECT item_id FROM item_ai WHERE kind = ?", (kind,))}
+
+
+# ---------- M9：信源产出率（ADR 0016） ----------
+
+
+def source_yield(conn: sqlite3.Connection, since: datetime) -> dict[str, sqlite3.Row]:
+    """各信源在 fetched_at ≥ since 的条目中：入库数、经过 L2 的数（通过 L1 被选中精读）、
+    进入前排 lane 的数，当前反馈的正 / 负数；first_fetched 为该信源最早的入库时间。"""
+    rows = conn.execute(
+        f"""
+        SELECT s.id,
+               (SELECT MIN(fetched_at) FROM items i WHERE i.source_id = s.id) AS first_fetched,
+               COUNT(i.id) AS items,
+               COUNT(DISTINCT CASE WHEN EXISTS (
+                   SELECT 1 FROM assessments a WHERE a.item_id = i.id AND a.stage = 'L2'
+               ) THEN i.id END) AS l2,
+               COUNT(DISTINCT CASE WHEN EXISTS (
+                   SELECT 1 FROM digests d WHERE d.item_id = i.id
+                   AND d.lane IN ('must_read', 'worth_it', 'refresher', 'serendipity')
+               ) THEN i.id END) AS front,
+               COUNT(DISTINCT CASE WHEN lf.kind = 'gained' THEN i.id END) AS positive,
+               COUNT(DISTINCT CASE WHEN lf.kind IN ('dismiss', 'worthless') THEN i.id END)
+                   AS negative
+        FROM sources s
+        LEFT JOIN items i ON i.source_id = s.id AND i.fetched_at >= ?
+        LEFT JOIN ({LATEST_FEEDBACK}) lf ON lf.item_id = i.id
+        GROUP BY s.id
+        """,
+        (format_time(since),),
+    ).fetchall()
+    return {r["id"]: r for r in rows}

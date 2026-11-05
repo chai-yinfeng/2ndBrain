@@ -232,14 +232,16 @@ def run_pipeline(
     today: date,
     clock: Callable[[], datetime] | None = None,
     wiki: Wiki | None = None,
+    all_time: bool = False,
 ) -> RunReport:
-    """wiki：用于 L1 的"已知知识"与到期概念复习（M6）；为 None 时跳过这两项。"""
+    """wiki：用于 L1 的"已知知识"与到期概念复习（M6）；为 None 时跳过这两项。
+    all_time：本次的新条目在 L0 不受时间窗限制（ADR 0016）。"""
     report = RunReport()
     run = _Runner(conn, fs, backend, profile, now, clock or (lambda: now), report, wiki)
     day = today.isoformat()
 
     # ---------- L0（常规条目；回补池单独处理） ----------
-    passed = run.l0(db.items_by_status(conn, ("new",), backfill=False))
+    passed = run.l0(db.items_by_status(conn, ("new",), backfill=False), ignore_age=all_time)
 
     # ---------- L1 ----------
     selected = interleave_by_source(passed, limit)

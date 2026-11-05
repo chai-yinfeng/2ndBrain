@@ -145,6 +145,8 @@ personalize:
   tune_raise_ratio: 0.7          # 正向（有收获）比例 ≥ 该值建议 trust +1；负向为不感兴趣 / 没价值
   tune_lower_ratio: 0.3          # 正向比例 ≤ 该值建议 trust −1
   too_hard_prereq_max_chars: 600 # 近期"太难"条目的前置知识注入 L1 的长度上限（0 关闭）
+  yield_window_days: 30          # 信源产出率的统计窗口（/sources 与 sb sources tune）
+  low_yield_min_items: 5         # 窗口内入库 ≥ 该数但进入前排为 0 → "低产出，建议停用"
 
 # 经典回补（M5，ADR 0009）：backfill: true 的信源的历史条目进入回补池，
 # 每天挑少量（优先 explainer / survey、与"接触过 / 想回炉"领域相关的）经 L1 / L2 后放进温故栏。

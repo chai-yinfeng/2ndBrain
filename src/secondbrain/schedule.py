@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
 import shutil
+import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from pathlib import Path
@@ -19,7 +22,9 @@ DEFAULT_TIME = "07:00"
 
 
 def launch_agents_dir() -> Path:
-    return Path.home() / "Library" / "LaunchAgents"
+    """SB_LAUNCH_AGENTS_DIR 可覆盖（测试与验收用，避免碰真实的 ~/Library/LaunchAgents）。"""
+    override = os.environ.get("SB_LAUNCH_AGENTS_DIR")
+    return Path(override) if override else Path.home() / "Library" / "LaunchAgents"
 
 
 def plist_path(agents_dir: Path | None = None) -> Path:
@@ -78,3 +83,54 @@ def build_plist(local: time, project_root: Path, log_dir: Path, uv: str) -> byte
 
 def find_uv() -> str:
     return shutil.which("uv") or "uv"
+
+
+# ---------- 运行方式（ADR 0016）：装了 LaunchAgent = 每日自动，没装 = 手动 ----------
+
+Runner = Callable[..., subprocess.CompletedProcess]
+
+
+@dataclass(frozen=True)
+class ScheduleStatus:
+    installed: bool
+    path: Path
+    at: time | None = None  # 每天运行的本地时间
+    loaded: bool | None = None  # launchctl 是否已加载（未安装时为 None）
+
+
+def status(runner: Runner | None = None) -> ScheduleStatus:
+    """读 plist 得到时间；只有 plist 存在时才调用 `launchctl list` 判断是否已加载。"""
+    runner = runner or subprocess.run
+    path = plist_path()
+    if not path.exists():
+        return ScheduleStatus(False, path)
+    try:
+        interval = plistlib.loads(path.read_bytes()).get("StartCalendarInterval") or {}
+        at = time(int(interval["Hour"]), int(interval["Minute"]))
+    except (plistlib.InvalidFileException, KeyError, ValueError, TypeError):
+        at = None
+    result = runner(["launchctl", "list", LABEL], capture_output=True, check=False)
+    return ScheduleStatus(True, path, at, result.returncode == 0)
+
+
+def install(local: time, project_root: Path, log_dir: Path, runner: Runner | None = None) -> Path:
+    """写入 plist 并 `launchctl load -w`（与 `sb schedule install` 相同）。"""
+    runner = runner or subprocess.run
+    target = plist_path()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(build_plist(local, project_root, log_dir, find_uv()))
+    runner(["launchctl", "load", "-w", str(target)], check=True)
+    return target
+
+
+def uninstall(runner: Runner | None = None) -> bool:
+    """`launchctl unload -w` 并删除 plist；未安装时返回 False。
+    注意：unload 会终止该 LaunchAgent 正在进行的运行。"""
+    runner = runner or subprocess.run
+    target = plist_path()
+    if not target.exists():
+        return False
+    runner(["launchctl", "unload", "-w", str(target)], check=False)
+    target.unlink()
+    return True

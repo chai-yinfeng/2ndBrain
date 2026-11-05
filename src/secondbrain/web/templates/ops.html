@@ -10,8 +10,28 @@
     {% if peak %}当前是 DeepSeek 高峰时段：按全价计费（非高峰为 ×{{ multiplier }}）。{% else %}当前不是 DeepSeek 高峰时段：费用 ×{{ multiplier }}。{% endif %}
   </p>
   {% if running and not (run_task and run_task.running) %}<p class="refresh">已有 sb run 在运行（CLI 或定时任务）。</p>{% endif %}
-  <button type="button" class="fb" hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML">立即运行</button>
+  <form hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML" class="start-form">
+    <button type="submit" class="fb">立即运行</button>
+    <label class="meta"><input type="checkbox" name="all_time" value="1"> 不限时间窗（只去重；每个信源仍只取最新 fetch_limit 条）</label>
+  </form>
   {% with kind="run", task=run_task, message=None %}{% include "_task.html" %}{% endwith %}
+</section>
+
+<section class="entry" id="schedule" data-mode="{{ 'auto' if sched.installed else 'manual' }}">
+  <h2>运行方式</h2>
+  {% if sched.installed %}
+    <p>当前：<b>每天 {{ sched.at.strftime("%H:%M") if sched.at else "（时间无法解析）" }} 自动运行</b> · LaunchAgent {{ "已加载" if sched.loaded else "未加载" }}</p>
+    <button type="button" class="fb" hx-post="/ops/schedule/uninstall" hx-target="#schedule-result" hx-confirm="改为手动：卸载每日自动运行（launchctl unload，并删除 plist）？">改为手动</button>
+    <span class="meta">之后在首页点「开始今日过滤」手动运行；有运行在进行时会拒绝，避免终止它。</span>
+  {% else %}
+    <p>当前：<b>手动</b>（没有安装每日自动运行；在首页点「开始今日过滤」）</p>
+    <form hx-post="/ops/schedule/install" hx-target="#schedule-result" hx-confirm="开启每日自动：写入 LaunchAgent 并 launchctl load？" class="start-form">
+      <label>每天本地 <input type="time" name="at" value="{{ default_time }}" required></label>
+      <button type="submit" class="fb">开启每日自动</button>
+    </form>
+    <p class="meta">{{ default_time }} 的高峰检查：{{ sched_checks | join("；") }}。DeepSeek 高峰为 UTC 周一至周五 01:00–04:00、06:00–10:00（全价，其余半价）。</p>
+  {% endif %}
+  <div id="schedule-result"></div>
 </section>
 
 <section class="entry">
