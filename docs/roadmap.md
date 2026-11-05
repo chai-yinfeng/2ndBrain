@@ -249,6 +249,42 @@ curl -s 127.0.0.1:8765/ops | grep -o 'SUMMARY' | head -1
 kill %1
 ```
 
+## M9 — 手动运行与信源产出率（ADR 0016）
+
+- [x] 运行方式开关：定时任务装了 = 每天 HH:MM 自动，没装 = 手动；`/ops` 显示模式与 LaunchAgent 是否已加载，"改为手动 / 开启每日自动"按钮需确认并提示高峰；有运行在进行时拒绝改为手动；`SB_LAUNCH_AGENTS_DIR` 可覆盖目录（测试用临时目录）
+- [x] 首页"开始今日过滤"：今天还没有 digest 时显示按钮与耗时 / 费用说明；后台运行并轮询，完成后整页刷新；锁被占用（含定时任务）时显示"正在运行"；今天已运行过时只留"再运行一次"入口
+- [x] 不限时间窗：`sb run --all-time`、首页与 `/ops` 勾选项；collect 不按 max_age_days 截断（仍每源最新 fetch_limit 条再去重），L0 对新条目 ignore_age；预算、lane、`run.max_cost_usd` 不变
+- [x] 速览与归档默认折叠为 `<details>`（"速览（N 条）"），折叠区域内反馈按钮可用
+- [x] 信源产出率：`/sources` 显示近 30 天入库 / 精读 / 前排 / 正 / 负；入库 ≥ 5 但前排为 0（且历史覆盖整个窗口）标记"低产出，建议停用"并给停用按钮；`sb sources tune` 只读列出
+
+**模块**：`ingest.py`、`pipeline/run.py`、`ops.py`、`schedule.py`、`profile/tune.py`、`db.py`、`web/`、`cli.py`
+
+**验收**（临时目录，fake LLM，端口 8765，临时 LaunchAgents 目录，不碰默认 data/ 与真实 launchctl）
+```bash
+uv run pytest -q tests/test_manual_run.py
+export SB_DATA_DIR=$(mktemp -d) SB_LLM_BACKEND=fake SB_LAUNCH_AGENTS_DIR=$(mktemp -d)
+uv run sb fetch --source lmsys-sglang-blog --limit 5
+uv run sb serve --port 8765 &
+sleep 3
+curl -s 127.0.0.1:8765/ | grep -o 'data-run-state="[a-z]*"\|开始今日过滤\|不限时间窗（只去重）' | sort | uniq -c
+uv run python -c "import time; from secondbrain import ops; lock = ops.run_lock(); lock.__enter__(); time.sleep(12)" &
+sleep 3
+curl -s 127.0.0.1:8765/ | grep -o 'data-run-state="[a-z]*"'                 # running
+curl -s -X POST 127.0.0.1:8765/tasks/run | grep -o '已有 sb run 在运行'
+uv run sb run --no-fetch; echo "exit=$?"                                      # 锁冲突：exit=1
+wait %2
+# 不限时间窗：把 1 条改成 2024 年发布，先按时间窗跑，再重置为 new 用 --all-time 跑
+sqlite3 "$SB_DATA_DIR/brain.db" "UPDATE items SET published_at = '2024-01-01T00:00:00Z' WHERE id = 1"
+uv run sb run --no-fetch | grep 'L0：'
+sqlite3 "$SB_DATA_DIR/brain.db" "UPDATE items SET status = 'new' WHERE id = 1"
+uv run sb run --no-fetch --all-time | grep '不限时间窗\|L0：\|L1：'
+curl -s 127.0.0.1:8765/ | grep -o 'data-run-state="[a-z]*"\|再运行一次\|<summary><h2>[^<]*</h2></summary>'
+curl -s 127.0.0.1:8765/ops | grep -o 'data-mode="[a-z]*"\|当前：<b>[^<]*</b>\|name="all_time"'
+curl -s 127.0.0.1:8765/sources | grep -o 'data-source="lmsys-sglang-blog"\|近 30 天产出\|data-yield="[0-9/]*"' | head -4
+uv run sb sources tune | grep '低产出'
+kill %1
+```
+
 ## Backlog（不在本轮）
 
 - [ ] X / Twitter 信源
