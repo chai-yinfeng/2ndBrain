@@ -254,10 +254,10 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
 
 def ensure_sources_file() -> tuple[Path, bool]:
     """返回 (config/sources.yaml, 是否刚从 example 复制)。已存在时绝不覆盖。"""
-    target = config.CONFIG_DIR / "sources.yaml"
+    target = config.config_dir() / "sources.yaml"
     if target.exists():
         return target, False
-    example = config.CONFIG_DIR / "sources.example.yaml"
+    example = config.config_dir() / "sources.example.yaml"
     target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
     return target, True
 
@@ -525,3 +525,99 @@ def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
     wiki.rebuild_index()
     wiki.append_log(today, "prereq", name, [f"新建 [[{slug}]]（AI 讲解，来源 #{item_id}）"])
     return slug, True
+
+
+# ---------- 运维页设置（M10，ADR 0017） ----------
+
+KEY_NAMES = {"deepseek": "DEEPSEEK_API_KEY"}
+
+
+def ping() -> dict:
+    """测试连接：当前后端 + cheap 模型的极小调用，记入用量（stage PING）。
+    返回 {ok, backend, model, ms, error}；error 只含错误类型 / 状态码。"""
+    import time as time_mod
+
+    config.load_env()
+    settings, fs, _ = _settings()
+    name = config.llm_backend(settings)
+    model = fs.llm.models["cheap"] if name != "fake" else "fake-cheap"
+    try:
+        _, backend = _backend(settings, fs)
+    except OpsError as exc:
+        return {"ok": False, "backend": name, "model": model, "ms": 0, "error": str(exc)}
+    start = time_mod.monotonic()
+    try:
+        usage = backend.ping()
+    except LLMError as exc:
+        ms = round((time_mod.monotonic() - start) * 1000)
+        return {"ok": False, "backend": name, "model": model, "ms": ms, "error": str(exc)}
+    ms = round((time_mod.monotonic() - start) * 1000)
+    conn = db.connect()
+    try:
+        now = datetime.now(UTC)
+        record_call(conn, backend.name, "PING", usage, now, fs.pricing, fs.pricing_schedule)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "backend": name, "model": backend.model_name("cheap"), "ms": ms}
+
+
+def _example_llm() -> dict:
+    path = config.config_dir() / "settings.example.yaml"
+    return (config._read_mapping(path).get("llm") or {}) if path.is_file() else {}
+
+
+def save_llm_choice(cheap: str, strong: str, backend: str) -> list[str]:
+    """把模型 / 后端写进 config/settings.yaml：与 example 相同的键从文件中删除，
+    不同的才写入（不复制整份 example）。返回改动说明。"""
+    merged = config.pipeline_settings(config.load_settings())
+    prices = set(merged.pricing)
+    for model in (cheap, strong):
+        if model not in prices:
+            raise OpsError(f"未知模型：{model}（应为价格表中的模型）")
+    if backend not in config.KNOWN_LLM_BACKENDS:
+        raise OpsError(f"未知后端：{backend}")
+    example = _example_llm()
+    defaults = example.get("models") or {}
+    user = config.user_settings()
+    llm = dict(user.get("llm") or {})
+    models = dict(llm.get("models") or {})
+    changes = []
+    for key, value in (("cheap", cheap), ("strong", strong)):
+        if value == defaults.get(key):
+            models.pop(key, None)
+        else:
+            models[key] = value
+        changes.append(f"{key} = {value}")
+    if backend == (example.get("backend") or config.DEFAULT_LLM_BACKEND):
+        llm.pop("backend", None)
+    else:
+        llm["backend"] = backend
+    changes.append(f"backend = {backend}")
+    _store_llm(user, llm, models)
+    return changes
+
+
+def reset_llm_choice() -> None:
+    """恢复默认：从 config/settings.yaml 删除 llm.models.cheap / strong 与 llm.backend。"""
+    user = config.user_settings()
+    llm = dict(user.get("llm") or {})
+    models = dict(llm.get("models") or {})
+    for key in ("cheap", "strong"):
+        models.pop(key, None)
+    llm.pop("backend", None)
+    _store_llm(user, llm, models)
+
+
+def _store_llm(user: dict, llm: dict, models: dict) -> None:
+    if models:
+        llm["models"] = models
+    else:
+        llm.pop("models", None)
+    if llm:
+        user["llm"] = llm
+    else:
+        user.pop("llm", None)
+    if not user and not (config.config_dir() / "settings.yaml").exists():
+        return  # 与 example 相同：不创建个人设置文件
+    config.save_user_settings(user)

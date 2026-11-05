@@ -1,0 +1,6 @@
+{# 形式 / 类型筛选（只影响显示）：普通链接，不需要 JS #}
+<nav class="filters" aria-label="筛选">
+  <div class="chips"><span class="meta">形式</span>{% for label, href, on in filter_bar.forms %}<a class="chip{% if on %} on{% endif %}" href="{{ href }}">{{ label }}</a>{% endfor %}</div>
+  <div class="chips"><span class="meta">类型</span>{% for label, href, on in filter_bar.ctypes %}<a class="chip{% if on %} on{% endif %}" href="{{ href }}">{{ label }}</a>{% endfor %}</div>
+  {% if filter_bar.active %}<p class="meta">筛选只影响显示；预算与分级不变。</p>{% endif %}
+</nav>

@@ -63,6 +63,20 @@ class DeepSeekBackend:
     def _redact(self, text: str) -> str:
         return text.replace(self._secret, "***") if self._secret else text
 
+    def ping(self) -> Usage:
+        """测试连接：cheap 模型的极小调用（max_tokens=1，不重试）。
+        失败时只给出错误类型与状态码，不带响应正文或请求头。"""
+        model = self.model_name("cheap")
+        try:
+            resp = self._client.with_options(max_retries=0, timeout=20).chat.completions.create(
+                model=model, messages=[{"role": "user", "content": "ping"}], max_tokens=1
+            )
+        except openai.APIStatusError as exc:
+            raise LLMError(f"{type(exc).__name__}（HTTP {exc.status_code}）") from None
+        except openai.APIError as exc:
+            raise LLMError(type(exc).__name__) from None
+        return parse_usage(resp.usage, model)
+
     def complete_json(
         self, messages: list[dict[str, str]], schema: type[T], tier: Tier
     ) -> tuple[T, Usage]:

@@ -28,6 +28,7 @@ class SourceConfig(BaseModel):
     enabled: bool = True
     backfill: bool = False  # M5 实现，M1 只解析并入库
     needs_scraper: bool = False
+    homepage: str | None = None  # 信源主页（/sources 上的链接）；不填时按类型推导（ADR 0017）
     url_pattern: str | None = None  # sitemap：只保留匹配该正则的 URL（re.search）
     use_lastmod: bool = False  # sitemap：URL 无日期时按 <lastmod> 选最新条目（页面日期优先）
 

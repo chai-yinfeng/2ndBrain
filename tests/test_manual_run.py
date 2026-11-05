@@ -289,6 +289,6 @@ def test_low_yield_sources(env):
     assert 'action="/sources/vllm-blog/toggle"' in row("vllm-blog")
 
     out = runner.invoke(cli_app, ["sources", "tune"]).output
-    assert "低产出信源（近 30 天入库 ≥ 5 条、进入前排 0 条）：1 个" in out
-    assert "vllm-blog：入库 6，精读 0，前排 0 —— 建议停用" in out
+    assert "低产出信源（近 30 天入库 ≥ 5 条、进入推荐 0 条）：1 个" in out
+    assert "vllm-blog：入库 6，精读 0，进入推荐 0 —— 建议停用" in out
     assert not (config.CONFIG_DIR / "sources.yaml").exists()  # tune 只读

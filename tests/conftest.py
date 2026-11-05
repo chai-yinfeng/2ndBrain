@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +46,30 @@ class Router:
 
     def urls(self) -> list[str]:
         return [str(r.url.copy_with(query=None)) for r in self.requests]
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """所有测试都不读写真实的 config/settings.yaml、config/sources.yaml 与 .env：
+    config 目录指向只含 example 文件的临时副本，.env 指向临时路径（测试可再覆盖）。"""
+    from secondbrain import config
+
+    conf = tmp_path_factory.mktemp("config")
+    for name in ("settings.example.yaml", "sources.example.yaml", "profile.example.md"):
+        shutil.copy(config.CONFIG_DIR / name, conf / name)
+    monkeypatch.delenv("SB_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("SB_ENV_FILE", raising=False)
+    monkeypatch.setattr(config, "CONFIG_DIR", conf)
+    monkeypatch.setattr(config, "ENV_FILE", conf / ".env")
+    monkeypatch.setattr(config, "_FROM_DOTENV", set())
+
+
+@pytest.fixture(autouse=True)
+def testclient_host(monkeypatch: pytest.MonkeyPatch):
+    """fastapi.TestClient 的 Host 头是 "testserver"：只在测试中加入 Host 白名单（ADR 0017）。"""
+    from secondbrain.web import app as web_app
+
+    monkeypatch.setattr(web_app, "LOCAL_HOSTS", web_app.LOCAL_HOSTS | {"testserver"})
 
 
 @pytest.fixture(autouse=True)

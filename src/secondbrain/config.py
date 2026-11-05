@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,22 @@ KNOWN_LLM_BACKENDS = ("deepseek", "fake")
 
 class ConfigError(Exception):
     """配置文件缺失或不合法。"""
+
+
+def config_dir() -> Path:
+    """配置目录：SB_CONFIG_DIR 可覆盖（验收 / 临时环境用），否则为 <项目根>/config。"""
+    override = os.environ.get("SB_CONFIG_DIR")
+    return Path(override).expanduser() if override else CONFIG_DIR
+
+
+def env_file() -> Path:
+    """.env 路径：SB_ENV_FILE 可覆盖，否则为 <项目根>/.env。"""
+    override = os.environ.get("SB_ENV_FILE")
+    return Path(override).expanduser() if override else ENV_FILE
+
+
+# 由 load_env 从 .env 写入 os.environ 的键（其余已存在的键来自进程启动时的环境变量）
+_FROM_DOTENV: set[str] = set()
 
 
 def data_dir() -> Path:
@@ -51,24 +68,117 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 def load_env(path: Path | None = None) -> None:
     """把 .env 中的值写入 os.environ；已存在的环境变量优先，不覆盖。"""
-    for key, value in parse_env_file(path or ENV_FILE).items():
-        os.environ.setdefault(key, value)
+    for key, value in parse_env_file(path or env_file()).items():
+        if key not in os.environ:
+            os.environ[key] = value
+            _FROM_DOTENV.add(key)
+
+
+def env_source(key: str) -> str | None:
+    """该变量当前的来源：".env"、"环境变量"，未设置时为 None。不返回值本身。"""
+    if not os.environ.get(key):
+        return None
+    return ".env" if key in _FROM_DOTENV else "环境变量"
+
+
+_ENV_LINE = r"^\s*(?:export\s+)?{key}\s*="
+
+
+def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def set_env_var(key: str, value: str | None) -> bool:
+    """在 .env 中设置（value 为 None 时删除）该变量：保留其他行与注释，原子写入并 chmod 600。
+
+    同时更新当前进程的 os.environ，立即生效；但该变量若来自进程启动时的环境变量
+    （不是 .env），按规则 .env 不覆盖它，返回 False 表示"需要重启或 unset 才生效"。"""
+    if value is not None and ("\n" in value or "\r" in value):
+        raise ConfigError("值不能包含换行")
+    path = env_file()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    pattern = re.compile(_ENV_LINE.format(key=re.escape(key)))
+    kept, replaced = [], False
+    for line in lines:
+        if pattern.match(line):
+            if value is not None and not replaced:
+                kept.append(f"{key}={value}")
+                replaced = True
+            continue
+        kept.append(line)
+    if value is not None and not replaced:
+        kept.append(f"{key}={value}")
+    _atomic_write(path, "\n".join(kept) + ("\n" if kept else ""), mode=0o600)
+    shell = key in os.environ and key not in _FROM_DOTENV
+    if shell:
+        return False
+    if value is None:
+        os.environ.pop(key, None)
+        _FROM_DOTENV.discard(key)
+    else:
+        os.environ[key] = value
+        _FROM_DOTENV.add(key)
+    return True
 
 
 def settings_path() -> tuple[Path, bool]:
-    """返回 (settings 文件路径, 是否为 example)。正式文件不存在时退回 example。"""
-    real = CONFIG_DIR / "settings.yaml"
+    """返回 (settings 文件路径, 是否只有 example)。正式文件存在时它覆盖在 example 之上。"""
+    real = config_dir() / "settings.yaml"
     if real.is_file():
         return real, False
-    return CONFIG_DIR / "settings.example.yaml", True
+    return config_dir() / "settings.example.yaml", True
 
 
-def load_settings() -> dict[str, Any]:
-    path, _ = settings_path()
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """dict 递归合并；list 与标量直接替换。不修改输入。"""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if data is None:
+        return {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} 顶层必须是 mapping")
     return data
+
+
+def user_settings() -> dict[str, Any]:
+    """config/settings.yaml 本身（不含 example）；不存在时为空。"""
+    path = config_dir() / "settings.yaml"
+    return _read_mapping(path) if path.is_file() else {}
+
+
+def load_settings() -> dict[str, Any]:
+    """settings.example.yaml 为底，config/settings.yaml（若存在）深合并覆盖在上面。"""
+    example = config_dir() / "settings.example.yaml"
+    base = _read_mapping(example) if example.is_file() else {}
+    return deep_merge(base, user_settings())
+
+
+SETTINGS_HEADER = (
+    "# 个人设置（gitignore）：只写与 settings.example.yaml 不同的键，\n"
+    "# 读取时深合并覆盖在 example 之上。\n"
+)
+
+
+def save_user_settings(data: dict[str, Any]) -> Path:
+    """原子写入 config/settings.yaml（yaml safe_dump）。"""
+    path = config_dir() / "settings.yaml"
+    body = yaml.safe_dump(data, allow_unicode=True, sort_keys=False) if data else "{}\n"
+    _atomic_write(path, SETTINGS_HEADER + body)
+    return path
 
 
 def llm_backend(settings: dict[str, Any] | None = None) -> str:
@@ -82,10 +192,10 @@ def llm_backend(settings: dict[str, Any] | None = None) -> str:
 
 def sources_path() -> tuple[Path, bool]:
     """返回 (sources 文件路径, 是否为 example)。正式文件不存在时退回 example。"""
-    real = CONFIG_DIR / "sources.yaml"
+    real = config_dir() / "sources.yaml"
     if real.is_file():
         return real, False
-    return CONFIG_DIR / "sources.example.yaml", True
+    return config_dir() / "sources.example.yaml", True
 
 
 def load_sources(path: Path | None = None) -> list[SourceConfig]:
@@ -187,7 +297,7 @@ def ensure_profile() -> tuple[Path, bool]:
         return path, False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        (CONFIG_DIR / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8"
+        (config_dir() / "profile.example.md").read_text(encoding="utf-8"), encoding="utf-8"
     )
     return path, True
 

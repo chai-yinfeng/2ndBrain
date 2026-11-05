@@ -27,6 +27,7 @@
       <progress value="{{ [used, budget] | min }}" max="{{ budget or 1 }}"></progress>
       <span>今日已排 {{ used }} / {{ budget }} 分钟</span>
     </div>
+    {% include "_filters.html" %}
     <p class="backlog">此前未读的必读积压：<b>{{ backlog }}</b> 条 · <a href="/later">稍后再看：{{ later }} 条</a></p>
     <div class="ingest" data-to-ingest="{{ to_ingest }}">
       <span>待编进 wiki：<b>{{ to_ingest }}</b> 条</span>

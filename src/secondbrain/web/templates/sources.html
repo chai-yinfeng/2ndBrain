@@ -2,23 +2,23 @@
 {% block title %}信源 · Second Brain{% endblock %}
 {% block content %}
 <h1>信源 <small class="meta">{{ sources | length }} 个</small></h1>
-<p class="meta">产出统计近 {{ pers.yield_window_days }} 天：入库 ≥ {{ pers.low_yield_min_items }} 条但没有一条进入前排（必读 / 值得读 / 温故 / 意外）的信源标记"低产出，建议停用"；新加入、历史不足 {{ pers.yield_window_days }} 天的不标记。</p>
+<p class="meta">产出统计近 {{ pers.yield_window_days }} 天：入库 ≥ {{ pers.low_yield_min_items }} 条但没有一条<span title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）">进入推荐</span>（必读 / 温故 / 意外 / 值得读，不含速览、归档）的信源标记"低产出，建议停用"；新加入、历史不足 {{ pers.yield_window_days }} 天的不标记。</p>
 <p class="meta">读取 {{ path }}{% if is_example %}（还没有个人配置；第一次修改时会先复制为 config/sources.yaml）{% endif %}。这里的修改写入 config/sources.yaml（gitignore），写回时注释不保留，字段说明见 config/sources.example.yaml。</p>
 {% if saved %}<p class="saved">已保存{% if saved != "deleted" %}：{{ saved }}{% else %}（已删除）{% endif %}</p>{% endif %}
 {% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
 
 <section class="entry">
   <table class="scores sources">
-    <tr><th>id</th><th>类型</th><th>trust</th><th>role</th><th>状态</th><th>最近抓取</th><th>入库</th><th>正 / 负</th><th title="近 {{ pers.yield_window_days }} 天：入库 / 精读（通过 L1 进入 L2）/ 进入前排 / 正 / 负">近 {{ pers.yield_window_days }} 天产出</th><th></th></tr>
+    <tr><th>id</th><th>类型</th><th>trust</th><th>role</th><th>状态</th><th>最近抓取</th><th>入库</th><th>正 / 负</th><th title="近 {{ pers.yield_window_days }} 天：入库 / 精读（通过 L1 进入 L2）/ 进入推荐 / 正 / 负">近 {{ pers.yield_window_days }} 天产出</th><th></th></tr>
     {% for s in sources %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}
     <tr data-source="{{ s.id }}">
-      <td><b>{{ s.id }}</b>{% if s.tags %}<br><span class="meta">{{ s.tags | join(", ") }}</span>{% endif %}</td>
+      <td>{% set home = homepages.get(s.id) %}{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer" title="打开信源主页"><b>{{ s.id }}</b></a>{% else %}<b>{{ s.id }}</b>{% endif %}{% if s.tags %}<br><span class="meta">{{ s.tags | join(", ") }}</span>{% endif %}</td>
       <td>{{ s.type }}</td><td>{{ s.trust }}</td><td>{{ s.role }}</td>
       <td>{% if not s.enabled %}停用{% elif s.needs_scraper %}needs_scraper{% else %}启用{% endif %}</td>
       <td>{% if o and o.last_fetch_at %}{{ "✓" if o.last_fetch_status == "ok" else "✗" }} {{ o.last_fetch_at }}{% if o.last_fetch_status == "ok" %}（新增 {{ o.last_fetch_added }}）{% else %}<br><span class="meta">{{ o.last_fetch_message }}</span>{% endif %}{% else %}<span class="meta">—</span>{% endif %}</td>
       <td>{{ o.items if o else 0 }}</td>
       <td>{{ o.positive if o else 0 }} / {{ o.negative if o else 0 }}</td>
-      <td class="yield" data-yield="{{ y.items }}/{{ y.l2 }}/{{ y.front }}/{{ y.positive }}/{{ y.negative }}">入库 {{ y.items }} · 精读 {{ y.l2 }} · 前排 {{ y.front }} · 正 {{ y.positive }} / 负 {{ y.negative }}{% if y.low_yield %}<br><span class="refresh low-yield">低产出，建议停用</span>{% endif %}</td>
+      <td class="yield" data-yield="{{ y.items }}/{{ y.l2 }}/{{ y.front }}/{{ y.positive }}/{{ y.negative }}">入库 {{ y.items }} · 精读 {{ y.l2 }} · <span title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）">进入推荐 {{ y.front }}</span> · 正 {{ y.positive }} / 负 {{ y.negative }}{% if y.low_yield %}<br><span class="refresh low-yield">低产出，建议停用</span>{% endif %}</td>
       <td class="actions">
         <form method="post" action="/sources/{{ s.id }}/toggle"><button type="submit" class="fb{% if y.low_yield %} primary{% endif %}" title="切换启用 / 停用，写入 config/sources.yaml">{{ "停用" if s.enabled else "启用" }}</button></form>
         <form method="post" action="/sources/{{ s.id }}/delete"><button type="submit" class="fb" title="从 config/sources.yaml 删除（需要再确认一次；已入库的条目保留）">删除</button></form>

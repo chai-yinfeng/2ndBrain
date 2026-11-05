@@ -148,6 +148,10 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (item_id, kind)
     );
     """,
+    # v8（M10）：从 feed 读到的信源主页（RSS channel <link>），配置中没写 homepage 时使用。
+    """
+    ALTER TABLE sources ADD COLUMN homepage TEXT;
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -227,12 +231,18 @@ def upsert_sources(conn: sqlite3.Connection, sources: list[SourceConfig]) -> Non
 
 
 def record_fetch(
-    conn: sqlite3.Connection, source_id: str, status: str, added: int, message: str, ts: datetime
+    conn: sqlite3.Connection,
+    source_id: str,
+    status: str,
+    added: int,
+    message: str,
+    ts: datetime,
+    homepage: str | None = None,
 ) -> None:
     conn.execute(
         "UPDATE sources SET last_fetch_at = ?, last_fetch_status = ?, last_fetch_added = ?,"
-        " last_fetch_message = ? WHERE id = ?",
-        (format_time(ts), status, added, message or None, source_id),
+        " last_fetch_message = ?, homepage = COALESCE(?, homepage) WHERE id = ?",
+        (format_time(ts), status, added, message or None, homepage, source_id),
     )
 
 
@@ -241,7 +251,7 @@ def source_overview(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     rows = conn.execute(
         f"""
         SELECT s.id, s.last_fetch_at, s.last_fetch_status, s.last_fetch_added,
-               s.last_fetch_message,
+               s.last_fetch_message, s.homepage,
                (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id) AS items,
                (SELECT COUNT(*) FROM ({LATEST_FEEDBACK}) f JOIN items i ON i.id = f.item_id
                 WHERE i.source_id = s.id AND f.kind = 'gained') AS positive,
@@ -484,8 +494,9 @@ def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
     return conn.execute(
         """
         SELECT d.*, COALESCE(d.budget_minutes, d.est_minutes) AS budget, i.title, i.url,
-               i.source_id, i.extract_method, i.is_backfill, length(i.content) AS content_len
-        FROM digests d JOIN items i ON i.id = d.item_id
+               i.source_id, i.extract_method, i.is_backfill, length(i.content) AS content_len,
+               s.type AS source_type
+        FROM digests d JOIN items i ON i.id = d.item_id LEFT JOIN sources s ON s.id = i.source_id
         WHERE d.date = ? ORDER BY d.lane, d.rank
         """,
         (day,),
@@ -582,6 +593,17 @@ def digest_dates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                SUM(lane = 'refresher') AS refresher, SUM(lane = 'serendipity') AS serendipity,
                SUM(lane = 'deferred') AS deferred, SUM(lane = 'fyi') AS fyi, COUNT(*) AS total
         FROM digests GROUP BY date ORDER BY date DESC
+        """
+    ).fetchall()
+
+
+def digest_lane_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """所有 digest 行（日期、lane、条目形式判断所需字段），供历史页按形式 / 类型筛选计数。"""
+    return conn.execute(
+        """
+        SELECT d.date, d.lane, d.item_id, i.url, i.extract_method, s.type AS source_type
+        FROM digests d JOIN items i ON i.id = d.item_id LEFT JOIN sources s ON s.id = i.source_id
+        ORDER BY d.date DESC
         """
     ).fetchall()
 

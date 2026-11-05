@@ -449,3 +449,40 @@
 - 不限时间窗的首次运行：L1 在高峰时段约 $0.5，可能触发 `run.max_cost_usd` 而跳过 L2（详见 ADR 0016），建议非高峰运行或临时调高上限。
 - "今天是否已运行"以 digest 为准，没有产出的运行不算。
 - 只有使用 run.lock 的代码（M7 起）发起的运行才能被检测到。
+
+## M10 — 筛选、信源主页与运维设置（2026-11-05，分支 `m10-filters-settings`）
+
+**做了什么**（ADR 0017）
+- 筛选：首页与 `/history` 有形式（`web/filters.item_form` 纯函数推导）和类型（L1 content_type）两排 chip，通过 `?form=&ctype=` 组合。只影响显示，lane 计数按筛选结果，被筛空的 lane 显示空状态。
+- 信源主页：
+  - 新增可选的 `homepage` 配置，没配时按类型推导；
+  - RSS 的 channel `<link>` 在抓取时存入 `sources.homepage`（schema v8）；
+  - 只输出 http(s) 链接，`rel="noopener noreferrer"`；
+  - "进入前排"改为"进入推荐"，并加 tooltip。
+- 配置：
+  - `config/settings.yaml` 深合并覆盖在 example 之上；
+  - 新增 `SB_CONFIG_DIR` / `SB_ENV_FILE` 覆盖路径；
+  - CLAUDE.md 中的配置规则同步更新。
+- `/ops` 设置：
+  - API key 只显示状态与来源；写入或清除 `.env`：原子写、chmod 600、立即生效；环境变量优先时给出提示；
+  - 测试连接（stage PING）；
+  - cheap / strong / backend 只把与 example 不同的键写入 settings.yaml，可以恢复默认。
+- CSRF / Host middleware：
+  - Host 必须是本机地址或 `serve --host` 的值；
+  - 修改类请求的 Origin / Referer 必须同源，两者都没有时放行。
+- 测试：
+  - 新增 `tests/test_m10.py`（27 个）；
+  - conftest 新增两个 autouse fixture：一个把 config 目录与 .env 指向临时路径，一个把 TestClient 的 Host `testserver` 加入白名单（仅测试中）；
+  - `test_manual_run.py::test_low_yield_sources` 因"进入前排"改名为"进入推荐"而更新了两处字符串。
+
+**验收结果**
+- `uv run pytest -q`：306 passed；`uv run ruff check .`、`uv run ruff format --check .`：通过。
+- roadmap M10 的验收命令已在 `mktemp -d` 临时目录中全部实际运行（fake LLM，端口 8765；data、config、.env、LaunchAgents 都是临时路径）：
+  - `.env` 权限为 600，页面不回显 key；
+  - settings.yaml 只包含改动的那个键；
+  - 跨源 POST 与恶意 Host 都返回 403，同源与无头请求返回 200。
+
+**遗留问题**
+- 非浏览器客户端（没有 Origin / Referer）不受 CSRF 校验，这是有意的取舍（ADR 0017）。
+- 筛选状态下不显示概念复习。
+- 通过环境变量设置的 key 无法在页面上修改。

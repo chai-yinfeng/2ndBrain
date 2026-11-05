@@ -7,7 +7,7 @@ import feedparser
 from secondbrain.extract.html import html_fragment_to_text
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
 from secondbrain.net import FetchError, HttpClient
-from secondbrain.sources.base import clean_title, struct_time_to_datetime
+from secondbrain.sources.base import Fetched, clean_title, struct_time_to_datetime
 
 
 def parse_feed(data: bytes) -> list[RawEntry]:
@@ -16,7 +16,8 @@ def parse_feed(data: bytes) -> list[RawEntry]:
         if feed.bozo:
             raise FetchError(f"不是有效的 RSS/Atom：{feed.get('bozo_exception')}")
         return []
-    entries: list[RawEntry] = []
+    entries = Fetched()
+    entries.homepage = feed.feed.get("link") or None
     for e in feed.entries:
         link = e.get("link")
         if not link:

@@ -147,6 +147,21 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - `/wiki`：体检按钮；
   - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
 
+## 筛选、信源主页与运维设置（M10，见 ADR 0017）
+
+- 首页与 `/history` 的 `?form=&ctype=` 筛选：
+  - 形式由 `web/filters.item_form` 推导（paper / video / blog），类型取 L1 的 content_type；
+  - 只影响显示，不改预算与 digest。
+- 信源主页：
+  - 配置的 `homepage` 优先，否则按类型推导；rss 的 channel `<link>` 在抓取时存入 `sources.homepage`（schema v8）；
+  - 只输出 http(s) 链接。
+- 配置读取：`settings.yaml` 深合并覆盖在 example 之上；`SB_CONFIG_DIR` / `SB_ENV_FILE` 可覆盖路径。
+- `/ops` 设置区：
+  - API key：只显示状态与来源；写入 `.env` 时原子写、chmod 600，并更新 `os.environ`；
+  - 测试连接：stage PING；
+  - 模型 / 后端：只把与 example 不同的键写入 settings.yaml。
+- 安全 middleware：Host 白名单（本机地址 + `serve --host`）；修改类请求要求 Origin / Referer 同源（两者都没有时放行）。
+
 ## 手动运行与信源产出率（M9，见 ADR 0016）
 
 - 运行方式：LaunchAgent 已安装 = 每日自动，否则手动。
@@ -183,7 +198,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 
 | 表 | 主要字段 | 引入 |
 |---|---|---|
-| `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7） | M1（`last_fetch_*` M7，schema v6） |
+| `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7）；`homepage`（feed 中读到的主页，M10） | M1（`last_fetch_*` M7 v6，`homepage` M10 v8） |
 | `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`（全文）, `budget_minutes`（占用预算，M8）, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2（`budget_minutes` M8，schema v7） |
@@ -191,13 +206,13 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | `feedback` | `id`, `item_id`, `kind`（M7：later / dismiss / too_easy / gained / too_hard / worthless / clear）, `note`, `ts`；每个条目最新一条为当前状态；读完后四种写 `items.read_at` | M3（kind 取值 M7 修订） |
 | `wiki_ingests` | `item_id`（主键）, `ts`, `pages`（JSON：新建 / 更新的 slug） | M6 |
 | `digest_concepts` | `date`, `slug`, `title`, `mastery`, `est_minutes`, `related_item_id`, `created_at`；`(date, slug)` 唯一 | M6 |
-| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE / WIKI / SUMMARY / SUMMARY_MAP / PREREQ）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
+| `llm_calls` | `id`, `ts`, `backend`, `stage`（L1 / L2 / L2_MAP / PROFILE / WIKI / SUMMARY / SUMMARY_MAP / PREREQ / PING）, `model`, `prompt_tokens`, `cache_hit_tokens`, `cache_miss_tokens`, `completion_tokens`, `cost_usd`（按 config 价格估算，非高峰 × `off_peak_multiplier`）, `is_peak` | M2 |
 
 Wiki 概念页 frontmatter（M6）：`mastery`、`last_reviewed`、`interval_days`、`ease`（SM-2 简化版）、`sources`（来源条目）。
 
 ## LLM 后端
 
-统一接口（M2）：`complete_json(messages, schema, tier="cheap"|"strong") -> (obj, usage)`。默认 DeepSeek（OpenAI 兼容），`fake` 后端用于离线测试。模型名、价格、预算与配额都写在 `config/settings.yaml`，便于更换。见 ADR 0002。
+统一接口（M2）：`complete_json(messages, schema, tier="cheap"|"strong") -> (obj, usage)`，以及 `ping()`（M10，测试连接）。默认 DeepSeek（OpenAI 兼容），`fake` 后端用于离线测试。模型名、价格、预算与配额都写在 settings 中（`config/settings.yaml` 深合并覆盖在 example 之上，M10），便于更换。见 ADR 0002。
 
 - 模型分工：cheap 用于 L1 粗筛与长内容分块提要（L2_MAP）；strong 用于 L2 精读、按需精读、wiki ingest、profile 修改提案。两级机制保留，默认两级都用 `deepseek-flash`（ADR 0014）；在 `llm.models.strong` 中可改回 `deepseek-v4-pro`。
 

@@ -35,6 +35,7 @@ class SourceResult:
     duplicates: int = 0
     extract_failed: int = 0
     backfilled: int = 0  # 其中进入回补池的条目数
+    homepage: str | None = None  # feed 中读到的主页链接
     message: str = ""
     notes: list[str] = field(default_factory=list)  # 单个条目层面的问题（如拿不到字幕）
 
@@ -117,8 +118,9 @@ def collect(
     limit: int | None,
     now: datetime,
     all_time: bool = False,
-) -> tuple[list[db.NewItem], int, list[str]]:
-    """抓取单个信源，返回 (待入库的新条目, 已知重复数, 问题说明)。只做网络与解析，不写库。
+) -> tuple[list[db.NewItem], int, list[str], str | None]:
+    """抓取单个信源，返回 (待入库的新条目, 已知重复数, 问题说明, feed 主页链接)。
+    只做网络与解析，不写库。
 
     backfill: true 的信源：时间窗之外的历史条目也入库，标记 is_backfill（进入回补池）。
     all_time（ADR 0016）：不按 max_age_days 截断，都当作常规条目，仍按 limit 取最新 N 条。"""
@@ -126,6 +128,7 @@ def collect(
         datetime.min.replace(tzinfo=UTC) if all_time else now - timedelta(days=source.max_age_days)
     )
     fetched = FETCHERS[source.type](source, client, fs)
+    homepage = getattr(fetched, "homepage", None)
     fetched.sort(key=lambda e: e.published_at or now, reverse=True)
     # 发布时间未知的条目：普通信源当作近期条目；backfill 信源放进回补候选（再按正文长度把关）
     undated = [e for e in fetched if e.published_at is None]
@@ -181,7 +184,7 @@ def collect(
                 duration_seconds=duration,
             )
         )
-    return items, duplicates, notes
+    return items, duplicates, notes, homepage
 
 
 def fetch_sources(
@@ -211,7 +214,7 @@ def fetch_sources(
                 result = SourceResult(source.id, "skipped", message=reason)
             else:
                 try:
-                    items, duplicates, notes = futures[source.id].result()
+                    items, duplicates, notes, homepage = futures[source.id].result()
                 except FetchError as exc:
                     result = SourceResult(source.id, "failed", message=str(exc))
                 except Exception as exc:  # 单个信源的任何异常都不应中断整体
@@ -219,7 +222,9 @@ def fetch_sources(
                         source.id, "failed", message=f"{type(exc).__name__}: {exc}"
                     )
                 else:
-                    result = SourceResult(source.id, "ok", duplicates=duplicates, notes=notes)
+                    result = SourceResult(
+                        source.id, "ok", duplicates=duplicates, notes=notes, homepage=homepage
+                    )
                     for item in items:
                         if db.insert_item(conn, item, now):
                             result.added += 1
@@ -228,7 +233,15 @@ def fetch_sources(
                                 result.extract_failed += 1
                         else:
                             result.duplicates += 1
-                db.record_fetch(conn, source.id, result.status, result.added, result.message, now)
+                db.record_fetch(
+                    conn,
+                    source.id,
+                    result.status,
+                    result.added,
+                    result.message,
+                    now,
+                    result.homepage,
+                )
                 conn.commit()
             results.append(result)
             if on_result:
