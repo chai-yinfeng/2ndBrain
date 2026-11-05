@@ -285,6 +285,42 @@ uv run sb sources tune | grep '低产出'
 kill %1
 ```
 
+## M10 — 筛选、信源主页与运维设置（ADR 0017）
+
+- [x] 首页与 `/history` 按形式（论文 / 博客 / 视频，代码推导）与类型（L1 content_type）筛选：`?form=&ctype=` chip 链接，不用 JS；只影响显示，lane 计数按筛选结果，被筛空显示空状态
+- [x] 信源主页：配置 `homepage` 优先，否则按类型推导（rss 的 channel `<link>` 存入 `sources.homepage`，schema v8）；只输出 http(s)，`rel="noopener noreferrer"`；"进入前排"改为"进入推荐"并加 tooltip
+- [x] settings 深合并：`config/settings.yaml` 覆盖在 example 之上；`SB_CONFIG_DIR` / `SB_ENV_FILE` 可覆盖路径
+- [x] `/ops` 设置：API key 状态与来源（不回显）、写入 / 清除 `.env`（原子写、chmod 600、立即生效；环境变量优先时提示）、测试连接（PING）、cheap / strong / backend 选择（只写改动的键，可恢复默认）
+- [x] CSRF / Host middleware：Host 白名单；修改类请求的 Origin / Referer 必须同源，两者都没有时放行
+
+**模块**：`config.py`、`web/filters.py`、`sources/homepage.py`、`ops.py`、`llm/`、`web/`
+
+**验收**（临时目录：data、config、.env、LaunchAgents 都不碰真实路径；fake LLM；端口 8765）
+```bash
+uv run pytest -q tests/test_m10.py
+T=$(mktemp -d); mkdir -p "$T/config" "$T/data"; cp config/*.example.* "$T/config/"
+export SB_CONFIG_DIR="$T/config" SB_ENV_FILE="$T/.env" SB_DATA_DIR="$T/data" SB_LLM_BACKEND=fake SB_LAUNCH_AGENTS_DIR="$T/agents"
+uv run sb fetch --source lmsys-sglang-blog --limit 3 && uv run sb run --no-fetch | tail -2
+uv run sb serve --port 8765 &
+sleep 3
+curl -s '127.0.0.1:8765/?form=blog' | grep -o 'class="chip on" href="[^"]*"'
+curl -s '127.0.0.1:8765/?form=blog' | grep -c 'class="entry lane-'           # 博客条目都在
+curl -s '127.0.0.1:8765/?form=paper' | grep -c 'class="entry lane-'          # 0：被筛空
+curl -s '127.0.0.1:8765/history?ctype=explainer' | grep -o 'chip on" href="/history?ctype=explainer"'
+curl -s 127.0.0.1:8765/sources | grep -o '<a href="https://lmsys.org/" target="_blank" rel="noopener noreferrer"\|>进入推荐' | sort | uniq -c
+curl -s -X POST 127.0.0.1:8765/ops/settings/key --data-urlencode 'value=sk-demo-not-real' | grep -o '已设置\|sk-demo'
+stat -f '%Lp' "$T/.env"                                                     # 600
+curl -s 127.0.0.1:8765/ops | grep -o '来源：.env\|sk-demo'
+curl -s -X POST 127.0.0.1:8765/ops/settings/ping | grep -o '连接正常[^<]*'
+curl -s -X POST 127.0.0.1:8765/ops/settings/models -d cheap=deepseek-flash -d strong=deepseek-v4-pro -d backend=deepseek | grep -o '已保存\|SB_LLM_BACKEND 已设置'
+cat "$T/config/settings.yaml"                                               # 只有改动的键
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Origin: http://evil.example' 127.0.0.1:8765/ops/settings/ping     # 403
+curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Origin: http://127.0.0.1:8765' 127.0.0.1:8765/ops/settings/ping  # 200
+curl -s -o /dev/null -w '%{http_code}\n' -X POST 127.0.0.1:8765/ops/settings/ping                                      # 200：无头放行
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example' 127.0.0.1:8765/                                      # 403
+kill %1
+```
+
 ## Backlog（不在本轮）
 
 - [ ] X / Twitter 信源

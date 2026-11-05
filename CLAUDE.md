@@ -36,7 +36,7 @@ data/                运行时数据（gitignore），可用 SB_DATA_DIR 覆盖
 .env                 密钥（gitignore）；模板见 .env.example
 ```
 
-配置读取规则：`config/settings.yaml` 不存在时退回 `config/settings.example.yaml`；环境变量 `SB_LLM_BACKEND` 覆盖 settings 中的 `llm.backend`；`.env` 中的值不覆盖已存在的环境变量。
+配置读取规则：`config/settings.yaml` 存在时深合并覆盖在 `config/settings.example.yaml` 之上（dict 递归，list 与标量直接替换），不存在时只用 example；环境变量 `SB_LLM_BACKEND` 覆盖 settings 中的 `llm.backend`；`.env` 中的值不覆盖已存在的环境变量。`SB_CONFIG_DIR` / `SB_ENV_FILE` 可覆盖配置目录与 .env 路径（验收与测试用）。
 
 ## 开发流程
 

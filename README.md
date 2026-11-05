@@ -14,7 +14,7 @@ cp .env.example .env       # 填写 DEEPSEEK_API_KEY（.env 已 gitignore）
 uv run sb doctor           # 检查环境与配置
 ```
 
-可选：把 `config/*.example.*` 复制为不带 `.example` 的版本（`settings.yaml`、`sources.yaml`、`profile.md`）再按需修改；正式文件不存在时程序使用 example。
+可选：在 `config/settings.yaml` 中只写想改的键，程序会把它深合并覆盖在 `settings.example.yaml` 之上（也可以在 Web `/ops` 的"设置"里改模型与后端）。`sources.yaml` 与 `profile.md` 仍是整份文件，不存在时使用 example。
 
 离线开发 / 测试不需要 API key：
 
@@ -56,6 +56,8 @@ Web 上的其他页面：
 - `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；信源 trust 调整建议。
 - `/sources`：信源列表、试抓后添加、启用 / 停用、删除。修改写入 `config/sources.yaml`，**写回时注释不保留**，字段说明见 `config/sources.example.yaml`。
 - `/wiki`：体检、到期复习、知识图谱（`/wiki/graph`）。
+- 首页与 `/history`：按形式（论文 / 博客 / 视频）和类型（前沿 / 讲解 / 综述 / 教程 / 观点）筛选，只影响显示。
+- `/ops` 的"设置"：查看 API key 是否已设置（不显示值），写入或清除 `.env` 中的 key；测试连接；选择 cheap / strong 模型与后端（只把与 example 不同的键写入 `config/settings.yaml`）。
 - 条目详情页：深度速读（深读卡片上也有按钮）、补前置（可把 AI 讲解"存为概念页"）。
 
 深读条目（全文时间超过预算 × `deep_read_ratio`）按速读时间（`deep_summary_minutes`，默认 15 分钟）占用每日预算，卡片同时显示全文时间（ADR 0015）。
@@ -122,5 +124,6 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M7 反馈语义与 Web 运维：两组文章反馈、`/later`、`/ops`、`/sources`、后台任务与运行锁、`/wiki/graph`
 - [x] M8 深度速读与前置知识：深读按速读时间计入预算、`sb summary`、`sb prereq`、存为概念页
 - [x] M9 手动运行与信源产出率：首页"开始今日过滤"、`sb run --all-time`、`/ops` 运行方式开关、速览 / 归档折叠、低产出信源
+- [x] M10 筛选、信源主页与运维设置：`?form=&ctype=` 筛选、信源主页链接、`/ops` 设置 API key / 模型 / 测试连接、CSRF 与 Host 校验
 
 详见 [docs/progress.md](docs/progress.md)。
