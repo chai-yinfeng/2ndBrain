@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from secondbrain import __version__, config, db, ops
+from secondbrain import __version__, config, db, ops, schedule
 from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, Usage, make_backend
 from secondbrain.llm.usage import full_price, is_peak, record_call, summarize
@@ -38,7 +38,7 @@ from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
-from secondbrain.profile.tune import source_stats
+from secondbrain.profile.tune import source_stats, source_yields
 from secondbrain.sources import FETCHERS
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
 from secondbrain.wiki.graph import build_graph
@@ -161,11 +161,31 @@ def _entry(
     }
 
 
-def _run_task(task: Task) -> dict:
-    report = ops.run_once(task.log)
+def _run_task(task: Task, all_time: bool = False) -> dict:
+    report = ops.run_once(task.log, all_time=all_time)
     if report.aborted:
         raise ops.OpsError(report.aborted)
     return {"cost": report.cost_usd}
+
+
+def _schedule_checks(fs: FilterSettings, at: str) -> list[str]:
+    """该本地时间换算成 UTC 后是否落在 DeepSeek 高峰（冬令时 / 夏令时各一行）。"""
+    try:
+        local = schedule.parse_time(at)
+    except ValueError:
+        return []
+    return [
+        f"{c.label}：本地 {local:%H:%M} = UTC {c.utc:%H:%M}，"
+        + ("高峰时段（全价）" if c.peak else "非高峰（半价）")
+        for c in schedule.utc_checks(local, fs.pricing_schedule)
+    ]
+
+
+def _active_sources() -> int:
+    try:
+        return sum(1 for s in config.load_sources() if s.enabled and not s.needs_scraper)
+    except config.ConfigError:
+        return 0
 
 
 def _ingest_task(task: Task) -> dict:
@@ -214,6 +234,19 @@ class CostHints:
 
     def prereq(self, count: int = 3) -> str:
         return self._fmt(estimate_prereq_cost(max(count, 1), self.fs))
+
+    def run(self, sources: int) -> str:
+        """一次完整运行的上限估计：每个信源最多 fetch_limit 条新条目进 L1（cheap），
+        再选 l1.top_n 条做 L2（strong，按每条约 3 万字符计）。"""
+        fs = self.fs
+        items = sources * fs.run.fetch_limit
+        l1_in = items * (fs.l1.item_chars + 600) + (items // fs.l1.batch_size + 1) * 3000
+        l1_tokens = l1_in // EST_CHARS_PER_TOKEN
+        l1 = Usage(fs.llm.models["cheap"], l1_tokens, 0, l1_tokens, items * 120)
+        tokens = (30_000 + 3000) // EST_CHARS_PER_TOKEN
+        l2 = Usage(fs.llm.models["strong"], tokens, 0, tokens, EST_L2_OUTPUT_TOKENS)
+        peak = full_price(l1, fs.pricing) + fs.l1.top_n * full_price(l2, fs.pricing)
+        return f"最多 {items} 条新条目时{self._fmt(peak)}"
 
 
 PREVIEW_ENTRIES = 10
@@ -278,10 +311,19 @@ def create_app() -> FastAPI:
     tasks = TaskRegistry()
     app.state.tasks = tasks
 
-    def task_fragment(request: Request, kind: str, message: str | None = None) -> HTMLResponse:
-        return templates.TemplateResponse(
-            request, "_task.html", {"kind": kind, "task": tasks.get(kind), "message": message}
+    def task_fragment(
+        request: Request, kind: str, message: str | None = None, refresh: bool = False
+    ) -> HTMLResponse:
+        """refresh：首页的"开始今日过滤"轮询；任务完成时让 HTMX 刷新整页（HX-Refresh）。"""
+        task = tasks.get(kind)
+        response = templates.TemplateResponse(
+            request,
+            "_task.html",
+            {"kind": kind, "task": task, "message": message, "refresh_on_done": refresh},
         )
+        if refresh and task is not None and task.status == "done":
+            response.headers["HX-Refresh"] = "true"
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -294,7 +336,8 @@ def create_app() -> FastAPI:
         profile = _profile()
         wiki = _wiki()
         with _conn() as conn:
-            day = day or db.latest_digest_date(conn)
+            latest = db.latest_digest_date(conn)
+            day = day or latest
             rows = db.digest_rows(conn, day) if day else []
             concept_rows = db.digest_concepts(conn, day) if day else []
             l1 = db.latest_assessments(conn, "L1")
@@ -329,6 +372,10 @@ def create_app() -> FastAPI:
                 "budget": _budget(),
                 "backlog": backlog,
                 "later": later,
+                "ran_today": latest == datetime.now().date().isoformat(),
+                "run_task": tasks.get("run"),
+                "run_locked": ops.is_running(),
+                "active_sources": _active_sources(),
                 "hints": CostHints(_settings()),
                 "tasks": tasks,
                 "to_ingest": to_ingest,
@@ -554,23 +601,32 @@ def create_app() -> FastAPI:
     # ---------- 后台任务 ----------
 
     @app.post("/tasks/{kind}", response_class=HTMLResponse)
-    def task_start(request: Request, kind: str) -> HTMLResponse:
+    async def task_start(request: Request, kind: str) -> HTMLResponse:
         if kind not in TASKS:
             raise HTTPException(404, "未知的任务")
+        form = await request.form()
+        refresh = bool(form.get("refresh"))
         if kind == "run" and ops.is_running():
-            return task_fragment(request, kind, "已有 sb run 在运行（CLI 或定时任务），请稍后再试")
+            message = "已有 sb run 在运行（CLI 或定时任务），请稍后再试"
+            return task_fragment(request, kind, message, refresh)
         title, fn = TASKS[kind]
+        if kind == "run" and form.get("all_time"):
+            title = "立即运行（不限时间窗，只去重）"
+
+            def fn(task: Task) -> dict:
+                return _run_task(task, all_time=True)
+
         try:
             tasks.start(kind, title, fn)
         except TaskRunning as exc:
-            return task_fragment(request, kind, str(exc))
-        return task_fragment(request, kind)
+            return task_fragment(request, kind, str(exc), refresh)
+        return task_fragment(request, kind, refresh=refresh)
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
-    def task_status(request: Request, kind: str) -> HTMLResponse:
+    def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
         if kind not in TASKS and not re.fullmatch(r"summary-\d+", kind):
             raise HTTPException(404, "未知的任务")
-        return task_fragment(request, kind)
+        return task_fragment(request, kind, refresh=bool(refresh))
 
     # ---------- 深度速读与补前置（M8） ----------
 
@@ -650,8 +706,35 @@ def create_app() -> FastAPI:
                 "suggestions": [st for st in stats if st.suggested],
                 "pers": fs.personalize,
                 "sources_error": sources_error,
+                "sched": schedule.status(),
+                "sched_checks": _schedule_checks(fs, schedule.DEFAULT_TIME),
+                "default_time": schedule.DEFAULT_TIME,
             },
         )
+
+    @app.post("/ops/schedule/install", response_class=HTMLResponse)
+    def ops_schedule_install(request: Request, at: str = Form(...)) -> HTMLResponse:
+        """开启每日自动（= sb schedule install）。按钮上已有确认。"""
+        try:
+            local = schedule.parse_time(at)
+        except ValueError as exc:
+            return templates.TemplateResponse(request, "_lines.html", {"lines": [f"✗ {exc}"]})
+        target = schedule.install(local, config.PROJECT_ROOT, config.data_dir() / "logs")
+        lines = [f"✓ 已开启每日自动：每天本地 {local:%H:%M} 运行 sb run（{target}）"]
+        lines += _schedule_checks(_settings(), at)
+        lines.append("刷新页面查看当前模式。")
+        return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
+
+    @app.post("/ops/schedule/uninstall", response_class=HTMLResponse)
+    def ops_schedule_uninstall(request: Request) -> HTMLResponse:
+        """改为手动（= sb schedule uninstall）。有运行在进行时直接拒绝：unload 会终止它。"""
+        if ops.is_running() or (tasks.get("run") and tasks.get("run").running):
+            lines = ["✗ 当前有运行在进行，卸载会终止它；请等运行结束后再改为手动。"]
+        elif schedule.uninstall():
+            lines = ["✓ 已改为手动：每日自动运行已卸载。刷新页面查看当前模式。"]
+        else:
+            lines = ["当前已经是手动模式（没有安装定时任务）。"]
+        return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
 
     @app.post("/ops/tune", response_class=HTMLResponse)
     def ops_tune(request: Request) -> HTMLResponse:
@@ -681,14 +764,18 @@ def create_app() -> FastAPI:
             sources, error = config.load_sources(path), None
         except config.ConfigError as exc:
             sources, error = [], str(exc)
+        pers = _settings().personalize
         with _conn() as conn:
             overview = db.source_overview(conn)
+            yields = source_yields(conn, sources, datetime.now(UTC), pers)
         return templates.TemplateResponse(
             request,
             "sources.html",
             {
                 "sources": sources,
                 "overview": overview,
+                "yields": yields,
+                "pers": pers,
                 "path": path,
                 "is_example": is_example,
                 "error": error,

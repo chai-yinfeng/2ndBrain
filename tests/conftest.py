@@ -47,6 +47,13 @@ class Router:
         return [str(r.url.copy_with(query=None)) for r in self.requests]
 
 
+@pytest.fixture(autouse=True)
+def isolated_launch_agents(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """所有测试都不读写真实的 ~/Library/LaunchAgents（schedule.status 只在 plist 存在时调用
+    launchctl；这里指向空的临时目录，所以不会执行真实的 launchctl）。"""
+    monkeypatch.setenv("SB_LAUNCH_AGENTS_DIR", str(tmp_path_factory.mktemp("LaunchAgents")))
+
+
 @pytest.fixture
 def make_client():
     clients: list[HttpClient] = []

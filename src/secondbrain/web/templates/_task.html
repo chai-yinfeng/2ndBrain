@@ -1,5 +1,5 @@
 {# 后台任务状态片段：运行中每 2 秒轮询 GET /tasks/<kind>，结束后停止轮询。 #}
-<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="/tasks/{{ kind }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="/tasks/{{ kind }}{% if refresh_on_done %}?refresh=1{% endif %}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   {% if message %}<p class="refresh">{{ message }}</p>{% endif %}
   {% if task %}
   <p class="meta" data-task-status="{{ task.status }}">

@@ -147,6 +147,20 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - `/wiki`：体检按钮；
   - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
 
+## 手动运行与信源产出率（M9，见 ADR 0016）
+
+- 运行方式：LaunchAgent 已安装 = 每日自动，否则手动。
+  - `schedule.status / install / uninstall` 由 CLI 与 `/ops` 共用；`SB_LAUNCH_AGENTS_DIR` 可覆盖目录。
+  - 有运行在进行时（run.lock 被占用）拒绝改为手动。
+- 首页按"今天是否已有 digest"决定状态：
+  - 没有：显示"开始今日过滤"（后台任务，完成后 `HX-Refresh`）；
+  - 锁被占用：显示"正在运行"；
+  - 已有：显示"再运行一次"入口。
+- 不限时间窗（`--all-time`）：`ingest.collect` 不截断（仍每源 fetch_limit 条），`run_pipeline(all_time=True)` 让 L0 对新条目 ignore_age。
+- 首页的速览与归档折叠为 `<details>`。
+- 信源产出率：`db.source_yield` 与 `profile/tune.source_yields`，统计窗口 `personalize.yield_window_days`。
+  - 低产出 = 启用、历史覆盖整个窗口、窗口内入库 ≥ `low_yield_min_items`、前排为 0。
+
 ## 深度速读与补前置（M8，见 ADR 0015）
 
 - `pipeline/summary.py`：按需的深度速读。

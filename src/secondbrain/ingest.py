@@ -116,11 +116,15 @@ def collect(
     known: frozenset[str],
     limit: int | None,
     now: datetime,
+    all_time: bool = False,
 ) -> tuple[list[db.NewItem], int, list[str]]:
     """抓取单个信源，返回 (待入库的新条目, 已知重复数, 问题说明)。只做网络与解析，不写库。
 
-    backfill: true 的信源：时间窗之外的历史条目也入库，标记 is_backfill（进入回补池）。"""
-    cutoff = now - timedelta(days=source.max_age_days)
+    backfill: true 的信源：时间窗之外的历史条目也入库，标记 is_backfill（进入回补池）。
+    all_time（ADR 0016）：不按 max_age_days 截断，都当作常规条目，仍按 limit 取最新 N 条。"""
+    cutoff = (
+        datetime.min.replace(tzinfo=UTC) if all_time else now - timedelta(days=source.max_age_days)
+    )
     fetched = FETCHERS[source.type](source, client, fs)
     fetched.sort(key=lambda e: e.published_at or now, reverse=True)
     # 发布时间未知的条目：普通信源当作近期条目；backfill 信源放进回补候选（再按正文长度把关）
@@ -188,6 +192,7 @@ def fetch_sources(
     limit: int | None = None,
     now: datetime | None = None,
     on_result: Callable[[SourceResult], None] | None = None,
+    all_time: bool = False,
 ) -> list[SourceResult]:
     """抓取所有信源。单个信源失败只记录在其结果中，不影响其他信源。"""
     now = now or datetime.now(UTC)
@@ -196,7 +201,7 @@ def fetch_sources(
     results: list[SourceResult] = []
     with ThreadPoolExecutor(max_workers=fs.concurrency) as pool:
         futures = {
-            s.id: pool.submit(collect, s, client, fs, known, limit, now)
+            s.id: pool.submit(collect, s, client, fs, known, limit, now, all_time)
             for s in sources
             if skip_reason(s) is None
         }

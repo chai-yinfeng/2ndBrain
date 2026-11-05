@@ -415,3 +415,37 @@
 - AI 讲解未经人工核对。
 - 深度速读按全文输入，费用高于 L2，但都是按需触发。
 - 补前置在 Web 中是同步请求（一次调用，约半分钟）。
+
+## M9 — 手动运行与信源产出率（2026-11-05，分支 `m9-manual-run`）
+
+**做了什么**（ADR 0016）
+- 运行方式开关：
+  - `/ops` 显示当前模式（每天 HH:MM 自动 / 手动）以及 LaunchAgent 是否已加载；
+  - "改为手动 / 开启每日自动"按钮需要确认，并提示所选时间是否落在高峰；有运行在进行时拒绝改为手动；
+  - `schedule.status / install / uninstall` 由 CLI 与 Web 共用；
+  - 测试通过 `SB_LAUNCH_AGENTS_DIR`（conftest 中 autouse）指向临时目录，不碰真实的 LaunchAgents 与 launchctl。
+- 首页"开始今日过滤"：
+  - 今天还没有 digest 时显示按钮、耗时与费用区间，可勾选不限时间窗；
+  - 点击后在后台运行并轮询，完成后整页刷新；
+  - 锁被占用时显示"正在运行"；今天已运行过时只留"再运行一次"。
+- 不限时间窗：`sb run --all-time` 与 Web 勾选项。collect 不截断（每源仍取 fetch_limit 条），L0 对新条目 ignore_age。
+- 速览与归档折叠为 `<details>`，折叠区域内有反馈按钮。
+- 信源产出率：
+  - `/sources` 显示近 30 天的入库、精读、前排、正 / 负；
+  - 满足条件的信源标记"低产出，建议停用"，并给出停用按钮；
+  - `sb sources tune` 只读列出低产出信源。
+- 测试：新增 `tests/test_manual_run.py`（9 个）；conftest 新增 autouse fixture，隔离 LaunchAgents 目录。没有修改旧测试。
+
+**验收结果**
+- `uv run pytest -q`：279 passed；`uv run ruff check .`、`uv run ruff format --check .`：通过。
+- roadmap M9 的验收命令已在 `mktemp -d` 临时目录中全部实际运行（fake LLM，端口 8765，临时 LaunchAgents 目录）。
+- 默认数据副本对比（`sqlite3 .backup`，fake 后端，`sb run --no-fetch`）：
+  - **按副本原样**：带与不带 `--all-time` 的结果相同，都是 L0 检查 0 条、顺延 2 条、今日已排 105 / 105。原因是副本里没有待处理的常规新条目（57 条 new 都在回补池），`--all-time` 只影响本次的新条目。
+  - **把 30 条曾因"超出时间窗"被 L0 排除的条目重置为 new 后再对比**：
+    - 不带 `--all-time`：L0 排除 30 条（超出时间窗 30），L1 送入 0 条；
+    - 带 `--all-time`：L0 排除 0 条，L1 送入 30 条，L2 选中 15 条，分级为顺延 3、速览 29。当天预算在副本里已经用满，所以新条目都进了速览。
+
+**遗留问题**
+- 不限时间窗的首次运行：L1 在高峰时段约 $0.5，可能触发 `run.max_cost_usd` 而跳过 L2（详见 ADR 0016），建议非高峰运行或临时调高上限。
+- "今天是否已运行"以 digest 为准，没有产出的运行不算。
+- 只有使用 run.lock 的代码（M7 起）发起的运行才能被检测到。

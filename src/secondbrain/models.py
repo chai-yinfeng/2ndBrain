@@ -200,6 +200,10 @@ class PersonalizeSettings(BaseModel):
     tune_min_samples: int = Field(default=5, ge=1)  # 信源有反馈的条目数少于该值不给建议
     tune_raise_ratio: float = Field(default=0.7, ge=0, le=1)  # 正向比例 ≥ 该值建议 trust +1
     tune_lower_ratio: float = Field(default=0.3, ge=0, le=1)  # 正向比例 ≤ 该值建议 trust −1
+    # 信源产出率（ADR 0016）：近 yield_window_days 天入库 ≥ low_yield_min_items 条、
+    # 但没有一条进入前排 lane 的信源标记为"低产出，建议停用"
+    yield_window_days: int = Field(default=30, ge=1)
+    low_yield_min_items: int = Field(default=5, ge=1)
     # 近期"太难"条目的前置知识注入 L1 user 消息的长度上限（0 关闭；ADR 0013）
     too_hard_prereq_max_chars: int = Field(default=600, ge=0)
 

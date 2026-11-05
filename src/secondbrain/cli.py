@@ -245,6 +245,9 @@ def _load_pipeline_settings():
 def run(
     limit: int | None = typer.Option(None, "--limit", min=1, help="进入 L1 的候选条目上限"),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="跳过抓取，只处理库中已有条目"),
+    all_time: bool = typer.Option(
+        False, "--all-time", help="不限时间窗，只去重（每个信源仍只取最新 fetch_limit 条）"
+    ),
 ) -> None:
     """抓取 → L0 规则 → L1 粗筛 → L2 精读 → 分级，写入当天 digest。
 
@@ -252,7 +255,7 @@ def run(
     from secondbrain import ops
 
     try:
-        report = ops.run_once(typer.echo, limit=limit, no_fetch=no_fetch)
+        report = ops.run_once(typer.echo, limit=limit, no_fetch=no_fetch, all_time=all_time)
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -429,10 +432,7 @@ def schedule_install(
         typer.echo(plist.decode())
         typer.echo(f"[dry-run] 将执行：{' '.join(command)}")
         return
-    log_dir.mkdir(parents=True, exist_ok=True)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(plist)
-    subprocess.run(command, check=True)
+    schedule.install(local, config.PROJECT_ROOT, log_dir, runner=subprocess.run)
     typer.echo(f"{OK} 已安装 {target}")
 
 
@@ -448,11 +448,9 @@ def schedule_uninstall(
         typer.echo(f"[dry-run] 将执行：{' '.join(command)}")
         typer.echo(f"[dry-run] 将删除：{target}（当前{exists}）")
         return
-    if not target.exists():
+    if not schedule.uninstall(runner=subprocess.run):
         typer.echo(f"{WARN} 未安装：{target} 不存在")
         return
-    subprocess.run(command, check=False)
-    target.unlink()
     typer.echo(f"{OK} 已卸载 {target}")
 
 
@@ -532,7 +530,7 @@ def sources_tune(
     apply: bool = typer.Option(False, "--apply", help="把建议写入 config/sources.yaml"),
 ) -> None:
     """按信源的 有收获 / 不感兴趣 / 没价值 比例给出 trust 调整建议（±1，限 1–5）。"""
-    from secondbrain.profile.tune import source_stats
+    from secondbrain.profile.tune import source_stats, source_yields
 
     _, fs, _ = _load_pipeline_settings()
     sources = _load_sources_or_exit()
@@ -540,6 +538,7 @@ def sources_tune(
     conn = db.connect()
     try:
         stats = source_stats(conn, sources, datetime.now(UTC), pers)
+        yields = source_yields(conn, sources, datetime.now(UTC), pers)
     finally:
         conn.close()
     typer.echo(
@@ -557,6 +556,16 @@ def sources_tune(
     silent = len(stats) - len(shown)
     if silent:
         typer.echo(f"另有 {silent} 个信源没有反馈：样本不足，不给建议")
+    low = [y for y in yields.values() if y.low_yield]
+    typer.echo(
+        f"\n低产出信源（近 {pers.yield_window_days} 天入库 ≥ {pers.low_yield_min_items} 条、"
+        f"进入前排 0 条）：{len(low)} 个"
+    )
+    for y in low:
+        typer.echo(
+            f"{WARN} {y.source_id}：入库 {y.items}，精读 {y.l2}，前排 0 —— 建议停用"
+            "（在 Web /sources 一键停用，或改 config/sources.yaml）"
+        )
     changes = {st.source_id: st.suggested for st in stats if st.suggested}
     if not changes:
         typer.echo("没有 trust 调整建议")

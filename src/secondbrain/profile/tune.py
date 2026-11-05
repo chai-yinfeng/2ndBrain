@@ -97,3 +97,39 @@ def apply_trust_changes(yaml_text: str, changes: dict[str, int]) -> tuple[str, l
             lines[i] = f"{t.group(1)}{changes[current]}{t.group(3)}{ending}"
             done.add(current)
     return "".join(lines), sorted(set(changes) - done)
+
+
+# ---------- 低产出信源（ADR 0016） ----------
+
+
+@dataclass
+class SourceYield:
+    source_id: str
+    items: int = 0
+    l2: int = 0
+    front: int = 0
+    positive: int = 0
+    negative: int = 0
+    low_yield: bool = False
+
+
+def source_yields(
+    conn: sqlite3.Connection, sources: list[SourceConfig], now: datetime, s: PersonalizeSettings
+) -> dict[str, SourceYield]:
+    """近 yield_window_days 天的产出。低产出 = 已覆盖整个窗口（最早入库早于窗口起点，
+    新加入的不算）、窗口内入库 ≥ low_yield_min_items、进入前排为 0、且仍启用。"""
+    since = now - timedelta(days=s.yield_window_days)
+    raw = db.source_yield(conn, since)
+    result = {}
+    for src in sources:
+        r = raw.get(src.id)
+        y = SourceYield(src.id)
+        if r is not None:
+            y.items, y.l2, y.front = r["items"], r["l2"], r["front"]
+            y.positive, y.negative = r["positive"], r["negative"]
+            covered = r["first_fetched"] is not None and r["first_fetched"] <= db.format_time(since)
+            y.low_yield = (
+                src.enabled and covered and y.items >= s.low_yield_min_items and y.front == 0
+            )
+        result[src.id] = y
+    return result

@@ -98,8 +98,11 @@ def _backend(settings, fs):
         raise OpsError(str(exc)) from exc
 
 
-def run_once(echo: Echo, *, limit: int | None = None, no_fetch: bool = False) -> RunReport:
-    """抓取 → L0 → L1 → L2 → 分级，写入当天 digest。持有 run 锁期间执行。"""
+def run_once(
+    echo: Echo, *, limit: int | None = None, no_fetch: bool = False, all_time: bool = False
+) -> RunReport:
+    """抓取 → L0 → L1 → L2 → 分级，写入当天 digest。持有 run 锁期间执行。
+    all_time：抓取不按 max_age_days 截断、L0 不排除超出时间窗的新条目（ADR 0016）。"""
     config.load_env()
     settings, fs, fetch_fs = _settings()
     backend_name, backend = _backend(settings, fs)
@@ -111,6 +114,8 @@ def run_once(echo: Echo, *, limit: int | None = None, no_fetch: bool = False) ->
         for warning in profile.warnings:
             echo(f"{WARN} profile：{warning}")
         echo(f"LLM 后端：{backend_name}；profile 解析到 {len(profile.domains)} 个领域")
+        if all_time:
+            echo("不限时间窗：只去重，信源与 L0 都不按时间窗排除")
 
         conn = db.connect()
         try:
@@ -121,7 +126,7 @@ def run_once(echo: Echo, *, limit: int | None = None, no_fetch: bool = False) ->
                     raise OpsError(str(exc)) from exc
                 with HttpClient(fetch_fs) as client:
                     results = ingest.fetch_sources(
-                        conn, sources, client, fetch_fs, limit=fs.run.fetch_limit
+                        conn, sources, client, fetch_fs, limit=fs.run.fetch_limit, all_time=all_time
                     )
                 added = sum(r.added for r in results)
                 failed = [r for r in results if r.status == "failed"]
@@ -139,6 +144,7 @@ def run_once(echo: Echo, *, limit: int | None = None, no_fetch: bool = False) ->
                 today=datetime.now().date(),
                 clock=lambda: datetime.now(UTC),
                 wiki=open_wiki(config.wiki_dir(), config.raw_dir()),
+                all_time=all_time,
             )
         finally:
             conn.close()

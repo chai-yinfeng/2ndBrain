@@ -32,7 +32,7 @@ uv run sb serve                 # 本地 Web UI：http://127.0.0.1:8000/
 uv run sb usage --since 7d      # token 与费用
 uv run sb profile update        # 根据反馈生成 profile 修改提案，只打印 diff
 uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
-uv run sb sources tune          # 按反馈给出信源 trust 调整建议（--apply 写入 config/sources.yaml）
+uv run sb sources tune          # 按反馈给出信源 trust 调整建议（--apply 写入 config/sources.yaml），并列出低产出信源
 uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
 uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
 uv run sb prereq <item_id>      # 补前置：wiki 已有的给链接，没有的生成简短讲解（AI 生成）
@@ -70,6 +70,21 @@ Web 上的其他页面：
 
 在 Obsidian 的图谱视图里，可以在过滤框输入 `-path:raw` 隐藏原文节点，只看知识页面。
 
+### 手动运行与每日自动（ADR 0016）
+
+默认推荐**手动**：`uv run sb serve` 后打开首页，点顶部的「开始今日过滤」。
+
+- 按钮旁写着大致耗时与费用；
+- 勾选"不限时间窗（只去重）"时，抓取不按 max_age_days 截断，每个信源仍取最新 fetch_limit 条；终端里对应 `sb run --all-time`；
+- 今天已运行过时，首页只留"再运行一次"入口（在 `/ops`）。
+
+在两种方式之间切换：
+
+- **Web**：打开 `/ops` 的"运行方式"，点"开启每日自动"（可以填时间，并提示是否落在 DeepSeek 高峰）或"改为手动"。有运行在进行时不允许改为手动，因为卸载会终止它。
+- **终端**：`uv run sb schedule install --time 07:00`（每日自动）或 `uv run sb schedule uninstall`（手动），细节见下一节。
+
+是否已安装定时任务就是开关本身，没有额外的配置项。
+
 ### 定时运行（macOS launchd）
 
 ```bash
@@ -106,5 +121,6 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M6 知识 Wiki 闭环：`sb wiki ingest / lint / due / review`、`/wiki`、到期概念进温故栏、L1 已知知识
 - [x] M7 反馈语义与 Web 运维：两组文章反馈、`/later`、`/ops`、`/sources`、后台任务与运行锁、`/wiki/graph`
 - [x] M8 深度速读与前置知识：深读按速读时间计入预算、`sb summary`、`sb prereq`、存为概念页
+- [x] M9 手动运行与信源产出率：首页"开始今日过滤"、`sb run --all-time`、`/ops` 运行方式开关、速览 / 归档折叠、低产出信源
 
 详见 [docs/progress.md](docs/progress.md)。
