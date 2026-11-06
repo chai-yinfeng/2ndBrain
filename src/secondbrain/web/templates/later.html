@@ -6,7 +6,7 @@
 {% for r in rows %}
 <article class="entry" data-item-id="{{ r.id }}">
   <h3><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a></h3>
-  <p class="meta">{{ r.source_id }} · 标记于 {{ r.state_ts }} · <a href="/item/{{ r.id }}">详情</a></p>
+  <p class="meta">{{ r.source_id }} · 标记于 {{ r.state_ts }} · <a href="/item/{{ r.id }}">详情</a>{% if r.id in incomplete %} <a class="tag warn" data-incomplete href="/item/{{ r.id }}#complete">正文不完整</a>{% endif %}</p>
   {% with item_id=r.id, state="later", with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
 </article>
 {% else %}

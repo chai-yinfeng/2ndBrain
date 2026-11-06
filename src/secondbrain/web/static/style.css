@@ -128,3 +128,4 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 /* 选"准备读"时把"已读时"一组调淡（纯 CSS，不支持 :has 的浏览器照常可用） */
 .add-form:has(input[name="state"][value="later"]:checked) .when-read { opacity: 0.55; }
 .add-results td.url { word-break: break-all; font-size: 12px; }
+.tag.warn { background: var(--warn); color: #fff; }

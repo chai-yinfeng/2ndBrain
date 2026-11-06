@@ -719,7 +719,7 @@ class ManualFetchError(Exception):
 
 @dataclass
 class ManualFetched:
-    entry: object  # RawEntry
+    entry: object  # RawEntry（entry.doi / entry.arxiv_id 带论文标识）
     content: str
     method: str
     canonical: str
@@ -748,6 +748,14 @@ def manual_canonical(url: str) -> str:
     return f"https://doi.org/{doi}" if doi else canonicalize_url(url)
 
 
+def _url_ids(url: str) -> tuple[str | None, str | None]:
+    """URL 本身带的 (doi, arxiv_id)。"""
+    from secondbrain.sources.semantic_scholar import doi_in_url
+
+    m = _ARXIV_URL.search(url)
+    return (None, m.group(1)) if m else (doi_in_url(url), None)
+
+
 def _fetch_reason(exc: Exception) -> str:
     text = str(exc)
     if "HTTP 403" in text or "HTTP 401" in text:
@@ -761,13 +769,30 @@ def _fetch_reason(exc: Exception) -> str:
     return f"抓取失败：{text}"
 
 
+def _pdf_text(client, url: str, fs) -> str:
+    """下载并提取 PDF 文本；失败（含 403）时返回空串。"""
+    from secondbrain.extract.pdf import extract_pdf_text
+    from secondbrain.net import FetchError
+
+    try:
+        resp = client.get(url, max_bytes=fs.pdf_max_bytes)
+        return extract_pdf_text(resp.content, fs.pdf_max_pages)
+    except (FetchError, Exception):  # pypdf 对损坏文件的各种异常也一并按失败处理
+        return ""
+
+
 def _fetch_page(url: str, client, fs):
-    """网页（或直链 PDF）：正文提取 + 页面元数据。失败时抛 ManualFetchError（具体原因）。"""
-    from secondbrain.extract.html import extract_main_text
+    """网页（或直链 PDF）：正文提取 + 页面元数据。页面有 citation_pdf_url 时优先用该 PDF 的
+    全文（取不到再用网页正文），citation_* meta 补充标题 / 作者 / 日期 / DOI。
+    失败时抛 ManualFetchError（具体原因）。"""
+    from urllib.parse import urljoin
+
+    from secondbrain.extract.html import citation_meta, extract_main_text
     from secondbrain.extract.pdf import extract_pdf_text
     from secondbrain.models import RawEntry
     from secondbrain.net import FetchError
     from secondbrain.sources import sitemap
+    from secondbrain.sources.base import parse_iso_datetime
 
     try:
         resp = client.get(url, max_bytes=fs.pdf_max_bytes)
@@ -785,6 +810,19 @@ def _fetch_page(url: str, client, fs):
             raise ManualFetchError("被拦截：站点返回了机器人验证页（如 Cloudflare）")
         text, method = extract_main_text(html, url=str(resp.url)) or "", "html"
         sitemap.apply_page_meta(entry, html, str(resp.url))
+        meta = citation_meta(html)
+        if meta.get("title"):
+            entry.title = " ".join(meta["title"].split())
+        if meta.get("authors"):
+            entry.author = ", ".join(meta["authors"])
+        if meta.get("date"):
+            date = parse_iso_datetime(meta["date"].replace("/", "-"))
+            entry.published_at = date or entry.published_at
+        entry.doi, entry.arxiv_id = meta.get("doi"), meta.get("arxiv_id")
+        if meta.get("pdf_url"):
+            pdf = _pdf_text(client, urljoin(str(resp.url), meta["pdf_url"]), fs)
+            if len(pdf) > len(text):  # 论文全文通常远长于摘要页
+                text, method = pdf, "pdf"
     if len(text.strip()) < MIN_ARTICLE_CHARS:
         raise ManualFetchError(f"不是文章页：提取到的正文太短（{len(text.strip())} 字符）")
     return entry, text, method
@@ -800,7 +838,7 @@ def _fetch_arxiv(arxiv_id: str, client, fs, fallback_title: str):
     try:
         resp = client.get(arxiv.API_URL, params={"id_list": arxiv_id})
         found = arxiv.parse_api_response(resp.content)
-        entry = found[0] if found else None
+        entry = next((e for e in found if e.arxiv_id == arxiv_id), None)
     except FetchError:
         entry = None
     entry = entry or RawEntry(url=arxiv.abs_url(arxiv_id), title=fallback_title, arxiv_id=arxiv_id)
@@ -811,85 +849,118 @@ def _fetch_arxiv(arxiv_id: str, client, fs, fallback_title: str):
 
 
 def _fetch_doi(doi: str, url: str, client, fs) -> ManualFetched:
-    """DOI：查 Semantic Scholar。有 arXiv id 走 arXiv；有开放获取 PDF 用 PDF；
+    """DOI：先查 Semantic Scholar，失败（含 429）或没有摘要时再查 Crossref。
+    有 arXiv id 走 arXiv；有开放获取 PDF（S2 或 Crossref 的 PDF 链接）用 PDF；
     否则只用标题 + 摘要（abstract_only）。"""
-    from secondbrain.extract.pdf import extract_pdf_text
     from secondbrain.models import RawEntry
     from secondbrain.net import FetchError
+    from secondbrain.sources import crossref
     from secondbrain.sources.arxiv import abs_url
     from secondbrain.sources.semantic_scholar import lookup_doi
     from secondbrain.urls import canonicalize_url
 
+    reasons = []
+    s2 = cr = None
     try:
-        meta = lookup_doi(client, doi)
+        s2 = lookup_doi(client, doi)
     except FetchError as exc:
-        raise ManualFetchError(str(exc)) from exc
+        reasons.append(str(exc))
+    if s2 is None or not s2.get("abstract"):
+        try:
+            cr = crossref.lookup_doi(client, doi)
+        except FetchError as exc:
+            reasons.append(str(exc))
+    if s2 is None and cr is None:
+        raise ManualFetchError("；".join(reasons))
     canonical = f"https://doi.org/{doi}"
-    authors = ", ".join(a.get("name", "") for a in meta.get("authors") or [] if a.get("name"))
-    year = meta.get("year")
-    published = datetime(int(year), 1, 1, tzinfo=UTC) if year else None
-    arxiv_id = (meta.get("externalIds") or {}).get("ArXiv")
+    arxiv_id = ((s2 or {}).get("externalIds") or {}).get("ArXiv")
     if arxiv_id:
-        entry, content, method = _fetch_arxiv(arxiv_id, client, fs, meta["title"])
+        entry, content, method = _fetch_arxiv(arxiv_id, client, fs, s2["title"])
+        entry.doi = entry.doi or doi
         return ManualFetched(entry, content, method, canonicalize_url(abs_url(arxiv_id)))
+    if s2:
+        authors = ", ".join(a.get("name", "") for a in s2.get("authors") or [] if a.get("name"))
+        year = s2.get("year")
+        published = datetime(int(year), 1, 1, tzinfo=UTC) if year else None
+        title = s2["title"]
+    else:
+        authors, published, title = "", None, cr["title"]
+    if cr:
+        authors = authors or ", ".join(cr["authors"])
+        published = cr["published"] or published
+    abstract = (s2 or {}).get("abstract") or (cr or {}).get("abstract") or ""
     entry = RawEntry(
         url=url,
-        title=meta["title"],
+        title=title,
         author=authors or None,
-        summary=meta.get("abstract"),
+        summary=abstract or None,
         published_at=published,
+        doi=doi,
     )
-    pdf_url = (meta.get("openAccessPdf") or {}).get("url")
-    if pdf_url:
-        try:
-            resp = client.get(pdf_url, max_bytes=fs.pdf_max_bytes)
-            text = extract_pdf_text(resp.content, fs.pdf_max_pages)
-        except (FetchError, Exception):  # 开放获取 PDF 取不到时退回摘要
-            text = ""
+    pdf_urls = [((s2 or {}).get("openAccessPdf") or {}).get("url"), *(cr or {}).get("pdf_urls", [])]
+    for pdf_url in [u for u in pdf_urls if u]:
+        text = _pdf_text(client, pdf_url, fs)
         if text:
             return ManualFetched(entry, text, "pdf", canonical)
-    content = meta["title"] + ("\n\n" + meta["abstract"] if meta.get("abstract") else "")
-    note = "仅摘要" if meta.get("abstract") else "仅标题，S2 没有摘要"
+    content = title + ("\n\n" + abstract if abstract else "")
+    note = "仅摘要" if abstract else "仅标题，S2 / Crossref 都没有摘要"
     return ManualFetched(entry, content, "abstract_only", canonical, note=note)
 
 
 def _fetch_manual(
     url: str, client, fs, fallback: str | None = None, fallback_method: str = "manual_text"
 ) -> ManualFetched:
-    """抓取单个 URL（ADR 0018 / 0019）：arXiv → API 元数据 + arxiv_html / pdf；含 DOI →
-    Semantic Scholar（失败时再试页面本身）；其他 → 网页正文提取。拿不到正文或只有摘要时，
-    用粘贴的正文 / 上传的 PDF（fallback）。都失败时抛 ManualFetchError（具体原因 + 兜底提示）。"""
+    """抓取单个 URL（ADR 0018 / 0019 / 0020）：arXiv → API 元数据 + arxiv_html / pdf；含 DOI →
+    Semantic Scholar / Crossref（都失败时再试页面本身）；其他 → 网页正文（含 citation_pdf_url）。
+    拿不到正文或只有摘要时，用粘贴的正文 / 上传的 PDF（fallback）。
+    都失败时抛 ManualFetchError（具体原因 + 兜底提示）。"""
     from secondbrain.models import RawEntry
-    from secondbrain.sources.semantic_scholar import doi_in_url
 
     canonical = manual_canonical(url)
-    m = _ARXIV_URL.search(url)
-    doi = None if m else doi_in_url(url)
+    doi, arxiv_id = _url_ids(url)
     result, reasons = None, []
     try:
-        if m:
-            entry, content, method = _fetch_arxiv(m.group(1), client, fs, url)
+        if arxiv_id:
+            entry, content, method = _fetch_arxiv(arxiv_id, client, fs, url)
             result = ManualFetched(entry, content, method, canonical)
         elif doi:
             result = _fetch_doi(doi, url, client, fs)
     except ManualFetchError as exc:
         reasons.append(str(exc))
-    if result is None and not m:
+    if result is None and not arxiv_id:
         try:
+            # 页面自带的 citation_doi 只用于跨标识去重；规范 URL 仍按链接本身
             entry, content, method = _fetch_page(url, client, fs)
             result = ManualFetched(entry, content, method, canonical)
         except ManualFetchError as exc:
             reasons.append(("页面：" if doi else "") + str(exc))
     if fallback and (result is None or result.method == "abstract_only"):
-        entry = result.entry if result else RawEntry(url=url, title=url)
+        entry = result.entry if result else RawEntry(url=url, title=url, doi=doi)
         if entry.title == url:
             first = next((ln.strip() for ln in fallback.splitlines() if ln.strip()), url)
             entry.title = first[:120]
         result = ManualFetched(entry, fallback.strip(), fallback_method, canonical)
     if result is None:
         raise ManualFetchError("；".join(reasons) + f"。{FALLBACK_HINT}")
+    result.entry.doi = (result.entry.doi or doi or "").lower() or None
+    result.entry.arxiv_id = result.entry.arxiv_id or arxiv_id
     result.content = result.content[: fs.content_max_chars]
     return result
+
+
+def _existing(conn, canonical: str, doi: str | None, arxiv_id: str | None) -> int | None:
+    """跨标识查重：规范 URL → DOI → arXiv id，任一命中即视为已存在。"""
+    return (
+        db.item_by_canonical(conn, canonical)
+        or (db.item_by_doi(conn, doi) if doi else None)
+        or (db.item_by_arxiv(conn, arxiv_id) if arxiv_id else None)
+    )
+
+
+def _more_complete(conn, item_id: int, content: str) -> bool:
+    """新正文是否比已有的更完整：已有的只有摘要，或不到新正文的一半。"""
+    row = db.item_detail(conn, item_id)
+    return row["extract_method"] == "abstract_only" or (row["content_len"] or 0) * 2 < len(content)
 
 
 def add_manual(
@@ -904,11 +975,13 @@ def add_manual(
     client=None,
 ) -> dict:
     """手动添加文章（逐个处理，单个失败不影响其他）：归到虚拟信源 manual、状态 manual，
-    不进 L1 / L2 / 分级 / 预算。已存在（规范化 URL 或正文哈希相同）的只更新状态与反馈。
+    不进 L1 / L2 / 分级 / 预算。按规范 URL / DOI / arXiv id 查重，已存在的只更新状态与反馈；
+    新拿到的正文更完整时补全正文（"已存在（补全正文）"）。规范化标题相同的手动条目只提示。
     准备读 = later 反馈；已读 = 所选读后反馈，未选时只设置 read_at（已读、无评价）。"""
     from secondbrain.urls import content_hash
 
     urls = validate_manual(urls, state, feedback, ingest, text, pdf)
+    config.load_env()  # S2_API_KEY 可写在 .env 中
     _, fs, fetch_fs = _settings()
     fallback, fallback_method = (text, "manual_text") if text else (None, "manual_text")
     if pdf:
@@ -921,19 +994,15 @@ def add_manual(
         db.ensure_manual_source(conn)
         for url in urls:
             canonical = manual_canonical(url)
-            item_id = db.item_by_canonical(conn, canonical)
+            item_id = _existing(conn, canonical, *_url_ids(url))
             result = AddResult(url, "已存在", item_id)
-            if (
-                item_id is not None
-                and fallback
-                and db.item_detail(conn, item_id)["extract_method"] == "abstract_only"
-            ):
-                # 之前只导入了摘要：用这次上传的 PDF / 粘贴的正文补全正文
+            if item_id is not None and fallback and _more_complete(conn, item_id, fallback):
+                # 之前正文不完整：用这次上传的 PDF / 粘贴的正文补全
                 db.replace_content(
                     conn, item_id, fallback[: fetch_fs.content_max_chars], fallback_method
                 )
                 conn.commit()
-                result.message = "已用上传的 PDF / 粘贴的正文补全正文"
+                result.status = "已存在（补全正文）"
             if item_id is None:
                 try:
                     fetched = _fetch_manual(url, client, fetch_fs, fallback, fallback_method)
@@ -948,8 +1017,14 @@ def add_manual(
                     continue
                 entry, content, method = fetched.entry, fetched.content, fetched.method
                 canonical = fetched.canonical  # DOI 解析到 arXiv 时用 arXiv 的规范 URL
-                item_id = result.item_id = db.item_by_canonical(conn, canonical)
-                if item_id is None:
+                item_id = _existing(conn, canonical, entry.doi, entry.arxiv_id)
+                if item_id is not None:
+                    if _more_complete(conn, item_id, content):
+                        db.replace_content(conn, item_id, content, method)
+                        result.status = "已存在（补全正文）"
+                    db.fill_ids(conn, item_id, entry.doi, entry.arxiv_id)
+                    conn.commit()
+                else:
                     digest = content_hash(entry.title, content)
                     new = db.NewItem(
                         source_id=db.MANUAL_SOURCE,
@@ -962,18 +1037,23 @@ def add_manual(
                         content=content,
                         extract_method=method,
                         published_at=entry.published_at,
+                        doi=entry.doi,
+                        arxiv_id=entry.arxiv_id,
                     )
                     if db.insert_item(conn, new, datetime.now(UTC)):
                         item_id = db.item_by_canonical(conn, canonical)
                         db.set_status(conn, [item_id], "manual")
                         result.status = f"新增（{fetched.note}）" if fetched.note else "新增"
+                        twin = db.same_title_manual(conn, entry.title, item_id)
+                        if twin:
+                            result.message = f"可能重复：#{twin}（标题相同，未自动合并）"
                     else:  # 正文与已有条目相同
                         item_id = db.item_by_hash(conn, digest) or db.item_by_canonical(
                             conn, canonical
                         )
                         result.message = "正文与已有条目相同"
-                    result.item_id = item_id
                     conn.commit()
+                result.item_id = item_id
             now = datetime.now(UTC)
             if state == "later":
                 db.add_feedback(conn, item_id, "later", None, now)
@@ -985,7 +1065,8 @@ def add_manual(
                 "SELECT title FROM items WHERE id = ?", (item_id,)
             ).fetchone()[0]
             results.append(result)
-            echo(f"✓ {url}：{result.status} #{item_id} {result.title}")
+            extra = f"（{result.message}）" if result.message else ""
+            echo(f"✓ {url}：{result.status} #{item_id} {result.title}{extra}")
     finally:
         conn.close()
         if own_client:
@@ -1005,3 +1086,24 @@ def add_manual(
         "results": [r.__dict__ for r in results],
         "ingest": summary.__dict__ if summary else None,
     }
+
+
+def complete_item(item_id: int, *, text: str | None = None, pdf: bytes | None = None) -> str:
+    """补全"正文不完整"的条目：用粘贴的正文或上传的 PDF 替换正文（与 /add 的兜底同一套校验）。
+    返回新的 extract_method。"""
+    if bool(text and text.strip()) == bool(pdf):
+        raise OpsError("请粘贴正文或上传 PDF（二选一）")
+    _, _, fetch_fs = _settings()
+    if pdf:
+        content, method = pdf_upload_text(pdf, fetch_fs.pdf_max_pages), "manual_pdf"
+    else:
+        content, method = text.strip(), "manual_text"
+    conn = db.connect()
+    try:
+        if not db.item_exists(conn, item_id):
+            raise OpsError(f"条目不存在：{item_id}")
+        db.replace_content(conn, item_id, content[: fetch_fs.content_max_chars], method)
+        conn.commit()
+    finally:
+        conn.close()
+    return method

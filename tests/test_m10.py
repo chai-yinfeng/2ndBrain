@@ -193,7 +193,7 @@ def test_feed_homepage_is_detected_and_linked(env, make_client):
     feed = "https://blog.example.com/feed.xml"
     client, _ = make_client({feed: httpx.Response(200, content=fixture_bytes("rss.xml"))})
     conn = db.connect()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)  # ≥ v8
     fetch_sources(
         conn, [SourceConfig(id="vllm-blog", type="rss", url=feed)], client, client.settings, now=NOW
     )

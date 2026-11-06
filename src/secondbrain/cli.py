@@ -202,6 +202,31 @@ def parse_since(value: str) -> timedelta:
     return timedelta(**{_SINCE_UNITS[m.group(2)]: int(m.group(1))})
 
 
+@items_app.command("incomplete")
+def items_incomplete() -> None:
+    """列出"正文不完整"的条目：只有摘要，或手动添加的论文类正文短于 1500 字符（ADR 0020）。"""
+    conn = db.connect()
+    try:
+        rows = db.incomplete_items(conn)
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo("没有正文不完整的条目")
+        return
+    for r in rows:
+        ids = [
+            f"doi:{r['doi']}" if r["doi"] else "",
+            f"arXiv:{r['arxiv_id']}" if r["arxiv_id"] else "",
+        ]
+        tail = "  " + " ".join(x for x in ids if x) if any(ids) else ""
+        kind = f"{r['extract_method']} · {r['content_len']} 字符"
+        typer.echo(f"#{r['id']}  {_truncate(r['title'], 60)}  [{kind}]{tail}")
+    typer.echo(
+        f"\n共 {len(rows)} 条；补全：sb add <url> --pdf FILE / --text-file FILE，"
+        "或在条目详情页粘贴正文 / 上传 PDF"
+    )
+
+
 @items_app.command("list")
 def items_list(
     since: str | None = typer.Option(None, "--since", help="只看该时间段内的条目，如 2d、12h、1w"),

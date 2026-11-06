@@ -62,6 +62,7 @@ class FetchSettings(BaseModel):
     timeout_seconds: float = 20.0
     retries: int = Field(default=2, ge=0)
     retry_backoff_seconds: float = Field(default=1.0, ge=0)
+    retry_after_max_seconds: float = Field(default=10.0, ge=0)  # 429 的 Retry-After 最多等这么久
     concurrency: int = Field(default=4, ge=1)
     per_host_interval_seconds: float = Field(default=1.0, ge=0)
     host_intervals: dict[str, float] = Field(default_factory=dict)
@@ -93,6 +94,7 @@ class RawEntry:
     published_at: datetime | None = None
     arxiv_id: str | None = None
     video_id: str | None = None  # YouTube 视频 id
+    doi: str | None = None  # 论文 DOI（arXiv API 的 arxiv:doi、S2、Crossref、citation_doi）
     # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
     page_meta: bool = False
 

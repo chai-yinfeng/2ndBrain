@@ -152,6 +152,17 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE sources ADD COLUMN homepage TEXT;
     """,
+    # v9（M12）：论文标识，用于跨链接形式去重（ADR 0020）；旧行按规范 URL 回填。
+    """
+    ALTER TABLE items ADD COLUMN doi TEXT;
+    ALTER TABLE items ADD COLUMN arxiv_id TEXT;
+    UPDATE items SET arxiv_id = substr(url_canonical, 23)
+        WHERE url_canonical LIKE 'https://arxiv.org/abs/%';
+    UPDATE items SET doi = lower(substr(url_canonical, 17))
+        WHERE url_canonical LIKE 'https://doi.org/%';
+    CREATE INDEX idx_items_doi ON items(doi);
+    CREATE INDEX idx_items_arxiv_id ON items(arxiv_id);
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -282,6 +293,8 @@ class NewItem:
     published_at: datetime | None
     is_backfill: bool = False
     duration_seconds: int | None = None
+    doi: str | None = None
+    arxiv_id: str | None = None
 
 
 def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -> bool:
@@ -295,8 +308,8 @@ def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -
         """
         INSERT INTO items (source_id, url, url_canonical, content_hash, title, author, summary,
                            content, extract_method, published_at, fetched_at, is_backfill,
-                           duration_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           duration_seconds, doi, arxiv_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(url_canonical) DO NOTHING
         """,
         (
@@ -313,6 +326,8 @@ def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -
             format_time(fetched_at),
             int(item.is_backfill),
             item.duration_seconds,
+            item.doi.lower() if item.doi else None,
+            item.arxiv_id,
         ),
     )
     return cur.rowcount == 1
@@ -798,3 +813,63 @@ def replace_content(conn: sqlite3.Connection, item_id: int, content: str, method
         "UPDATE items SET content = ?, extract_method = ?, content_hash = ? WHERE id = ?",
         (content, method, content_hash(title, content), item_id),
     )
+
+
+# ---------- M12：论文标识与正文完整度（ADR 0020） ----------
+
+
+def item_by_doi(conn: sqlite3.Connection, doi: str) -> int | None:
+    row = conn.execute("SELECT id FROM items WHERE doi = ? LIMIT 1", (doi.lower(),)).fetchone()
+    return row[0] if row else None
+
+
+def item_by_arxiv(conn: sqlite3.Connection, arxiv_id: str) -> int | None:
+    row = conn.execute("SELECT id FROM items WHERE arxiv_id = ? LIMIT 1", (arxiv_id,)).fetchone()
+    return row[0] if row else None
+
+
+def fill_ids(conn: sqlite3.Connection, item_id: int, doi: str | None, arxiv_id: str | None) -> None:
+    """补上缺失的 doi / arxiv_id（已有的不覆盖）。"""
+    conn.execute(
+        "UPDATE items SET doi = COALESCE(doi, ?), arxiv_id = COALESCE(arxiv_id, ?) WHERE id = ?",
+        (doi.lower() if doi else None, arxiv_id, item_id),
+    )
+
+
+# 正文不完整：只导入了摘要；或是手动添加的论文类条目、正文短于 1500 字符
+INCOMPLETE_MIN_CHARS = 1500
+INCOMPLETE_SQL = f"""
+    (i.extract_method = 'abstract_only'
+     OR (i.source_id = '{MANUAL_SOURCE}' AND length(i.content) < {INCOMPLETE_MIN_CHARS}
+         AND (i.doi IS NOT NULL OR i.arxiv_id IS NOT NULL
+              OR i.extract_method IN ('pdf', 'arxiv_html')
+              OR i.url LIKE '%arxiv.org/%' OR lower(i.url) LIKE '%.pdf')))
+"""
+
+
+def incomplete_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        f"""
+        SELECT i.id, i.title, i.url, i.source_id, i.extract_method,
+               length(i.content) AS content_len, i.doi, i.arxiv_id
+        FROM items i WHERE {INCOMPLETE_SQL} ORDER BY i.id DESC
+        """
+    ).fetchall()
+
+
+def incomplete_ids(conn: sqlite3.Connection) -> set[int]:
+    return {r[0] for r in conn.execute(f"SELECT i.id FROM items i WHERE {INCOMPLETE_SQL}")}
+
+
+def same_title_manual(conn: sqlite3.Connection, title: str, exclude: int) -> int | None:
+    """手动条目中规范化标题（小写、去标点与多余空白）完全相同的另一条（只提示，不合并）。"""
+    import re
+
+    def norm(text: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+    target = norm(title)
+    rows = conn.execute(
+        "SELECT id, title FROM items WHERE source_id = ? AND id != ?", (MANUAL_SOURCE, exclude)
+    ).fetchall()
+    return next((r["id"] for r in rows if norm(r["title"]) == target), None)

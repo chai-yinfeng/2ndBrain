@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 from secondbrain.net import FetchError, HttpClient
@@ -27,10 +28,13 @@ def doi_in_url(url: str) -> str | None:
 
 
 def lookup_doi(client: HttpClient, doi: str) -> dict:
-    """返回 S2 的论文记录。HTTP 错误按 HttpClient 的重试设置处理（429 也只重试有限次）；
-    失败时抛 FetchError，消息说明原因。"""
+    """返回 S2 的论文记录。HTTP 错误按 HttpClient 的重试设置处理：429 也只重试有限次，
+    响应带 Retry-After 时按它等待（有上限）；同一 host 的请求按 per_host_interval_seconds
+    （默认 1 秒）间隔。设置了 S2_API_KEY 时带上 x-api-key。失败时抛 FetchError。"""
+    key = os.environ.get("S2_API_KEY")
+    headers = {"x-api-key": key} if key else None
     try:
-        resp = client.get(API.format(doi=doi), params={"fields": FIELDS})
+        resp = client.get(API.format(doi=doi), params={"fields": FIELDS}, headers=headers)
     except FetchError as exc:
         text = str(exc)
         if "429" in text:

@@ -241,7 +241,23 @@ def _setting_context() -> dict:
         "models": fs.llm.models,
         "choices": sorted(fs.pricing),
         "env_file": config.env_file(),
+        "s2": {
+            "source": config.env_source("S2_API_KEY"),
+            "in_dotenv": "S2_API_KEY" in config.parse_env_file(config.env_file()),
+        },
     }
+
+
+# 运维页可设置的 key：当前后端的 key（name 留空）与 Semantic Scholar 的可选 key（ADR 0020）
+OPTIONAL_KEYS = ("S2_API_KEY",)
+
+
+def _key_name(name: str) -> str:
+    if not name:
+        return _setting_context()["key"]
+    if name not in OPTIONAL_KEYS:
+        raise HTTPException(400, "不支持的 key")
+    return name
 
 
 def _active_sources() -> int:
@@ -519,6 +535,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             summary = db.get_ai(conn, item_id, "summary")
             prereq_cached = db.get_ai(conn, item_id, "prereq") is not None
             prereq_count = len(ops.prereq_names(conn, item_id))
+            incomplete = item_id in db.incomplete_ids(conn)
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
@@ -542,6 +559,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "summary_task": tasks.get(f"summary-{item_id}"),
                 "prereq_cached": prereq_cached,
                 "prereq_count": prereq_count,
+                "incomplete": incomplete,
                 "hints": CostHints(_settings()),
             },
         )
@@ -621,7 +639,24 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
         with _conn() as conn:
             rows = db.items_in_state(conn, "later")
-        return templates.TemplateResponse(request, "later.html", {"rows": rows})
+            incomplete = db.incomplete_ids(conn)
+        return templates.TemplateResponse(
+            request, "later.html", {"rows": rows, "incomplete": incomplete}
+        )
+
+    @app.post("/item/{item_id}/complete")
+    async def item_complete(request: Request, item_id: int) -> RedirectResponse:
+        """补全正文不完整的条目（粘贴正文或上传 PDF，复用 /add 的兜底处理）。"""
+        form = await request.form()
+        text = str(form.get("text") or "").strip() or None
+        upload, pdf = form.get("pdf"), None
+        if upload is not None and not isinstance(upload, str) and upload.filename:
+            pdf = await upload.read(ops.MAX_PDF_UPLOAD + 1)
+        try:
+            ops.complete_item(item_id, text=text, pdf=pdf)
+        except ops.OpsError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/item/{item_id}?completed=1", status_code=303)
 
     @app.post("/feedback", response_class=HTMLResponse)
     def feedback(
@@ -927,9 +962,9 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         return []
 
     @app.post("/ops/settings/key", response_class=HTMLResponse)
-    def settings_key(request: Request, value: str = Form("")) -> HTMLResponse:
+    def settings_key(request: Request, value: str = Form(""), name: str = Form("")) -> HTMLResponse:
         """写入 .env（保留其他行与注释，原子写入，chmod 600）。响应中绝不包含 key。"""
-        key = _setting_context()["key"]
+        key = _key_name(name)
         value = value.strip()
         if not value:
             return lines(request, ["没有输入，未做修改。"])
@@ -946,8 +981,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         return lines(request, out + busy_note())
 
     @app.post("/ops/settings/key/clear", response_class=HTMLResponse)
-    def settings_key_clear(request: Request) -> HTMLResponse:
-        key = _setting_context()["key"]
+    def settings_key_clear(request: Request, name: str = Form("")) -> HTMLResponse:
+        key = _key_name(name)
         try:
             effective = config.set_env_var(key, None)
         except OSError as exc:

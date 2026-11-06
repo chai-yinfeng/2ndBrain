@@ -45,6 +45,7 @@ def parse_api_response(data: bytes) -> list[RawEntry]:
                 summary=clean_title(e.get("summary")) or None,
                 published_at=struct_time_to_datetime(e.get("published_parsed")),
                 arxiv_id=arxiv_id,
+                doi=(e.get("arxiv_doi") or "").strip() or None,
             )
         )
     return entries

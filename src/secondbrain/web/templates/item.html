@@ -11,8 +11,20 @@
     {% if item.extract_method == "no_transcript" %}· <span class="tag">无字幕</span>{% endif %}
     {% if item.is_backfill %}· <span class="tag">经典回补</span>{% endif %}
     {% if item.read_at %}· <span class="tag">已读 {{ item.read_at }}</span>{% endif %}
+    {% if incomplete %}· <span class="tag warn" data-incomplete>正文不完整</span>{% endif %}
   </p>
   <p><a href="{{ item.url }}" target="_blank" rel="noopener">原文链接</a></p>
+  {% if incomplete %}
+  <section id="complete">
+    <h2>补全正文</h2>
+    <p class="meta">这一条目前只有摘要或很短的正文（{{ item.content_len }} 字符，提取方式 {{ item.extract_method }}）。粘贴全文或上传 PDF（≤ 30MB）后会替换正文，之后的深度速读、补前置、编入 wiki 都基于完整正文。</p>
+    <form method="post" action="/item/{{ item.id }}/complete" enctype="multipart/form-data" class="add-form">
+      <div class="field"><label for="complete-text">粘贴正文</label><textarea id="complete-text" name="text" rows="8"></textarea></div>
+      <div class="field"><label for="complete-pdf">或上传 PDF</label><input id="complete-pdf" type="file" name="pdf" accept="application/pdf,.pdf"></div>
+      <div class="field"><button type="submit" class="fb primary">补全正文</button></div>
+    </form>
+  </section>
+  {% endif %}
 
   {% if not l2 %}
   <section>

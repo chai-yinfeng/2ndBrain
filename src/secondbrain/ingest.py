@@ -182,6 +182,8 @@ def collect(
                 published_at=entry.published_at,
                 is_backfill=is_backfill,
                 duration_seconds=duration,
+                doi=entry.doi,
+                arxiv_id=entry.arxiv_id,
             )
         )
     return items, duplicates, notes, homepage
