@@ -153,7 +153,13 @@ def test_source_homepage_rules():
     assert source_homepage(src(id="a", type="rss", url="https://x/feed"), "https://x/") == (
         "https://x/"
     )
-    assert source_homepage(src(id="a", type="rss", url="https://x/feed")) is None
+    # M11 修复：没有记录到 channel link 时兜底为 feed 的站点根；feed 托管域名不给链接
+    assert source_homepage(src(id="a", type="rss", url="https://x/feed")) == "https://x/"
+    assert source_homepage(src(id="a", type="rss", url="https://a.substack.com/feed")) == (
+        "https://a.substack.com/"
+    )
+    for hosted in ("https://feeds.feedburner.com/x", "https://feeds.example.com/rss"):
+        assert source_homepage(src(id="a", type="rss", url=hosted)) is None
     assert (
         source_homepage(src(id="a", type="rss", url="u", homepage="https://mine.example"), "x")
         == "https://mine.example"
@@ -195,7 +201,8 @@ def test_feed_homepage_is_detected_and_linked(env, make_client):
     lmsys = html.split('data-source="lmsys-sglang-blog"', 1)[1].split("</tr>", 1)[0]
     assert 'href="https://lmsys.org/"' in lmsys
     hazy = html.split('data-source="hazy-research"', 1)[1].split("</tr>", 1)[0]
-    assert "<a href" not in hazy.split("</td>", 1)[0]  # 拿不到主页时不显示链接
+    # 没抓取过的 rss 信源：兜底为 feed URL 的站点根（M11 修复）
+    assert 'href="https://hazyresearch.stanford.edu/"' in hazy.split("</td>", 1)[0]
     assert "进入推荐" in html and "前排" not in html
     assert 'title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）"' in html
 

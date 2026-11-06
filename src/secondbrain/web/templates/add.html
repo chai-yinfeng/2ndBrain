@@ -2,21 +2,43 @@
 {% block title %}添加文章 · Second Brain{% endblock %}
 {% block content %}
 <h1>手动添加文章</h1>
-<p class="meta">把读过或想读的文章补录进来：归到虚拟信源 manual，<b>不进</b> L1 / L2 / 分级 / 每日预算，只记录状态与反馈（反馈会照常用于画像与 few-shot）。已存在的链接不重复插入，只更新状态与反馈。条目页上的深度速读、补前置照常可用（按需付费）。</p>
-<form hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" class="add-form">
-  <label class="wide">URL（每行一个，可批量）<textarea name="urls" rows="6" required placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234"></textarea></label>
-  <fieldset>
+<p class="meta">把读过或想读的文章补录进来：归到虚拟信源 manual，<b>不进</b> L1 / L2 / 分级 / 每日预算，只记录状态与反馈（反馈照常用于画像与 few-shot）。已存在的链接只更新状态与反馈。条目页上的深度速读、补前置照常可用（按需付费）。</p>
+
+<form hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" hx-encoding="multipart/form-data" enctype="multipart/form-data" class="add-form">
+  <div class="field">
+    <label for="add-urls">链接</label>
+    <textarea id="add-urls" name="urls" rows="6" required placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234&#10;https://dl.acm.org/doi/10.1145/2741948.2741964"></textarea>
+    <p class="help">每行一个，可批量。arXiv 链接取 HTML 或 PDF 正文；含 DOI 的链接（doi.org、ACM DL 等）先查 Semantic Scholar，取不到全文时只导入标题与摘要。</p>
+  </div>
+
+  <fieldset class="field">
     <legend>状态</legend>
-    <label><input type="radio" name="state" value="later" checked> 准备读（进入稍后再看）</label>
-    <label><input type="radio" name="state" value="read"> 已读</label>
+    <label class="choice"><input type="radio" name="state" value="later" checked> 准备读 <span class="help-inline">进入"稍后再看"</span></label>
+    <label class="choice"><input type="radio" name="state" value="read"> 已读</label>
   </fieldset>
-  <label>读后反馈（仅已读，可留空 = 已读、无评价）
-    <select name="feedback"><option value="">（不评价）</option>{% for k, label in read_kinds.items() %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
-  </label>
-  <label><input type="checkbox" name="ingest" value="1"> 编入 wiki（仅「已读 + 有收获」；不勾选时会留在首页"待编进 wiki"里）</label>
-  <label class="wide">正文粘贴（可选，仅单个 URL；付费墙 / 需登录页面抓取失败时使用）<textarea name="text" rows="5"></textarea></label>
-  <p><button type="submit" class="fb">添加</button>
-  <span class="meta">后台逐个抓取与提取正文（每个链接几秒，arXiv 论文取 HTML 或 PDF），不调用 LLM；勾选编入 wiki 时每篇再约 1 分钟、按 strong 模型计费。单个失败不影响其他。</span></p>
+
+  <fieldset class="field when-read">
+    <legend>已读时（选"准备读"时忽略）</legend>
+    <label for="add-feedback">读后反馈</label>
+    <select id="add-feedback" name="feedback"><option value="">（不评价）</option>{% for k, label in read_kinds.items() %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+    <p class="help">留空 = 已读、无评价（只记录已读时间）。</p>
+    <label class="choice"><input type="checkbox" name="ingest" value="1"> 编入 wiki</label>
+    <p class="help">仅"已读 + 有收获"可用；不勾选时会留在首页"待编进 wiki"里。每篇约 1 分钟，按 strong 模型计费。</p>
+  </fieldset>
+
+  <fieldset class="field">
+    <legend>抓取不到时的兜底（可选，仅单个链接，二选一）</legend>
+    <label for="add-text">粘贴正文</label>
+    <textarea id="add-text" name="text" rows="8"></textarea>
+    <label for="add-pdf">或上传 PDF</label>
+    <input id="add-pdf" type="file" name="pdf" accept="application/pdf,.pdf">
+    <p class="help">付费墙、需要登录或拒绝机器访问的页面（如 ACM DL 返回 403）抓取失败、或只拿到摘要时使用。PDF ≤ 30MB，用现有的 PDF 提取。</p>
+  </fieldset>
+
+  <div class="field">
+    <button type="submit" class="fb primary">添加</button>
+    <p class="help">后台逐个抓取与提取正文（每个链接几秒），不调用 LLM；单个失败不影响其他，失败时会给出具体原因。</p>
+  </div>
 </form>
 {% with kind="manual_add", message=None %}{% include "_task.html" %}{% endwith %}
 {% endblock %}

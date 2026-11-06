@@ -156,7 +156,9 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 - 手动添加（`sb add`、`/add`，`ops.add_manual`）：
   - 条目归到虚拟信源 `manual`（DB 有 sources 行，enabled = 0，不在 sources.yaml 中），状态为 `manual`，不进 L1 / L2 / 分级 / 预算；
   - 已存在的条目只更新状态与反馈；
-  - 准备读 = `later` 反馈，已读 = 读后反馈，已读但未评价时只设置 `read_at`。
+  - 准备读 = `later` 反馈，已读 = 读后反馈，已读但未评价时只设置 `read_at`；
+  - 含 DOI 的链接先查 Semantic Scholar（有 arXiv 时走 arXiv，有开放获取 PDF 时用 PDF，否则只导入标题 + 摘要）；抓取失败时给出具体原因，可以用粘贴的正文或上传的 PDF 兜底（ADR 0019）。
+- RSS 信源主页：配置 > 已记录的 channel link > feed URL 的站点根（托管域名除外）。
 
 ## 筛选、信源主页与运维设置（M10，见 ADR 0017）
 

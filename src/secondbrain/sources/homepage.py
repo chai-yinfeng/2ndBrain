@@ -20,14 +20,33 @@ def safe_url(url: str | None) -> str | None:
     return url.strip()
 
 
+# 明显的 feed 托管域名：站点根不是信源主页，不给兜底链接
+_FEED_HOSTS = ("feedburner.com", "feedblitz.com", "feedpress.me", "rss.app")
+
+
+def feed_root(url: str | None) -> str | None:
+    """RSS 的兜底主页：feed URL 的 scheme://host/（如 x.substack.com/feed → x.substack.com/）。
+    feeds.* 子域与 feedburner 等托管域名返回 None。"""
+    parts = urlsplit(url or "")
+    host = parts.hostname or ""
+    if (
+        not host
+        or host.startswith("feeds.")
+        or any(host == h or host.endswith("." + h) for h in _FEED_HOSTS)
+    ):
+        return None
+    return safe_url(f"{parts.scheme}://{parts.netloc}/")
+
+
 def source_homepage(source: SourceConfig, detected: str | None = None) -> str | None:
-    """配置的 homepage 优先；否则按类型推导：rss 用抓取时从 feed 读到的 channel <link>，
-    sitemap 用站点根，arxiv 用分类列表（没有 cat: 时用搜索），hf_papers 与 youtube 用固定页面。"""
+    """配置的 homepage 优先；否则按类型推导：rss 用抓取 / 预览时从 feed 读到的 channel <link>，
+    没有时用 feed URL 的站点根（托管域名除外）；sitemap 用站点根，arxiv 用分类列表
+    （没有 cat: 时用搜索），hf_papers 与 youtube 用固定页面。"""
     if source.homepage:
         return safe_url(source.homepage)
     url = source.url or ""
     if source.type == "rss":
-        return safe_url(detected)
+        return safe_url(detected) or feed_root(url)
     if source.type == "sitemap":
         parts = urlsplit(url)
         return safe_url(f"{parts.scheme}://{parts.netloc}/") if parts.netloc else None

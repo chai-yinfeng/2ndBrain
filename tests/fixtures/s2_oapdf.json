@@ -1,0 +1,4 @@
+{"paperId": "x2", "title": "Open Access Systems Paper", "year": 2024,
+ "authors": [{"authorId": "2", "name": "Dana"}, {"authorId": "3", "name": "Eli"}],
+ "abstract": "An open access paper.", "openAccessPdf": {"url": "https://oa.example.org/paper.pdf", "status": "GREEN"},
+ "externalIds": {"DOI": "10.5555/oa.1"}, "url": "https://www.semanticscholar.org/paper/x2"}

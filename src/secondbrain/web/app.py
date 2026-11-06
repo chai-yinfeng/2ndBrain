@@ -41,7 +41,7 @@ from secondbrain.profile.loader import Profile, load_profile, parse_profile, wea
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
 from secondbrain.sources import FETCHERS
-from secondbrain.sources.homepage import source_homepage
+from secondbrain.sources.homepage import safe_url, source_homepage
 from secondbrain.web import filters
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
 from secondbrain.wiki.graph import build_graph
@@ -586,8 +586,13 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         feedback = str(form.get("feedback") or "") or None
         ingest = bool(form.get("ingest"))
         text = str(form.get("text") or "").strip() or None
+        upload, pdf = form.get("pdf"), None
+        if upload is not None and not isinstance(upload, str) and upload.filename:
+            pdf = await upload.read(ops.MAX_PDF_UPLOAD + 1)
         try:
-            urls = ops.validate_manual(urls, state, feedback, ingest, text)
+            urls = ops.validate_manual(urls, state, feedback, ingest, text, pdf)
+            if pdf is not None and (len(pdf) > ops.MAX_PDF_UPLOAD or not pdf.startswith(b"%PDF")):
+                raise ops.OpsError("只接受 30MB 以内的 PDF 文件")
         except ops.OpsError as exc:
             return task_fragment(request, "manual_add", f"✗ {exc}")
 
@@ -600,6 +605,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                     feedback=feedback,
                     ingest=ingest,
                     text=text,
+                    pdf=pdf,
                     client=client,
                 )
 
@@ -1118,6 +1124,12 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                     key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True
                 )
                 context.update(entries=entries[:PREVIEW_ENTRIES], total=len(entries))
+                channel = safe_url(getattr(entries, "homepage", None))
+                if channel:  # 顺手记录 channel <link>（只更新已有的 sources 行，不写 items）
+                    context["channel"] = channel
+                    with _conn() as conn:
+                        db.record_homepage(conn, source.id, channel)
+                        conn.commit()
         return templates.TemplateResponse(request, "_peek.html", context)
 
     @app.post("/sources/{source_id}/delete", response_class=HTMLResponse)
