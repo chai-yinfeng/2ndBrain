@@ -365,6 +365,7 @@ kill %1
 - [x] 新信源类型 `html_index`：解析列表页 `<a href>`，绝对化后按 `url_pattern` 过滤、去重、保持顺序，可选 `max_links`；列表页结构化日期优先，其次正文页 meta；预览、主页兜底、产出率都支持；目录新增 `sglang-blog`
 - [x] 手动导入：`citation_pdf_url` 优先下载 PDF，citation_* meta 补元数据；DOI 查询 S2 后用 Crossref 兜底（JATS 摘要、PDF 链接）；Retry-After（上限 10 秒）与可选 `S2_API_KEY`（`/ops` 可设置 / 清除）
 - [x] 跨标识去重（schema v9：`items.doi` / `items.arxiv_id`）：按规范 URL → DOI → arXiv id 查重，更完整的正文补全"已存在"条目；同名手动条目只提示
+- [x] 已存在条目重新抓取：不完整的条目再次导入同一链接时自动重抓，仅在更完整时替换（否则提示"重新抓取未获得更完整正文"）；manual 条目详情页"重新抓取"按钮；`sb add <url> --refetch` 强制重抓
 - [x] "正文不完整"标记：详情页 / 稍后读徽标，详情页粘贴正文或上传 PDF 补全；`sb items incomplete`
 
 **模块**：`sources/html_index.py`、`sources/crossref.py`、`sources/semantic_scholar.py`、`extract/html.py`、`net.py`、`ops.py`、`db.py`、`web/`、`cli.py`
@@ -381,6 +382,8 @@ uv run sb add https://arxiv.org/abs/2309.06180
 uv run sb add https://dl.acm.org/doi/10.1145/3600006.3613165 | tail -2                   # 同一篇：已存在
 uv run sb add https://dl.acm.org/doi/10.1145/1323293.1294281                             # 只有摘要
 uv run sb items incomplete
+uv run sb add https://dl.acm.org/doi/10.1145/1323293.1294281 | tail -2                   # 不完整 → 自动重抓
+uv run sb add https://www.usenix.org/conference/osdi20/presentation/tang --refetch | tail -2  # 强制重抓
 sqlite3 "$SB_DATA_DIR/brain.db" "SELECT id, extract_method, length(content), doi, arxiv_id FROM items WHERE source_id = 'manual'"
 sqlite3 "$SB_DATA_DIR/brain.db" "PRAGMA user_version"                                   # 9
 uv run sb serve --port 8765 &

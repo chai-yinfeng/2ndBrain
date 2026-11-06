@@ -963,6 +963,33 @@ def _more_complete(conn, item_id: int, content: str) -> bool:
     return row["extract_method"] == "abstract_only" or (row["content_len"] or 0) * 2 < len(content)
 
 
+REFETCH_NO_GAIN = "重新抓取未获得更完整正文"
+
+
+def _refetch(conn, item_id: int, url: str, client, fs) -> tuple[bool, str]:
+    """对已存在的条目重新走一遍 _fetch_manual：新正文更完整时替换（并补上 doi / arxiv_id），
+    否则不动正文。返回 (是否替换, 未替换时的说明)。"""
+    try:
+        fetched = _fetch_manual(url, client, fs)
+    except ManualFetchError as exc:
+        return False, f"{REFETCH_NO_GAIN}：{exc}"
+    except Exception as exc:  # 重抓失败不影响条目本身
+        return False, f"{REFETCH_NO_GAIN}：{type(exc).__name__}: {exc}"
+    row = db.item_detail(conn, item_id)
+    if fetched.method == "abstract_only":  # 只拿到摘要：仅在原来也只有更短的摘要时替换
+        better = row["extract_method"] == "abstract_only" and (row["content_len"] or 0) < len(
+            fetched.content
+        )
+    else:
+        better = _more_complete(conn, item_id, fetched.content)
+    if better:
+        db.replace_content(conn, item_id, fetched.content, fetched.method)
+        db.fill_ids(conn, item_id, fetched.entry.doi, fetched.entry.arxiv_id)
+        conn.commit()
+        return True, ""
+    return False, REFETCH_NO_GAIN
+
+
 def add_manual(
     urls: list[str],
     echo: Echo,
@@ -972,11 +999,13 @@ def add_manual(
     ingest: bool = False,
     text: str | None = None,
     pdf: bytes | None = None,
+    refetch: bool = False,
     client=None,
 ) -> dict:
     """手动添加文章（逐个处理，单个失败不影响其他）：归到虚拟信源 manual、状态 manual，
     不进 L1 / L2 / 分级 / 预算。按规范 URL / DOI / arXiv id 查重，已存在的只更新状态与反馈；
-    新拿到的正文更完整时补全正文（"已存在（补全正文）"）。规范化标题相同的手动条目只提示。
+    新拿到的正文更完整时补全正文（"已存在（补全正文）"）；已存在的条目正文不完整（或 refetch）
+    且没有给出粘贴正文 / PDF 时重新抓取一次。规范化标题相同的手动条目只提示。
     准备读 = later 反馈；已读 = 所选读后反馈，未选时只设置 read_at（已读、无评价）。"""
     from secondbrain.urls import content_hash
 
@@ -1003,6 +1032,13 @@ def add_manual(
                 )
                 conn.commit()
                 result.status = "已存在（补全正文）"
+            elif item_id is not None and not fallback:
+                if refetch or item_id in db.incomplete_ids(conn):
+                    replaced, note = _refetch(conn, item_id, url, client, fetch_fs)
+                    if replaced:
+                        result.status = "已存在（补全正文）"
+                    else:
+                        result.message = note
             if item_id is None:
                 try:
                     fetched = _fetch_manual(url, client, fetch_fs, fallback, fallback_method)
@@ -1086,6 +1122,29 @@ def add_manual(
         "results": [r.__dict__ for r in results],
         "ingest": summary.__dict__ if summary else None,
     }
+
+
+def refetch_item(item_id: int, client=None) -> str:
+    """详情页"重新抓取"：对条目的链接重新走一遍 _fetch_manual，仅在更完整时替换正文。
+    返回给用户看的结果文字。"""
+    config.load_env()
+    _, _, fetch_fs = _settings()
+    own_client = client is None
+    client = client or HttpClient(fetch_fs)
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, item_id)
+        if row is None:
+            raise OpsError(f"条目不存在：{item_id}")
+        replaced, note = _refetch(conn, item_id, row["url"], client, fetch_fs)
+        if not replaced:
+            return note
+        row = db.item_detail(conn, item_id)
+        return f"已补全正文：{row['extract_method']}，{row['content_len']} 字符（刷新页面查看）"
+    finally:
+        conn.close()
+        if own_client:
+            client.close()
 
 
 def complete_item(item_id: int, *, text: str | None = None, pdf: bytes | None = None) -> str:

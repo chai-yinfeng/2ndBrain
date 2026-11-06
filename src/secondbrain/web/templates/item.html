@@ -13,7 +13,8 @@
     {% if item.read_at %}· <span class="tag">已读 {{ item.read_at }}</span>{% endif %}
     {% if incomplete %}· <span class="tag warn" data-incomplete>正文不完整</span>{% endif %}
   </p>
-  <p><a href="{{ item.url }}" target="_blank" rel="noopener">原文链接</a></p>
+  <p><a href="{{ item.url }}" target="_blank" rel="noopener">原文链接</a>
+    {% if item.source_id == "manual" %}· <button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML" title="重新抓取原文链接（含 citation_pdf_url / Crossref 兜底），只在拿到更完整的正文时替换">重新抓取</button> <span id="refetch-result" data-refetch></span>{% endif %}</p>
   {% if incomplete %}
   <section id="complete">
     <h2>补全正文</h2>

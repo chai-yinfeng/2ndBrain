@@ -658,6 +658,16 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return RedirectResponse(f"/item/{item_id}?completed=1", status_code=303)
 
+    @app.post("/item/{item_id}/refetch", response_class=HTMLResponse)
+    def item_refetch(request: Request, item_id: int) -> HTMLResponse:
+        """手动条目重新抓取（HTMX）：仅在拿到更完整正文时替换，返回结果文字。"""
+        try:
+            with _http_client(_fetch_settings()) as client:
+                message = ops.refetch_item(item_id, client=client)
+        except ops.OpsError as exc:
+            return HTMLResponse(f'<span class="refresh">✗ {html.escape(str(exc))}</span>')
+        return HTMLResponse(f'<span class="saved">{html.escape(message)}</span>')
+
     @app.post("/feedback", response_class=HTMLResponse)
     def feedback(
         request: Request,

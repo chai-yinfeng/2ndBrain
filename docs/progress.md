@@ -572,6 +572,7 @@
   - Retry-After 有上限（10 秒）；可选 `S2_API_KEY`，`/ops` 可设置。
 - 跨标识去重（schema v9：`items.doi` / `items.arxiv_id`）：按规范 URL → DOI → arXiv id 查重，更完整的正文会补全"已存在"条目；同名手动条目只提示。
 - "正文不完整"：详情页 / 稍后读显示徽标，详情页可补全；新增 `sb items incomplete`。
+- 已存在条目重新抓取：不完整的条目再次导入同一链接时自动重抓，仅在更完整时替换；manual 条目详情页"重新抓取"按钮；`sb add <url> --refetch`（审阅后补充，便于补全 M12 之前导入的条目）。
 - 测试：
   - 新增 `test_html_index.py`（8 个 + 1 个 live）、`test_paper_import.py`（14 个）；
   - 修改的旧测试：

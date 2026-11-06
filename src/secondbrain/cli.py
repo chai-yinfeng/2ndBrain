@@ -658,6 +658,9 @@ def add(
     pdf_file: str | None = typer.Option(
         None, "--pdf", help="PDF 文件（单个 URL；抓取失败或只有摘要时用它的文本，≤ 30MB）"
     ),
+    refetch: bool = typer.Option(
+        False, "--refetch", help="已存在的条目也重新抓取（仅在拿到更完整正文时替换）"
+    ),
 ) -> None:
     """手动添加文章：不进 L1 / L2 / 分级，只记录状态与反馈（ADR 0018）。"""
     from pathlib import Path
@@ -675,6 +678,7 @@ def add(
             ingest=ingest,
             text=text,
             pdf=pdf,
+            refetch=refetch,
         )
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)

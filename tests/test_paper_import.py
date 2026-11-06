@@ -327,3 +327,70 @@ def test_ops_s2_key_settings(env):
     assert client.post("/ops/settings/key", data={"name": "PATH", "value": "x"}).status_code == 400
     client.post("/ops/settings/key/clear", data={"name": "S2_API_KEY"})
     assert "S2_API_KEY" not in config.parse_env_file(config.env_file())
+
+
+# ---------- 已存在条目的重新抓取 ----------
+
+
+def test_existing_abstract_only_is_completed_on_reimport(env, monkeypatch):
+    url = f"https://doi.org/{DOI}"
+    runner.invoke(cli_app, ["add", url])
+    assert rows()[0]["extract_method"] == "abstract_only"
+    routes = route_table(
+        {
+            "https://publisher.example.org/x.pdf": httpx.Response(
+                200,
+                content=make_pdf(["Expert parallelism full paper text. " * 12] * 5),
+                headers={"content-type": "application/pdf"},
+            )
+        }
+    )
+    monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(routes))
+    out = runner.invoke(cli_app, ["add", url])
+    assert "已存在（补全正文） #1" in out.output, out.output
+    (row,) = rows()
+    assert row["extract_method"] == "pdf" and "full paper text" in row["content"]
+
+
+def test_refetch_button_replaces_short_html_with_citation_pdf(env, monkeypatch):
+    blocked = route_table({USENIX_PDF: httpx.Response(403, text="no")})
+    monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(blocked))
+    runner.invoke(cli_app, ["add", USENIX])
+    assert rows()[0]["extract_method"] == "html"
+    client = TestClient(create_app())
+    assert 'hx-post="/item/1/refetch"' in client.get("/item/1").text
+    resp = client.post("/item/1/refetch")  # env 的 _http_client 里 PDF 可以下载
+    assert resp.status_code == 200 and "已补全正文：pdf" in resp.text, resp.text
+    (row,) = rows()
+    assert row["extract_method"] == "pdf" and "unified cluster management" in row["content"]
+
+
+def test_refetch_without_gain_keeps_content(env, monkeypatch):
+    url = f"https://doi.org/{DOI}"
+    runner.invoke(cli_app, ["add", url])
+    before = rows()[0]["content"]
+    out = runner.invoke(cli_app, ["add", url])  # 不完整 → 自动重抓，仍只有同样的摘要
+    assert "已存在 #1" in out.output and "重新抓取未获得更完整正文" in out.output, out.output
+    assert rows()[0]["content"] == before
+    resp = TestClient(create_app()).post("/item/1/refetch")
+    assert "重新抓取未获得更完整正文" in resp.text
+    assert rows()[0]["extract_method"] == "abstract_only" and rows()[0]["content"] == before
+
+
+def test_cli_refetch_forces_existing_complete_item(env, monkeypatch):
+    runner.invoke(cli_app, ["add", USENIX])  # 已是 PDF 全文，不算不完整
+    seen = []
+    routes = route_table()
+
+    def counting(*_a, **_k):
+        client = make_client(routes)
+        seen.append(client)
+        return client
+
+    monkeypatch.setattr(ops, "HttpClient", counting)
+    plain = runner.invoke(cli_app, ["add", USENIX])
+    assert "已存在 #1" in plain.output and "重新抓取" not in plain.output
+    assert not seen[-1].seen  # 完整的已存在条目默认不重抓
+    forced = runner.invoke(cli_app, ["add", USENIX, "--refetch"])
+    assert "重新抓取未获得更完整正文" in forced.output, forced.output
+    assert seen[-1].seen and rows()[0]["extract_method"] == "pdf"
