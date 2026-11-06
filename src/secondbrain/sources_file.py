@@ -58,7 +58,9 @@ def append_entry(text: str, block: str) -> str:
         text = _EMPTY_LIST.sub("sources:", text, count=1)
     elif not _SOURCES_KEY.search(text):
         text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + "sources:\n"
-    return text.rstrip("\n") + "\n\n" + block.rstrip("\n") + "\n"
+    head = text.rstrip("\n")
+    gap = "\n" if head.endswith("sources:") else "\n\n"  # 第一个条目紧跟 sources:
+    return head + gap + block.rstrip("\n") + "\n"
 
 
 def remove_entry(text: str, source_id: str) -> str:

@@ -486,3 +486,46 @@
 - 非浏览器客户端（没有 Origin / Referer）不受 CSRF 校验，这是有意的取舍（ADR 0017）。
 - 筛选状态下不显示概念复习。
 - 通过环境变量设置的 key 无法在页面上修改。
+
+## M11 — 信源手动维护与手动添加文章（2026-11-06，分支 `m11-manual-sources`）
+
+**做了什么**（ADR 0018）
+- 反馈与 trust 解耦：
+  - 删除 trust 建议与写入：`source_stats` / `_suggest` / `apply_trust_changes` / `ops.apply_trust`、`/ops` 的应用按钮与 `POST /ops/tune`、`sb sources tune --apply`、`personalize.tune_*`；
+  - `sb sources tune` 改为只读统计；
+  - `/sources` 显示各信源反馈分布，纯参考。
+- `sources_file.py`：
+  - `config/sources.yaml` 按条目文本块追加 / 删除 / 改 enabled，保留注释；写入前校验，原子写；
+  - 支持 `sources: []`；首次编辑时复制 example 原文（含注释）。
+- 信源目录：
+  - 列出 example 中未添加的信源（主页、论文类标记），可预览（只解析、不写库）、原样追加；
+  - 已配置的信源也可预览。
+- 空信源：`sb fetch` / `sb run` / 首页给出提示，不调用 LLM。
+- 手动添加文章：
+  - 入口：`sb add`、`/add`（导航"添加"，稍后读页有链接）；
+  - 条目归到虚拟信源 `manual`、状态 `manual`，不进 L1 / L2 / 分级 / 预算；
+  - 准备读 = later，已读 = 读后反馈或"已读、无评价"（只设 read_at）；
+  - 可选正文粘贴；"已读 + 有收获"可直接编入 wiki。
+  - "待编进 wiki"在没有 digest 时也显示。
+- 测试：
+  - 新增 `test_sources_catalog.py`（9）、`test_manual_add.py`（7）；
+  - 因语义变更修改的旧测试：
+    - `test_profile.py`：3 个 trust 建议相关测试换成反馈分布与只读 CLI 测试；
+    - `test_feedback.py`：tune 计数测试改为反馈分布；
+    - `test_ops.py`：`/ops` 页测试去掉 trust 应用部分；空信源 `sb run` 的期望改为友好提示；
+    - `test_sources_web.py`：写回保留注释；
+    - `test_m10.py`：CSRF 的 Referer 用例改用仍存在的路由。
+
+**验收结果**
+- `uv run pytest -q`：320 passed；`uv run ruff check .`、`uv run ruff format --check .`：通过。
+- roadmap M11 的验收命令已在 `mktemp -d` 临时目录中全部实际运行（fake LLM，端口 8765），包括：
+  - 空信源提示；
+  - 目录 46 条；预览 lmsys 解析到 138 条；
+  - 添加后 sources.yaml 保留头部注释，条目原样追加；toggle 只改 enabled；
+  - `sb add` 新增与已存在；`/add` 批量中一条新增、一条失败；
+  - 待编入为 1。
+
+**遗留问题**
+- 用 flow 风格（`- {id: …}`）手写的条目无法按块定位。
+- 旧 settings.yaml 中的 `tune_*` 键会被静默忽略。
+- 手动条目不进每日推荐。
