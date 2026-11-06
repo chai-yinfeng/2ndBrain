@@ -34,6 +34,14 @@ RUN_LANES = {
 }
 
 
+NO_SOURCES = "还没有启用的信源，去 /sources 添加（信源目录里可以逐个预览、添加）"
+
+
+def active_sources(sources: list) -> list:
+    """会被抓取的信源：启用且不是 needs_scraper。"""
+    return [s for s in sources if s.enabled and not s.needs_scraper]
+
+
 class OpsError(Exception):
     """配置、后端或锁的问题；消息可直接展示给用户。"""
 
@@ -116,14 +124,17 @@ def run_once(
         echo(f"LLM 后端：{backend_name}；profile 解析到 {len(profile.domains)} 个领域")
         if all_time:
             echo("不限时间窗：只去重，信源与 L0 都不按时间窗排除")
+        try:
+            sources = config.load_sources()
+        except config.ConfigError as exc:
+            raise OpsError(str(exc)) from exc
+        if not active_sources(sources):
+            echo(NO_SOURCES)  # 空信源：友好提示，不抓取、不调用 LLM（ADR 0018）
+            return RunReport()
 
         conn = db.connect()
         try:
             if not no_fetch:
-                try:
-                    sources = config.load_sources()
-                except config.ConfigError as exc:
-                    raise OpsError(str(exc)) from exc
                 with HttpClient(fetch_fs) as client:
                     results = ingest.fetch_sources(
                         conn, sources, client, fetch_fs, limit=fs.run.fetch_limit, all_time=all_time
@@ -262,20 +273,25 @@ def ensure_sources_file() -> tuple[Path, bool]:
     return target, True
 
 
-def apply_trust(changes: dict[str, int], echo: Echo) -> int:
-    """把 trust 建议行级写入 config/sources.yaml（保留注释）；返回成功修改的信源数。"""
-    from secondbrain.profile.tune import apply_trust_changes
+def edit_sources(edit) -> list:
+    """按文本编辑 config/sources.yaml（保留注释）：不存在时先从 example 复制，
+    edit(text) 返回新文本，校验通过后原子写入（ADR 0018）。"""
+    from secondbrain import sources_file
 
-    target, created = ensure_sources_file()
-    if created:
-        echo(f"{WARN} 已从 sources.example.yaml 生成 {target}（个人配置，已在 .gitignore 中）")
-    new_text, missing = apply_trust_changes(target.read_text(encoding="utf-8"), changes)
-    target.write_text(new_text, encoding="utf-8")
-    for source_id in missing:
-        echo(f"{FAIL} {source_id}：在 {target.name} 中找不到 trust 行，未修改")
-    done = len(changes) - len(missing)
-    echo(f"{OK} 已更新 {target}：{done} 个信源")
-    return done
+    path, _ = ensure_sources_file()
+    return sources_file.write(edit(path.read_text(encoding="utf-8")))
+
+
+def catalog_entries() -> list:
+    """信源目录：sources.example.yaml 中、不在当前生效配置里的条目（按 id）。"""
+    example = config.config_dir() / "sources.example.yaml"
+    if not example.is_file():
+        return []
+    try:
+        current = {s.id for s in config.load_sources()}
+    except config.ConfigError:
+        current = set()
+    return [s for s in config.load_sources(example) if s.id not in current]
 
 
 # ---------- 深度速读与补前置（M8，ADR 0015） ----------

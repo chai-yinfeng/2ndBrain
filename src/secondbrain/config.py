@@ -202,32 +202,39 @@ def load_sources(path: Path | None = None) -> list[SourceConfig]:
     """读取并校验信源清单；id 必须唯一。"""
     path = path or sources_path()[0]
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
         raise ConfigError(f"无法读取 {path}：{exc}") from exc
+    return parse_sources_text(text, str(path))
+
+
+def parse_sources_text(text: str, label: str = "sources.yaml") -> list[SourceConfig]:
+    """解析并校验 sources YAML 文本；`sources: []` 与空的 `sources:` 都是合法的空清单。"""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"无法读取 {label}：{exc}") from exc
     raw = data.get("sources") if isinstance(data, dict) else None
+    if raw is None and isinstance(data, dict) and "sources" in data:
+        raw = []
     if not isinstance(raw, list):
-        raise ConfigError(f"{path} 需要顶层 `sources:` 列表")
+        raise ConfigError(f"{label} 需要顶层 `sources:` 列表")
     sources: list[SourceConfig] = []
     for index, entry in enumerate(raw):
         try:
             sources.append(SourceConfig.model_validate(entry))
         except ValidationError as exc:
-            label = entry.get("id") if isinstance(entry, dict) else None
-            raise ConfigError(f"{path} 第 {index + 1} 个信源（{label}）不合法：{exc}") from exc
+            name = entry.get("id") if isinstance(entry, dict) else None
+            raise ConfigError(f"{label} 第 {index + 1} 个信源（{name}）不合法：{exc}") from exc
     seen: set[str] = set()
     for s in sources:
         if s.id in seen:
-            raise ConfigError(f"{path} 中信源 id 重复：{s.id}")
+            raise ConfigError(f"{label} 中信源 id 重复：{s.id}")
         seen.add(s.id)
     return sources
 
 
-SOURCES_HEADER = (
-    "# 个人信源配置（gitignore）。由 Web /sources 写回时注释不保留；\n"
-    "# 各字段说明见 config/sources.example.yaml。\n"
-)
-# 写回时省略取默认值的这些字段，让文件保持简短
+# 写回时省略取默认值的这些字段，让条目保持简短
 _OMIT_DEFAULTS = ("backfill", "needs_scraper", "use_lastmod")
 
 
@@ -237,20 +244,6 @@ def source_to_dict(source: SourceConfig) -> dict[str, Any]:
         if data.get(key) is False:
             del data[key]
     return data
-
-
-def save_sources(sources: list[SourceConfig], path: Path) -> None:
-    """校验 id 唯一后原子写入（临时文件 + rename）。PyYAML 写回不保留注释（ADR 0013）。"""
-    ids = [s.id for s in sources]
-    duplicates = sorted({i for i in ids if ids.count(i) > 1})
-    if duplicates:
-        raise ConfigError(f"信源 id 重复：{', '.join(duplicates)}")
-    body = yaml.safe_dump(
-        {"sources": [source_to_dict(s) for s in sources]}, allow_unicode=True, sort_keys=False
-    )
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(SOURCES_HEADER + body, encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def fetch_settings(settings: dict[str, Any]) -> FetchSettings:

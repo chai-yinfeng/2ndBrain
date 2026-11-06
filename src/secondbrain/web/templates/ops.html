@@ -82,22 +82,9 @@
 </section>
 
 <section class="entry">
-  <h2>信源调整建议</h2>
-  <p class="meta">近 {{ pers.tune_window_days }} 天，每个条目取当前反馈：有收获为正，不感兴趣 / 没价值为负；样本 ≥ {{ pers.tune_min_samples }} 才给 trust ±1 建议。应用后写入 config/sources.yaml（只改 trust 行，保留注释），与 <code>sb sources tune --apply</code> 相同；不调用 LLM。</p>
+  <h2>信源</h2>
+  <p class="meta">信源由你手动维护：在 <a href="/sources">信源</a> 页添加 / 停用 / 删除，trust 手动设置。反馈只影响 AI 判断（画像、few-shot、画像修改提案），不再用于调整信源（ADR 0018）。</p>
   {% if sources_error %}<p class="refresh">✗ {{ sources_error }}</p>{% endif %}
-  {% if stats %}
-  <table class="scores">
-    <tr><th>信源</th><th>正</th><th>负</th><th>trust</th><th>说明</th></tr>
-    {% for st in stats %}
-    <tr><td>{{ st.source_id }}</td><td>{{ st.positive }}</td><td>{{ st.negative }}</td><td>{{ st.trust }}{% if st.suggested %} → {{ st.suggested }}{% endif %}</td><td>{{ st.reason }}</td></tr>
-    {% endfor %}
-  </table>
-  {% else %}<p class="empty">（还没有反馈）</p>{% endif %}
-  {% if silent %}<p class="meta">另有 {{ silent }} 个信源没有反馈。</p>{% endif %}
-  {% if suggestions %}
-  <button type="button" class="fb" hx-post="/ops/tune" hx-target="#tune-result" hx-confirm="把 {{ suggestions | length }} 条 trust 建议写入 config/sources.yaml？">应用 {{ suggestions | length }} 条建议</button>
-  {% else %}<p class="meta">没有 trust 调整建议。</p>{% endif %}
-  <div id="tune-result"></div>
 </section>
 
 <section class="entry">

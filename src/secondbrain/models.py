@@ -191,16 +191,12 @@ class RunSettings(BaseModel):
 
 
 class PersonalizeSettings(BaseModel):
-    """M4：反馈汇总、few-shot、profile 修改提案、信源 trust 调整。"""
+    """M4：反馈汇总、few-shot、profile 修改提案（反馈不调整信源 trust，ADR 0018）。"""
 
     feedback_window_days: int = Field(default=30, ge=1)  # 汇总近 N 天的反馈
     summary_max_items: int = Field(default=50, ge=1)  # 送入 profile 提案的反馈上限
     few_shot_per_polarity: int = Field(default=5, ge=0)  # L1 中正 / 负样例各最多几条
     min_feedback_for_update: int = Field(default=1, ge=1)  # 少于该数不提议修改 profile
-    tune_window_days: int = Field(default=90, ge=1)
-    tune_min_samples: int = Field(default=5, ge=1)  # 信源有反馈的条目数少于该值不给建议
-    tune_raise_ratio: float = Field(default=0.7, ge=0, le=1)  # 正向比例 ≥ 该值建议 trust +1
-    tune_lower_ratio: float = Field(default=0.3, ge=0, le=1)  # 正向比例 ≤ 该值建议 trust −1
     # 信源产出率（ADR 0016）：近 yield_window_days 天入库 ≥ low_yield_min_items 条、
     # 但没有一条进入前排 lane 的信源标记为"低产出，建议停用"
     yield_window_days: int = Field(default=30, ge=1)

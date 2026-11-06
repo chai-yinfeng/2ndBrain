@@ -96,7 +96,7 @@ def test_cli_run_refuses_while_locked(env):
     assert "已有 sb run 在运行" in result.output
     result = runner.invoke(cli_app, ["run"])  # 锁释放后正常运行（sources 为空，不发请求）
     assert result.exit_code == 0, result.output
-    assert "抓取：新增 0 条" in result.output
+    assert "还没有启用的信源，去 /sources 添加" in result.output  # ADR 0018：空信源友好提示
 
 
 # ---------- 后台任务 ----------
@@ -213,7 +213,7 @@ def test_home_ingest_button_runs_in_background(env):
 # ---------- /ops ----------
 
 
-def test_ops_page_usage_peak_and_tune(env, monkeypatch: pytest.MonkeyPatch):
+def test_ops_page_usage_and_peak(env, monkeypatch: pytest.MonkeyPatch):
     assert runner.invoke(cli_app, ["run", "--no-fetch"]).exit_code == 0
     conn = db.connect()
     sources = [SourceConfig(id="vllm-blog", type="rss", url="u", trust=4)]
@@ -246,19 +246,11 @@ def test_ops_page_usage_peak_and_tune(env, monkeypatch: pytest.MonkeyPatch):
     assert "今天" in html and "近 7 天" in html
     assert 'data-peak="true"' in html and "高峰时段" in html
     assert 'hx-post="/tasks/run"' in html and "与 <code>sb run</code> 相同" in html
-    assert "vllm-blog" in html and 'href="/profile"' in html
+    assert 'href="/profile"' in html and 'href="/sources"' in html
     assert 'href="/ops"' in client.get("/").text
-
-    # trust 已是 5：没有建议；把 example 中的 vllm-blog 改为 trust 3 后再看
-    example = config.CONFIG_DIR / "sources.example.yaml"
-    text = example.read_text(encoding="utf-8")
-    example.write_text(text.replace("trust: 5", "trust: 3", 1), encoding="utf-8")
-    html = client.get("/ops").text
-    assert "3 → 4" in html and 'hx-post="/ops/tune"' in html
-    result = client.post("/ops/tune").text
-    assert "已更新" in result
-    written = (config.CONFIG_DIR / "sources.yaml").read_text(encoding="utf-8")
-    assert written.split("- id: vllm-blog", 1)[1].split("- id:", 1)[0].count("trust: 4") == 1
+    # ADR 0018：反馈不再产生 trust 建议，/ops 上没有"应用建议"
+    assert "/ops/tune" not in html and "trust ±1" not in html
+    assert client.post("/ops/tune").status_code == 404
 
 
 # ---------- /wiki 体检 ----------

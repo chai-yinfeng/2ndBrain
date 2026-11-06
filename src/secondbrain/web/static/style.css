@@ -109,3 +109,6 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; font-size: 13px; }
 .chip { border: 1px solid var(--border); border-radius: 12px; padding: 0 9px; color: var(--fg); }
 .chip.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+.peek-row td { border-bottom: none; padding: 0 8px; }
+.peek { font-size: 13px; margin: 4px 0 8px; }
+.catalog-item form { display: inline; }

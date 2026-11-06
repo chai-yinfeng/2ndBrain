@@ -6,6 +6,8 @@
     {% with kind="run", task=run_task, message=None, refresh_on_done=True %}{% include "_task.html" %}{% endwith %}
   {% elif run_locked %}
     <p class="refresh">正在运行：已有 sb run 在进行（CLI 或定时任务），完成后刷新本页查看。</p>
+  {% elif not ran_today and not active_sources %}
+    <p class="refresh" data-no-sources>还没有启用的信源，去 <a href="/sources">信源</a> 添加（信源目录里可以逐个预览、添加）。</p>
   {% elif not ran_today %}
     <form hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML" class="start-form">
       <input type="hidden" name="refresh" value="1">

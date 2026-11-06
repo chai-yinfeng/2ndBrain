@@ -142,12 +142,17 @@ def fetch(
     limit: int | None = typer.Option(None, "--limit", min=1, help="每个信源最多新增的条目数"),
 ) -> None:
     """抓取信源并入库。单个信源失败不影响其他信源，也不改变返回码。"""
+    from secondbrain import ops
+
     sources = _load_sources_or_exit()
     if source:
         sources = [s for s in sources if s.id == source]
         if not sources:
             typer.echo(f"{FAIL} 未找到信源：{source}", err=True)
             raise typer.Exit(code=1)
+    elif not ops.active_sources(sources):
+        typer.echo(ops.NO_SOURCES)
+        return
     try:
         fs = config.fetch_settings(config.load_settings())
     except (config.ConfigError, OSError, ValueError) as exc:
@@ -526,36 +531,36 @@ def profile_update(
 
 
 @sources_app.command("tune")
-def sources_tune(
-    apply: bool = typer.Option(False, "--apply", help="把建议写入 config/sources.yaml"),
-) -> None:
-    """按信源的 有收获 / 不感兴趣 / 没价值 比例给出 trust 调整建议（±1，限 1–5）。"""
-    from secondbrain.profile.tune import source_stats, source_yields
+def sources_tune() -> None:
+    """只读的信源统计：反馈分布、近期产出与低产出停用建议（ADR 0018）。
+    反馈不再用来调整 trust；trust 请在 config/sources.yaml 或 Web /sources 中手动设置。"""
+    from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
 
     _, fs, _ = _load_pipeline_settings()
     sources = _load_sources_or_exit()
     pers = fs.personalize
     conn = db.connect()
     try:
-        stats = source_stats(conn, sources, datetime.now(UTC), pers)
+        dist = feedback_distribution(conn)
         yields = source_yields(conn, sources, datetime.now(UTC), pers)
     finally:
         conn.close()
+    if not sources:
+        typer.echo("还没有信源，去 /sources 添加")
+        return
+    labels = "  ".join(db.FEEDBACK_KINDS[k] for k in DISTRIBUTION_KINDS)
+    width = max(len(s.id) for s in sources)
     typer.echo(
-        f"近 {pers.tune_window_days} 天；每个条目取当前反馈（有收获为正，不感兴趣 / 没价值为负）；"
-        f"样本 ≥ {pers.tune_min_samples} 才给建议"
+        f"反馈分布（各条目当前状态：{labels}）与近 {pers.yield_window_days} 天产出；只供参考"
     )
-    width = max(len(st.source_id) for st in stats) if stats else 0
-    shown = [st for st in stats if st.samples or st.suggested]
-    for st in shown:
-        change = f"trust {st.trust} → {st.suggested}" if st.suggested else f"trust {st.trust}"
+    for s in sources:
+        counts = dist.get(s.id, {})
+        shown = " ".join(f"{counts.get(k, 0):>3}" for k in DISTRIBUTION_KINDS)
+        y = yields[s.id]
         typer.echo(
-            f"{st.source_id.ljust(width)}  正 {st.positive:>3}  负 {st.negative:>3}  "
-            f"{change:<14}  {st.reason}"
+            f"{s.id.ljust(width)}  trust {s.trust}  反馈 {shown}  "
+            f"入库 {y.items:>3} 精读 {y.l2:>3} 进入推荐 {y.front:>3}"
         )
-    silent = len(stats) - len(shown)
-    if silent:
-        typer.echo(f"另有 {silent} 个信源没有反馈：样本不足，不给建议")
     low = [y for y in yields.values() if y.low_yield]
     typer.echo(
         f"\n低产出信源（近 {pers.yield_window_days} 天入库 ≥ {pers.low_yield_min_items} 条、"
@@ -566,16 +571,6 @@ def sources_tune(
             f"{WARN} {y.source_id}：入库 {y.items}，精读 {y.l2}，进入推荐 0 —— 建议停用"
             "（在 Web /sources 一键停用，或改 config/sources.yaml）"
         )
-    changes = {st.source_id: st.suggested for st in stats if st.suggested}
-    if not changes:
-        typer.echo("没有 trust 调整建议")
-        return
-    if not apply:
-        typer.echo(f"\n共 {len(changes)} 条建议；用 --apply 写入 config/sources.yaml")
-        return
-    from secondbrain import ops
-
-    ops.apply_trust(changes, typer.echo)
 
 
 @app.command()
