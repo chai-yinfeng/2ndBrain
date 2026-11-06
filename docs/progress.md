@@ -529,3 +529,31 @@
 - 用 flow 风格（`- {id: …}`）手写的条目无法按块定位。
 - 旧 settings.yaml 中的 `tune_*` 键会被静默忽略。
 - 手动条目不进每日推荐。
+
+## M11 修复 — RSS 主页兜底、/add 布局、DOI / PDF 导入兜底（2026-11-06，分支 `m11-fixes`）
+
+**做了什么**（ADR 0019）
+- RSS 信源主页：优先级为 配置 > 已记录的 channel link > feed URL 的站点根。feeds.* 子域与 feedburner 等托管域名不给链接。"预览"时显示并记录 channel link，不写 items。
+- `/add` 改为纵向表单：
+  - 每个字段 label 在上、输入框整宽；URL 框 6 行，正文粘贴框 8 行；
+  - 状态 / 已读时 / 兜底三组 fieldset，长说明放在下方小号灰字；
+  - 选"准备读"时用纯 CSS（`:has`）把"已读时"一组调淡，无 JS 也可用。
+  - 截图在 1280 与 375 宽下检查过。
+- DOI：识别 URL 中的 DOI 并查 Semantic Scholar。
+  - 有 arXiv → 走 arXiv 流程；有开放获取 PDF → 用 PDF；否则只导入标题 + 摘要（`abstract_only`，结果显示"新增（仅摘要）"）；
+  - 规范 URL 为 `https://doi.org/<doi>`。
+- 失败原因具体化（403 / 404 / 429 / 超时 / 机器人验证页 / 不是文章页），并提示"可粘贴正文或上传 PDF"。
+- PDF 上传兜底：`/add` 的上传框与 `sb add --pdf`，≤ 30MB、只接受 PDF；`python-multipart` 已是现有依赖。已存在的"仅摘要"条目再次添加时，可以用上传的 PDF 或粘贴的正文补全正文。
+- 测试：
+  - 新增 `tests/test_manual_fixes.py`（14 个 + 1 个 live），fixture 为 `s2_arxiv.json`、`s2_oapdf.json`、`s2_abstract.json`；
+  - 修改了 `test_m10.py` 中两处主页断言（rss 现在有兜底链接）和 `test_manual_add.py` 中一处失败原因（现在更具体）。
+
+**验收结果**
+- `uv run pytest -q`：334 passed；ruff check / format 均通过。
+- 在临时目录用真实网络对 Borg 的 ACM 链接运行 `sb add --read`（fake 后端）：
+  - 第一次尝试遇到 S2 限流（429）且页面返回 403，输出了两边合并的失败原因；
+  - 再试一次成功："新增（仅标题，S2 没有摘要） #1 Large-scale cluster management at Google with Borg"，作者与年份来自 S2，规范 URL 为 `https://doi.org/10.1145/2741948.2741964`。
+
+**遗留问题**
+- 未带 key 的 S2 请求偶尔会被 429 限流，需要稍后重试。
+- Borg 在 S2 中没有摘要，所以导入后正文只有标题，建议再次添加时上传 PDF（如 research.google 上的版本）来补全正文。

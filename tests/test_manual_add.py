@@ -92,7 +92,10 @@ def test_cli_add_later_and_dedupe(env):
     out = runner.invoke(cli_app, ["add", POST, OTHER, DOWN])  # 默认 --later
     assert out.exit_code == 0, out.output
     assert "合计：新增 2，已存在 0，失败 1" in out.output
-    assert "✗ https://down.example.com/paywalled：无法获取正文" in out.output
+    assert (
+        "✗ https://down.example.com/paywalled：HTTP 404：页面不存在。可粘贴正文或上传 PDF"
+        in out.output
+    )
     conn = db.connect()
     rows = conn.execute("SELECT id, source_id, status, title, read_at FROM items").fetchall()
     later = [r["id"] for r in db.items_in_state(conn, "later")]

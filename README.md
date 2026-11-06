@@ -34,6 +34,7 @@ uv run sb profile update        # 根据反馈生成 profile 修改提案，只�
 uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
 uv run sb sources tune          # 只读的信源统计：反馈分布、近期产出、低产出停用建议（反馈不再调整 trust）
 uv run sb add <url>... --read --feedback gained   # 手动补录读过 / 想读的文章（--later 为准备读；--ingest 编入 wiki）
+uv run sb add https://dl.acm.org/doi/10.1145/2741948.2741964 --pdf borg.pdf   # DOI 链接查 Semantic Scholar；抓不到正文时用 PDF 兜底
 uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
 uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
 uv run sb prereq <item_id>      # 补前置：wiki 已有的给链接，没有的生成简短讲解（AI 生成）

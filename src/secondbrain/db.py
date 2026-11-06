@@ -782,3 +782,19 @@ def mark_read(conn: sqlite3.Connection, item_id: int, ts: datetime) -> None:
         "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?", (format_time(ts), item_id)
     )
     conn.commit()
+
+
+def record_homepage(conn: sqlite3.Connection, source_id: str, homepage: str) -> None:
+    """记录 feed 中读到的主页（预览时也会调用）；信源还没有 DB 行时不做任何事。"""
+    conn.execute("UPDATE sources SET homepage = ? WHERE id = ?", (homepage, source_id))
+
+
+def replace_content(conn: sqlite3.Connection, item_id: int, content: str, method: str) -> None:
+    """用新正文替换条目正文（手动添加时补全"仅摘要"的条目）；content_hash 随之更新。"""
+    from secondbrain.urls import content_hash
+
+    title = conn.execute("SELECT title FROM items WHERE id = ?", (item_id,)).fetchone()[0]
+    conn.execute(
+        "UPDATE items SET content = ?, extract_method = ?, content_hash = ? WHERE id = ?",
+        (content, method, content_hash(title, content), item_id),
+    )

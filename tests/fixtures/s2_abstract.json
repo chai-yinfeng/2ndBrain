@@ -1,0 +1,5 @@
+{"paperId": "x3", "title": "Large-scale cluster management at Google with Borg", "year": 2015,
+ "authors": [{"authorId": "4", "name": "Abhishek Verma"}, {"authorId": "5", "name": "John Wilkes"}],
+ "abstract": "Google's Borg system is a cluster manager that runs hundreds of thousands of jobs.",
+ "openAccessPdf": {"url": "", "status": null}, "externalIds": {"DOI": "10.1145/2741948.2741964"},
+ "url": "https://www.semanticscholar.org/paper/x3"}

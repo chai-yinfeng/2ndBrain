@@ -630,6 +630,9 @@ def add(
     text_file: str | None = typer.Option(
         None, "--text-file", help="正文文件（单个 URL；付费墙 / 需登录页面抓取失败时的备选）"
     ),
+    pdf_file: str | None = typer.Option(
+        None, "--pdf", help="PDF 文件（单个 URL；抓取失败或只有摘要时用它的文本，≤ 30MB）"
+    ),
 ) -> None:
     """手动添加文章：不进 L1 / L2 / 分级，只记录状态与反馈（ADR 0018）。"""
     from pathlib import Path
@@ -637,6 +640,7 @@ def add(
     from secondbrain import ops
 
     text = Path(text_file).read_text(encoding="utf-8") if text_file else None
+    pdf = Path(pdf_file).read_bytes() if pdf_file else None
     try:
         out = ops.add_manual(
             urls,
@@ -645,12 +649,15 @@ def add(
             feedback=feedback,
             ingest=ingest,
             text=text,
+            pdf=pdf,
         )
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
     results = out["results"]
-    counts = {k: sum(r["status"] == k for r in results) for k in ("新增", "已存在", "失败")}
+    counts = {
+        k: sum(r["status"].startswith(k) for r in results) for k in ("新增", "已存在", "失败")
+    }
     typer.echo("合计：" + "，".join(f"{k} {v}" for k, v in counts.items()))
     if out["ingest"]:
         typer.echo(f"编入 wiki 费用 ${out['ingest']['cost']:.4f}")
