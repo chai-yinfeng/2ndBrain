@@ -337,9 +337,10 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
             data[key] = value
     if "tags" in data:
         data["tags"] = [t.strip() for t in re.split(r"[,，]", data["tags"]) if t.strip()]
-    if data.get("type") == "sitemap":
+    if data.get("type") in ("sitemap", "html_index"):
         if (form.get("url_pattern") or "").strip():
             data["url_pattern"] = form["url_pattern"].strip()
+    if data.get("type") == "sitemap":
         data["use_lastmod"] = bool(form.get("use_lastmod"))
     try:
         return SourceConfig.model_validate(data)

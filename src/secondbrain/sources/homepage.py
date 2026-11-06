@@ -47,6 +47,8 @@ def source_homepage(source: SourceConfig, detected: str | None = None) -> str | 
     url = source.url or ""
     if source.type == "rss":
         return safe_url(detected) or feed_root(url)
+    if source.type == "html_index":
+        return safe_url(url)  # 列表页本身就是人浏览的页面
     if source.type == "sitemap":
         parts = urlsplit(url)
         return safe_url(f"{parts.scheme}://{parts.netloc}/") if parts.netloc else None

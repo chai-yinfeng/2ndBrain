@@ -3,8 +3,10 @@
 #
 # 每个条目字段：
 #   id:            唯一标识（小写、短横线）
-#   type:          rss | arxiv | hf_papers | youtube | sitemap
-#   url:           rss / hf_papers / youtube / sitemap 使用的地址（sitemap 为 sitemap.xml）
+#   type:          rss | arxiv | hf_papers | youtube | sitemap | html_index
+#   url:           rss / hf_papers / youtube / sitemap / html_index 使用的地址
+#                  （sitemap 为 sitemap.xml；html_index 为博客列表页）
+#   homepage:      人实际浏览的博客列表页或频道页（/sources 上信源名的链接；2026-11 逐个实测）
 #   query:         arxiv 使用的检索式（分类 + 关键词）
 #   trust:         1–5，信源可信度，参与排序加权
 #                  建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
@@ -14,7 +16,9 @@
 #   enabled:       是否启用
 #   backfill:      是否把 feed 中时间窗以外的历史条目放进回补池（默认 false；ADR 0004 / 0009）
 #   needs_scraper: 站点没有可用 RSS，需要页面抓取支持（默认 false；M1 记录为待支持，不阻塞）
-#   url_pattern:   sitemap 专用，只保留匹配该正则的 URL（排除列表页、About 等）
+#   url_pattern:   sitemap / html_index 专用，只保留匹配该正则的 URL（排除列表页、About 等；
+#                  html_index 中匹配的是转成绝对地址后的文章链接，必填）
+#   max_links:     html_index 专用，列表页最多取前 N 个文章链接（可选；ADR 0020）
 #   use_lastmod:   sitemap 专用，URL 中没有日期时按 <lastmod> 选最新条目，入库时页面日期优先
 #                  （默认 false；ADR 0012）
 
@@ -23,6 +27,7 @@ sources:
   - id: vllm-blog
     type: rss
     url: https://vllm.ai/blog/rss.xml
+    homepage: https://vllm.ai/blog
     trust: 5
     role: core
     tags: [inference, serving]
@@ -32,7 +37,21 @@ sources:
   - id: lmsys-sglang-blog
     type: sitemap
     url: https://lmsys.org/sitemap.xml
+    homepage: https://lmsys.org/blog/
     url_pattern: '^https://www\.lmsys\.org/blog/\d{4}-\d{2}-\d{2}-'  # 发布日期在 slug 里
+    trust: 5
+    role: core
+    tags: [inference, serving, sglang]
+    max_age_days: 30
+    enabled: true
+
+  - id: sglang-blog
+    type: html_index
+    # sglang.io 与 lmsys.org 是两个都在更新的 SGLang 博客；sglang.io 的 sitemap 只列了 3 篇，
+    # 所以直接解析列表页（html_index，ADR 0020）
+    url: https://www.sglang.io/blog
+    homepage: https://www.sglang.io/blog
+    url_pattern: '^https://www\.sglang\.io/blog/[^/?#]+$'
     trust: 5
     role: core
     tags: [inference, serving, sglang]
@@ -42,6 +61,7 @@ sources:
   - id: pytorch-blog
     type: rss
     url: https://pytorch.org/feed/
+    homepage: https://pytorch.org/blog/
     trust: 5
     role: core
     tags: [pytorch, infra]
@@ -51,6 +71,7 @@ sources:
   - id: horace-he
     type: rss
     url: https://www.thonking.ai/feed
+    homepage: https://www.thonking.ai/
     trust: 5
     role: core
     tags: [gpu, performance, compilers]
@@ -60,6 +81,7 @@ sources:
   - id: tri-dao
     type: rss
     url: https://tridao.me/feed.xml
+    homepage: https://tridao.me/blog/
     trust: 5
     role: core
     tags: [attention, kernels]
@@ -69,6 +91,7 @@ sources:
   - id: hazy-research
     type: rss
     url: https://hazyresearch.stanford.edu/blog  # 实测无 RSS（2026-11）
+    homepage: https://hazyresearch.stanford.edu/blog
     trust: 5
     role: core
     tags: [systems, kernels, research]
@@ -79,6 +102,7 @@ sources:
   - id: tim-dettmers
     type: rss
     url: https://timdettmers.com/feed/
+    homepage: https://timdettmers.com/
     trust: 5
     role: core
     tags: [quantization, gpu]
@@ -88,6 +112,7 @@ sources:
   - id: chips-and-cheese
     type: rss
     url: https://chipsandcheese.com/feed/
+    homepage: https://chipsandcheese.com/
     trust: 5
     role: core
     tags: [hardware, microarchitecture, gpu]
@@ -98,6 +123,7 @@ sources:
   - id: marc-brooker
     type: rss
     url: https://brooker.co.za/blog/rss.xml
+    homepage: https://brooker.co.za/blog/
     trust: 5
     role: core
     tags: [distributed-systems]
@@ -107,6 +133,7 @@ sources:
   - id: murat-demirbas
     type: rss
     url: https://muratbuffalo.blogspot.com/feeds/posts/default
+    homepage: https://muratbuffalo.blogspot.com/
     trust: 5
     role: core
     tags: [distributed-systems, consensus]
@@ -116,6 +143,7 @@ sources:
   - id: aphyr-jepsen
     type: rss
     url: https://aphyr.com/posts.atom
+    homepage: https://aphyr.com/posts
     trust: 5
     role: core
     tags: [distributed-systems, testing, consistency]
@@ -125,6 +153,7 @@ sources:
   - id: martin-kleppmann
     type: rss
     url: https://martin.kleppmann.com/feed.rss
+    homepage: https://martin.kleppmann.com/archive.html
     trust: 5
     role: core
     tags: [distributed-systems, crdt]
@@ -135,6 +164,7 @@ sources:
   - id: karpathy-github
     type: rss
     url: https://karpathy.github.io/feed.xml
+    homepage: https://karpathy.github.io/
     trust: 5
     role: core
     tags: [llm, deep-learning]
@@ -145,6 +175,7 @@ sources:
   - id: karpathy-bearblog
     type: rss
     url: https://karpathy.bearblog.dev/feed/
+    homepage: https://karpathy.bearblog.dev/blog/
     trust: 5
     role: core
     tags: [llm]
@@ -154,6 +185,7 @@ sources:
   - id: lilian-weng
     type: rss
     url: https://lilianweng.github.io/index.xml
+    homepage: https://lilianweng.github.io/
     trust: 5
     role: core
     tags: [llm, research, survey]
@@ -164,6 +196,7 @@ sources:
   - id: sebastian-raschka
     type: rss
     url: https://magazine.sebastianraschka.com/feed
+    homepage: https://magazine.sebastianraschka.com/archive
     trust: 5
     role: core
     tags: [llm, research]
@@ -173,6 +206,7 @@ sources:
   - id: chip-huyen
     type: rss
     url: https://huyenchip.com/feed.xml
+    homepage: https://huyenchip.com/blog/
     trust: 5
     role: core
     tags: [ml-systems, llm]
@@ -182,6 +216,7 @@ sources:
   - id: colah
     type: rss
     url: https://colah.github.io/rss.xml
+    homepage: https://colah.github.io/
     trust: 5
     role: core
     tags: [deep-learning, explainer]
@@ -192,6 +227,7 @@ sources:
   - id: interconnects
     type: rss
     url: https://www.interconnects.ai/feed
+    homepage: https://www.interconnects.ai/archive
     trust: 5
     role: core
     tags: [llm, post-training, rl]
@@ -201,6 +237,7 @@ sources:
   - id: hf-blog
     type: rss
     url: https://huggingface.co/blog/feed.xml
+    homepage: https://huggingface.co/blog
     trust: 4
     role: core
     tags: [llm, open-source]
@@ -211,6 +248,7 @@ sources:
   - id: anthropic-research  # 原 anthropic-engineering：engineering 文章已迁到 /research/ 下（ADR 0012）
     type: sitemap
     url: https://www.anthropic.com/sitemap.xml
+    homepage: https://www.anthropic.com/research
     # 只取 /research/<slug> 文章页：排除 /research 列表页与 /research/team/* 团队页；混入的研究文章由 L1 过滤
     url_pattern: '^https://www\.anthropic\.com/research/[^/]+$'
     use_lastmod: true  # lastmod 是"最后修改"，老文章会被刷新；入库时以页面日期为准
@@ -223,6 +261,7 @@ sources:
   - id: simon-willison
     type: rss
     url: https://simonwillison.net/atom/everything/
+    homepage: https://simonwillison.net/
     trust: 5
     role: core
     tags: [llm, tools, harness]
@@ -232,6 +271,7 @@ sources:
   - id: hamel-husain
     type: rss
     url: https://hamel.dev/index.xml
+    homepage: https://hamel.dev/
     trust: 5
     role: core
     tags: [evals, harness]
@@ -241,6 +281,7 @@ sources:
   - id: eugene-yan
     type: rss
     url: https://eugeneyan.com/rss/
+    homepage: https://eugeneyan.com/writing/
     trust: 5
     role: core
     tags: [evals, ml-systems, harness]
@@ -251,6 +292,7 @@ sources:
   - id: openai-news
     type: rss
     url: https://openai.com/news/rss.xml
+    homepage: https://openai.com/news/
     trust: 4
     role: core
     tags: [lab]
@@ -260,6 +302,7 @@ sources:
   - id: anthropic-news
     type: sitemap
     url: https://www.anthropic.com/sitemap.xml
+    homepage: https://www.anthropic.com/news
     # 排除分类列表页（/news/product 等，sitemap 中没有 lastmod）
     url_pattern: '^https://www\.anthropic\.com/news/(?!(announcements|features|models|partnerships|policy|product|safeguards|security)$)[^/]+$'
     use_lastmod: true  # lastmod 是"最后修改"，老文章会被刷新；入库时以页面日期为准
@@ -272,6 +315,7 @@ sources:
   - id: google-deepmind
     type: rss
     url: https://deepmind.google/blog/rss.xml
+    homepage: https://deepmind.google/blog/
     trust: 4
     role: core
     tags: [lab]
@@ -281,6 +325,7 @@ sources:
   - id: meta-ai
     type: rss
     url: https://ai.meta.com/blog/
+    homepage: https://ai.meta.com/blog/
     trust: 4
     role: core
     tags: [lab]
@@ -291,6 +336,7 @@ sources:
   - id: qwen-blog
     type: rss
     url: https://qwenlm.github.io/blog/index.xml
+    homepage: https://qwenlm.github.io/blog/
     trust: 4
     role: core
     tags: [lab, open-weights]
@@ -300,6 +346,7 @@ sources:
   - id: deepseek-news
     type: rss
     url: https://api-docs.deepseek.com/news/  # 实测无 RSS（2026-11）
+    homepage: https://api-docs.deepseek.com/news/
     trust: 4
     role: core
     tags: [lab, open-weights]
@@ -311,6 +358,7 @@ sources:
   - id: hf-daily-papers
     type: hf_papers
     url: https://huggingface.co/api/daily_papers
+    homepage: https://huggingface.co/papers
     trust: 4
     role: core
     tags: [paper]
@@ -320,6 +368,7 @@ sources:
   - id: arxiv-cs-cl
     type: arxiv
     query: 'cat:cs.CL AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:"speculative decoding" OR abs:quantization OR abs:attention OR abs:agent)'
+    homepage: https://arxiv.org/list/cs.CL/recent
     trust: 4
     role: core
     tags: [paper, nlp]
@@ -329,6 +378,7 @@ sources:
   - id: arxiv-cs-lg
     type: arxiv
     query: 'cat:cs.LG AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:"speculative decoding" OR abs:quantization OR abs:parallelism OR abs:attention)'
+    homepage: https://arxiv.org/list/cs.LG/recent
     trust: 4
     role: core
     tags: [paper, ml]
@@ -338,6 +388,7 @@ sources:
   - id: arxiv-cs-dc
     type: arxiv
     query: 'cat:cs.DC AND (abs:inference OR abs:serving OR abs:"kv cache" OR abs:parallelism OR abs:LLM)'
+    homepage: https://arxiv.org/list/cs.DC/recent
     trust: 4
     role: core
     tags: [paper, distributed-systems]
@@ -348,6 +399,7 @@ sources:
   - id: import-ai
     type: rss
     url: https://importai.substack.com/feed
+    homepage: https://importai.substack.com/archive
     trust: 3
     role: core
     tags: [newsletter]
@@ -357,6 +409,7 @@ sources:
   - id: latent-space
     type: rss
     url: https://www.latent.space/feed
+    homepage: https://www.latent.space/archive
     trust: 3
     role: core
     tags: [newsletter, harness]
@@ -367,6 +420,7 @@ sources:
   - id: lesswrong-curated
     type: rss
     url: https://www.lesswrong.com/feed.xml?view=curated-rss
+    homepage: https://www.lesswrong.com/recommendations
     trust: 3
     role: expansion
     tags: [rationality]
@@ -376,6 +430,7 @@ sources:
   - id: alignment-forum
     type: rss
     url: https://www.alignmentforum.org/feed.xml?view=curated-rss
+    homepage: https://www.alignmentforum.org/
     trust: 3
     role: expansion
     tags: [alignment]
@@ -385,6 +440,7 @@ sources:
   - id: gwern
     type: rss
     url: https://gwern.substack.com/feed  # gwern.net 的 feed 指向此处，但 2021-06 后未更新
+    homepage: https://gwern.net/
     trust: 3
     role: expansion
     tags: [essays]
@@ -394,6 +450,7 @@ sources:
   - id: dan-luu
     type: rss
     url: https://danluu.com/atom.xml
+    homepage: https://danluu.com/
     trust: 3
     role: expansion
     tags: [engineering, essays]
@@ -403,6 +460,7 @@ sources:
   - id: hillel-wayne
     type: rss
     url: https://www.hillelwayne.com/index.xml
+    homepage: https://www.hillelwayne.com/post/
     trust: 3
     role: expansion
     tags: [formal-methods, engineering]
@@ -414,6 +472,7 @@ sources:
   - id: karpathy-youtube
     type: youtube
     url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXUPKJO5MZQN11PqgIvyuvQ
+    homepage: https://www.youtube.com/channel/UCXUPKJO5MZQN11PqgIvyuvQ
     trust: 5
     role: core
     tags: [video, llm]
@@ -424,6 +483,7 @@ sources:
     # CS25（Transformers United）、CS336（Language Modeling from Scratch）等课程
     type: youtube
     url: https://www.youtube.com/feeds/videos.xml?channel_id=UCBa5G_ESCn8Yd4vw5U-gIcg
+    homepage: https://www.youtube.com/channel/UCBa5G_ESCn8Yd4vw5U-gIcg
     trust: 4
     role: core
     tags: [video, course]
@@ -433,6 +493,7 @@ sources:
   - id: gpu-mode
     type: youtube
     url: https://www.youtube.com/feeds/videos.xml?channel_id=UCJgIbYl6C5no72a0NUAPcTA
+    homepage: https://www.youtube.com/channel/UCJgIbYl6C5no72a0NUAPcTA
     trust: 5
     role: core
     tags: [video, gpu, kernels]
@@ -442,6 +503,7 @@ sources:
   - id: dwarkesh-podcast
     type: youtube
     url: https://www.youtube.com/feeds/videos.xml?channel_id=UCXl4i9dYBrFOabk0xGmbkRA
+    homepage: https://www.youtube.com/channel/UCXl4i9dYBrFOabk0xGmbkRA
     trust: 3
     role: core
     tags: [video, podcast]
@@ -451,6 +513,7 @@ sources:
   - id: adam-neely
     type: youtube
     url: https://www.youtube.com/feeds/videos.xml?channel_id=UCnkp4xDOwqqJD7sSM3xdUiQ
+    homepage: https://www.youtube.com/channel/UCnkp4xDOwqqJD7sSM3xdUiQ
     trust: 3
     role: expansion
     tags: [video, music-theory]

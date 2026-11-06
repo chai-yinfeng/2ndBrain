@@ -2,6 +2,7 @@
 CSRF 与 Host 校验。全部离线；config 目录与 .env 由 conftest 指向临时路径。"""
 
 import os
+import re
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -184,6 +185,10 @@ def test_source_homepage_rules():
 
 
 def test_feed_homepage_is_detected_and_linked(env, make_client):
+    # M12 起 example 为每个信源写了 homepage；这里去掉它们，检验推导与兜底规则
+    example = (config.config_dir() / "sources.example.yaml").read_text(encoding="utf-8")
+    stripped = re.sub(r"^\s+homepage: .*\n", "", example, flags=re.M)
+    (config.config_dir() / "sources.yaml").write_text(stripped, encoding="utf-8")
     assert parse_feed(fixture_bytes("rss.xml")).homepage
     feed = "https://blog.example.com/feed.xml"
     client, _ = make_client({feed: httpx.Response(200, content=fixture_bytes("rss.xml"))})

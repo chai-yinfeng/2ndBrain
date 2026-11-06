@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SourceType = Literal["rss", "arxiv", "hf_papers", "youtube", "sitemap"]
+SourceType = Literal["rss", "arxiv", "hf_papers", "youtube", "sitemap", "html_index"]
 
 
 class SourceConfig(BaseModel):
@@ -29,7 +29,8 @@ class SourceConfig(BaseModel):
     backfill: bool = False  # M5 实现，M1 只解析并入库
     needs_scraper: bool = False
     homepage: str | None = None  # 信源主页（/sources 上的链接）；不填时按类型推导（ADR 0017）
-    url_pattern: str | None = None  # sitemap：只保留匹配该正则的 URL（re.search）
+    url_pattern: str | None = None  # sitemap / html_index：只保留匹配该正则的 URL（re.search）
+    max_links: int | None = Field(default=None, ge=1)  # html_index：列表页最多取前 N 个链接
     use_lastmod: bool = False  # sitemap：URL 无日期时按 <lastmod> 选最新条目（页面日期优先）
 
     @model_validator(mode="after")
@@ -38,8 +39,14 @@ class SourceConfig(BaseModel):
             raise ValueError("arxiv 信源需要 query")
         if self.type != "arxiv" and not self.url:
             raise ValueError(f"{self.type} 信源需要 url")
-        if self.type != "sitemap" and (self.url_pattern is not None or self.use_lastmod):
-            raise ValueError("url_pattern / use_lastmod 只用于 sitemap 信源")
+        if self.type not in ("sitemap", "html_index") and self.url_pattern is not None:
+            raise ValueError("url_pattern 只用于 sitemap / html_index 信源")
+        if self.type != "sitemap" and self.use_lastmod:
+            raise ValueError("use_lastmod 只用于 sitemap 信源")
+        if self.type != "html_index" and self.max_links is not None:
+            raise ValueError("max_links 只用于 html_index 信源")
+        if self.type == "html_index" and not self.url_pattern:
+            raise ValueError("html_index 信源需要 url_pattern（文章链接的正则）")
         if self.url_pattern is not None:
             try:
                 re.compile(self.url_pattern)

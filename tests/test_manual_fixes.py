@@ -1,6 +1,7 @@
 """M11 修复（ADR 0019）：DOI → Semantic Scholar、具体的失败原因、PDF 上传兜底、RSS 主页兜底。
 全部离线（live 测试默认跳过）。"""
 
+import re
 from pathlib import Path
 
 import httpx
@@ -202,6 +203,10 @@ def test_peek_shows_and_records_channel_link(env, monkeypatch):
         return HttpClient(fast_settings(), transport=httpx.MockTransport(h))
 
     monkeypatch.setattr("secondbrain.web.app._http_client", feed_client)
+    # M12 起 example 为每个信源写了 homepage；这里去掉它们，检验推导与兜底规则
+    example = (config.config_dir() / "sources.example.yaml").read_text(encoding="utf-8")
+    stripped = re.sub(r"^\s+homepage: .*\n", "", example, flags=re.M)
+    (config.config_dir() / "sources.yaml").write_text(stripped, encoding="utf-8")
     conn = db.connect()
     db.upsert_sources(conn, config.load_sources())
     conn.commit()
