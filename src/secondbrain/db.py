@@ -178,7 +178,8 @@ CLEAR_KIND = "clear"
 
 # items.status：new（待处理）→ l0_rejected | l1（已粗筛）→ l2（已精读）→ tiered | deferred
 # 回补条目（is_backfill = 1）：new → backfill_l1（已粗筛、留在回补池）→ l2 → tiered | deferred
-ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred", "backfill_l1")
+# manual（M11）：手动添加的条目，不进 L1 / L2 / 分级 / 预算
+ITEM_STATUSES = ("new", "l0_rejected", "l1", "l2", "tiered", "deferred", "backfill_l1", "manual")
 
 
 def format_time(dt: datetime) -> str:
@@ -743,3 +744,41 @@ def source_yield(conn: sqlite3.Connection, since: datetime) -> dict[str, sqlite3
         (format_time(since),),
     ).fetchall()
     return {r["id"]: r for r in rows}
+
+
+# ---------- M11：手动添加的文章（ADR 0018） ----------
+
+MANUAL_SOURCE = "manual"
+
+
+def ensure_manual_source(conn: sqlite3.Connection) -> None:
+    """虚拟信源 manual：DB 中有 sources 行（满足外键、详情页可显示），但不在 sources.yaml 中，
+    不参与抓取、产出率与低产出建议。"""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO sources (id, type, url, query, trust, role, tags, max_age_days,
+                                       enabled, backfill, needs_scraper, updated_at)
+        VALUES (?, 'manual', NULL, NULL, 3, 'core', '[]', 36500, 0, 0, 0, ?)
+        """,
+        (MANUAL_SOURCE, format_time(datetime.now(UTC))),
+    )
+
+
+def item_by_canonical(conn: sqlite3.Connection, url_canonical: str) -> int | None:
+    row = conn.execute("SELECT id FROM items WHERE url_canonical = ?", (url_canonical,)).fetchone()
+    return row[0] if row else None
+
+
+def item_by_hash(conn: sqlite3.Connection, content_hash: str) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM items WHERE content_hash = ? LIMIT 1", (content_hash,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def mark_read(conn: sqlite3.Connection, item_id: int, ts: datetime) -> None:
+    """ "已读、无评价"：只设置 items.read_at（保留最早时间），不写反馈；当前反馈状态为空。"""
+    conn.execute(
+        "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?", (format_time(ts), item_id)
+    )
+    conn.commit()

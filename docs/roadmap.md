@@ -321,6 +321,44 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example' 127.0.0.1:8765/
 kill %1
 ```
 
+## M11 — 信源手动维护与手动添加文章（ADR 0018）
+
+- [x] 反馈与 trust 解耦：删除 trust 建议与写入（`sb sources tune --apply`、`/ops` 应用按钮与路由、`tune_*` 设置）；`sb sources tune` 改为只读统计；`/sources` 显示各信源反馈分布（纯参考）
+- [x] `config/sources.yaml` 按条目文本块追加 / 删除 / 改 enabled，保留注释与格式；支持 `sources: []`
+- [x] 信源目录：列出 example 中未添加的信源（主页、论文类标记），可预览（最新约 10 条，不写库、不调用 LLM）、原样追加；已配置的信源也可预览
+- [x] 空信源：`sb fetch` / `sb run` / 首页给出"去 /sources 添加"的提示，不报错、不调用 LLM；首页、/sources、/ops 正常渲染
+- [x] 手动添加文章：`sb add` 与 `/add`（批量、后台逐个处理、结果为新增 / 已存在 / 失败）；虚拟信源 `manual`、状态 `manual`，不进 L1 / L2 / 分级 / 预算；准备读 = later，已读 = 读后反馈或"已读、无评价"（只设 read_at）；可选正文粘贴；"已读 + 有收获"可直接编入 wiki
+
+**模块**：`profile/tune.py`、`sources_file.py`、`ops.py`、`db.py`、`config.py`、`web/`、`cli.py`
+
+**验收**（临时目录：data、config、.env、LaunchAgents 都不碰真实路径；fake LLM；端口 8765；`sb add` 与预览需要网络）
+```bash
+uv run pytest -q tests/test_sources_catalog.py tests/test_manual_add.py
+T=$(mktemp -d); mkdir -p "$T/config" "$T/data"; cp config/*.example.* "$T/config/"
+export SB_CONFIG_DIR="$T/config" SB_ENV_FILE="$T/.env" SB_DATA_DIR="$T/data" SB_LLM_BACKEND=fake SB_LAUNCH_AGENTS_DIR="$T/agents"
+printf '# 我的信源\nsources: []\n' > "$T/config/sources.yaml"
+uv run sb fetch; uv run sb run | tail -1                                       # 空信源：友好提示
+uv run sb sources tune
+uv run sb serve --port 8765 &
+sleep 3
+curl -s 127.0.0.1:8765/ | grep -o '还没有启用的信源'
+curl -s 127.0.0.1:8765/sources | grep -c 'data-catalog='                        # 目录中全部 example 信源
+curl -s -X POST 127.0.0.1:8765/sources/lmsys-sglang-blog/peek | grep -o '解析到 [0-9]* 条'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST 127.0.0.1:8765/sources/catalog/lmsys-sglang-blog/add   # 303
+cat "$T/config/sources.yaml"                                                    # 头部注释保留，条目原样追加
+curl -s -o /dev/null -X POST 127.0.0.1:8765/sources/lmsys-sglang-blog/toggle; grep 'enabled' "$T/config/sources.yaml"
+curl -s 127.0.0.1:8765/ops | grep -c '/ops/tune'                                # 0：trust 建议已删除
+uv run sb add https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving --read --feedback gained
+uv run sb add https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving --read --feedback gained | tail -1   # 已存在：只更新状态
+sqlite3 "$SB_DATA_DIR/brain.db" "SELECT id, source_id, status, read_at IS NOT NULL FROM items"
+curl -s -X POST 127.0.0.1:8765/add --data-urlencode "urls=https://www.lmsys.org/blog/2026-10-26-cf-security
+https://nonexistent.invalid/x" -d state=later > /dev/null; sleep 6
+curl -s 127.0.0.1:8765/tasks/manual_add | grep -o 'data-add-status="[^"]*"'
+curl -s 127.0.0.1:8765/later | grep -c 'data-item-id='
+curl -s 127.0.0.1:8765/ | grep -o 'data-to-ingest="[0-9]*"'                     # 有收获的手动条目待编入
+kill %1
+```
+
 ## Backlog（不在本轮）
 
 - [ ] X / Twitter 信源

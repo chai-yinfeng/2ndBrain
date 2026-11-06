@@ -419,7 +419,7 @@ def test_csrf_middleware(env):
     )
     assert same.status_code == 200
     assert client.post("/feedback", data={"item_id": item, "kind": "later"}).status_code == 200
-    bad_ref = client.post("/ops/tune", headers={"Referer": "http://evil.example/x"})
+    bad_ref = client.post("/ops/settings/ping", headers={"Referer": "http://evil.example/x"})
     assert bad_ref.status_code == 403
     assert client.get("/", headers={"Host": "evil.example"}).status_code == 403
     assert client.post("/ops/settings/ping", headers={"Host": "evil.example"}).status_code == 403

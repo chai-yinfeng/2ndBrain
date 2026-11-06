@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from secondbrain import config, db
 from secondbrain.llm.fake import FakeBackend
-from secondbrain.models import FilterSettings, PersonalizeSettings, SourceConfig
+from secondbrain.models import FilterSettings, SourceConfig
 from secondbrain.pipeline.run import run_pipeline
 from secondbrain.profile.feedback import (
     few_shot_block,
@@ -19,7 +19,7 @@ from secondbrain.profile.feedback import (
     too_hard_prerequisites,
 )
 from secondbrain.profile.loader import load_profile
-from secondbrain.profile.tune import source_stats
+from secondbrain.profile.tune import feedback_distribution
 from secondbrain.urls import content_hash
 from secondbrain.web.app import create_app
 from secondbrain.wiki.ingest import pending_items
@@ -218,14 +218,18 @@ def test_too_hard_prerequisites_are_injected_into_l1_user_message(env, conn):
 # ---------- 信源调整 ----------
 
 
-def test_tune_counts_gained_vs_dismiss_and_worthless(conn):
+def test_feedback_distribution_counts_every_kind(conn):
     kinds = ["gained", "gained", "dismiss", "worthless", "too_easy", "too_hard", "later"]
     for n, kind in enumerate(kinds):
         db.add_feedback(conn, add_item(conn, n, f"p{n}"), kind, None, NOW - timedelta(hours=1))
-    (st,) = source_stats(
-        conn, [SourceConfig(id="blog", type="rss", url="u")], NOW, PersonalizeSettings()
-    )
-    assert (st.positive, st.negative) == (2, 2)
+    assert feedback_distribution(conn)["blog"] == {
+        "gained": 2,
+        "too_easy": 1,
+        "too_hard": 1,
+        "worthless": 1,
+        "dismiss": 1,
+        "later": 1,
+    }
 
 
 # ---------- 概念复习：需要回炉 / 已扎实 ----------

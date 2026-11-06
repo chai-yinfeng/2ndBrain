@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}添加文章 · Second Brain{% endblock %}
+{% block content %}
+<h1>手动添加文章</h1>
+<p class="meta">把读过或想读的文章补录进来：归到虚拟信源 manual，<b>不进</b> L1 / L2 / 分级 / 每日预算，只记录状态与反馈（反馈会照常用于画像与 few-shot）。已存在的链接不重复插入，只更新状态与反馈。条目页上的深度速读、补前置照常可用（按需付费）。</p>
+<form hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" class="add-form">
+  <label class="wide">URL（每行一个，可批量）<textarea name="urls" rows="6" required placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234"></textarea></label>
+  <fieldset>
+    <legend>状态</legend>
+    <label><input type="radio" name="state" value="later" checked> 准备读（进入稍后再看）</label>
+    <label><input type="radio" name="state" value="read"> 已读</label>
+  </fieldset>
+  <label>读后反馈（仅已读，可留空 = 已读、无评价）
+    <select name="feedback"><option value="">（不评价）</option>{% for k, label in read_kinds.items() %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+  </label>
+  <label><input type="checkbox" name="ingest" value="1"> 编入 wiki（仅「已读 + 有收获」；不勾选时会留在首页"待编进 wiki"里）</label>
+  <label class="wide">正文粘贴（可选，仅单个 URL；付费墙 / 需登录页面抓取失败时使用）<textarea name="text" rows="5"></textarea></label>
+  <p><button type="submit" class="fb">添加</button>
+  <span class="meta">后台逐个抓取与提取正文（每个链接几秒，arXiv 论文取 HTML 或 PDF），不调用 LLM；勾选编入 wiki 时每篇再约 1 分钟、按 strong 模型计费。单个失败不影响其他。</span></p>
+</form>
+{% with kind="manual_add", message=None %}{% include "_task.html" %}{% endwith %}
+{% endblock %}

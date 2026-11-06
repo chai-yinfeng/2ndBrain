@@ -1,0 +1,5 @@
+{# POST /sources/<id>/peek 返回的片段：最新约 10 条标题与日期 #}
+{% if error %}<p class="refresh">✗ {{ error }}</p>{% else %}
+<p class="meta">{{ source.id }}：解析到 {{ total }} 条，最新 {{ entries | length }} 条{% if source.type == "sitemap" %}（sitemap 显示 URL slug）{% endif %}</p>
+<ul class="peek">{% for e in entries %}<li>{{ e.published_at.strftime("%Y-%m-%d") if e.published_at else "日期未知" }} · <a href="{{ e.url }}" target="_blank" rel="noopener noreferrer">{{ e.title }}</a></li>{% else %}<li class="empty">（没有条目）</li>{% endfor %}</ul>
+{% endif %}

@@ -16,6 +16,14 @@
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
     {% elif kind == "run" %}
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/">查看今日 digest</a></p>
+    {% elif kind == "manual_add" %}
+      <table class="scores add-results">
+        <tr><th>URL</th><th>结果</th><th>条目</th></tr>
+        {% for r in task.result.results %}
+        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
+        {% endfor %}
+      </table>
+      {% if task.result.ingest %}<p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>{% endif %}
     {% elif kind.startswith("summary-") %}
       <p class="meta">{% if task.result.cached %}已有结果{% else %}估算费用 ${{ "%.4f" | format(task.result.cost) }}{% endif %} · <a href="/item/{{ task.result.item_id }}#summary">查看深度速读</a></p>
     {% endif %}

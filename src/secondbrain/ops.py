@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -32,6 +33,14 @@ RUN_LANES = {
     "fyi": "速览",
     "archived": "归档",
 }
+
+
+NO_SOURCES = "还没有启用的信源，去 /sources 添加（信源目录里可以逐个预览、添加）"
+
+
+def active_sources(sources: list) -> list:
+    """会被抓取的信源：启用且不是 needs_scraper。"""
+    return [s for s in sources if s.enabled and not s.needs_scraper]
 
 
 class OpsError(Exception):
@@ -116,14 +125,17 @@ def run_once(
         echo(f"LLM 后端：{backend_name}；profile 解析到 {len(profile.domains)} 个领域")
         if all_time:
             echo("不限时间窗：只去重，信源与 L0 都不按时间窗排除")
+        try:
+            sources = config.load_sources()
+        except config.ConfigError as exc:
+            raise OpsError(str(exc)) from exc
+        if not active_sources(sources):
+            echo(NO_SOURCES)  # 空信源：友好提示，不抓取、不调用 LLM（ADR 0018）
+            return RunReport()
 
         conn = db.connect()
         try:
             if not no_fetch:
-                try:
-                    sources = config.load_sources()
-                except config.ConfigError as exc:
-                    raise OpsError(str(exc)) from exc
                 with HttpClient(fetch_fs) as client:
                     results = ingest.fetch_sources(
                         conn, sources, client, fetch_fs, limit=fs.run.fetch_limit, all_time=all_time
@@ -262,20 +274,25 @@ def ensure_sources_file() -> tuple[Path, bool]:
     return target, True
 
 
-def apply_trust(changes: dict[str, int], echo: Echo) -> int:
-    """把 trust 建议行级写入 config/sources.yaml（保留注释）；返回成功修改的信源数。"""
-    from secondbrain.profile.tune import apply_trust_changes
+def edit_sources(edit) -> list:
+    """按文本编辑 config/sources.yaml（保留注释）：不存在时先从 example 复制，
+    edit(text) 返回新文本，校验通过后原子写入（ADR 0018）。"""
+    from secondbrain import sources_file
 
-    target, created = ensure_sources_file()
-    if created:
-        echo(f"{WARN} 已从 sources.example.yaml 生成 {target}（个人配置，已在 .gitignore 中）")
-    new_text, missing = apply_trust_changes(target.read_text(encoding="utf-8"), changes)
-    target.write_text(new_text, encoding="utf-8")
-    for source_id in missing:
-        echo(f"{FAIL} {source_id}：在 {target.name} 中找不到 trust 行，未修改")
-    done = len(changes) - len(missing)
-    echo(f"{OK} 已更新 {target}：{done} 个信源")
-    return done
+    path, _ = ensure_sources_file()
+    return sources_file.write(edit(path.read_text(encoding="utf-8")))
+
+
+def catalog_entries() -> list:
+    """信源目录：sources.example.yaml 中、不在当前生效配置里的条目（按 id）。"""
+    example = config.config_dir() / "sources.example.yaml"
+    if not example.is_file():
+        return []
+    try:
+        current = {s.id for s in config.load_sources()}
+    except config.ConfigError:
+        current = set()
+    return [s for s in config.load_sources(example) if s.id not in current]
 
 
 # ---------- 深度速读与补前置（M8，ADR 0015） ----------
@@ -621,3 +638,175 @@ def _store_llm(user: dict, llm: dict, models: dict) -> None:
     if not user and not (config.config_dir() / "settings.yaml").exists():
         return  # 与 example 相同：不创建个人设置文件
     config.save_user_settings(user)
+
+
+# ---------- 手动添加文章（M11，ADR 0018） ----------
+
+MANUAL_STATES = ("read", "later")
+READ_FEEDBACK = ("gained", "too_easy", "too_hard", "worthless")
+_ARXIV_URL = re.compile(r"arxiv\.org/(?:abs|pdf|html)/([^\s?#]+?)(?:v\d+)?(?:\.pdf)?/?$")
+
+
+@dataclass
+class AddResult:
+    url: str
+    status: str  # 新增 | 已存在 | 失败
+    item_id: int | None = None
+    title: str = ""
+    message: str = ""
+
+
+def validate_manual(
+    urls: list[str], state: str, feedback: str | None, ingest: bool, text: str | None
+) -> list[str]:
+    """检查表单 / 命令行参数；返回去重后的 URL 列表，不合法时抛 OpsError。"""
+    from secondbrain.sources.homepage import safe_url
+
+    cleaned = []
+    for raw in urls:
+        url = raw.strip()
+        if not url:
+            continue
+        if safe_url(url) is None:
+            raise OpsError(f"不是 http(s) 链接：{url}")
+        if url not in cleaned:
+            cleaned.append(url)
+    if not cleaned:
+        raise OpsError("请至少给出一个 URL")
+    if state not in MANUAL_STATES:
+        raise OpsError(f"状态应为 read 或 later：{state}")
+    if feedback and (state != "read" or feedback not in READ_FEEDBACK):
+        raise OpsError("读后反馈只能在「已读」时选择：gained / too_easy / too_hard / worthless")
+    if ingest and not (state == "read" and feedback == "gained"):
+        raise OpsError("编入 wiki 只适用于「已读 + 有收获」（wiki 队列只收当前状态为有收获的条目）")
+    if text and len(cleaned) != 1:
+        raise OpsError("正文粘贴只能用于单个 URL")
+    return cleaned
+
+
+def _fetch_manual(url: str, client, fs, text: str | None):
+    """抓取单个 URL：arXiv 链接走 API 元数据 + arxiv_html / pdf；其他走网页正文提取，
+    页面元数据补全标题 / 作者 / 日期。拿不到正文时用粘贴的正文；都没有时返回 None。"""
+    from secondbrain.ingest import FAILED_METHODS, extract_content
+    from secondbrain.models import RawEntry
+    from secondbrain.net import FetchError
+    from secondbrain.sources import arxiv
+
+    m = _ARXIV_URL.search(url)
+    entry = None
+    if m:
+        try:
+            resp = client.get(arxiv.API_URL, params={"id_list": m.group(1)})
+            found = arxiv.parse_api_response(resp.content)
+            entry = found[0] if found else None
+        except FetchError:
+            entry = None
+        entry = entry or RawEntry(url=arxiv.abs_url(m.group(1)), title=url, arxiv_id=m.group(1))
+    else:
+        entry = RawEntry(url=url, title=url, page_meta=True)
+    content, method = extract_content(entry, client, fs)
+    if method in FAILED_METHODS or not content:
+        if not text:
+            return None
+        content, method = text.strip(), "manual_text"
+        if entry.title == url:
+            first = next((ln.strip() for ln in content.splitlines() if ln.strip()), url)
+            entry.title = first[:120]
+    return entry, content[: fs.content_max_chars], method
+
+
+def add_manual(
+    urls: list[str],
+    echo: Echo,
+    *,
+    state: str,
+    feedback: str | None = None,
+    ingest: bool = False,
+    text: str | None = None,
+    client=None,
+) -> dict:
+    """手动添加文章（逐个处理，单个失败不影响其他）：归到虚拟信源 manual、状态 manual，
+    不进 L1 / L2 / 分级 / 预算。已存在（规范化 URL 或正文哈希相同）的只更新状态与反馈。
+    准备读 = later 反馈；已读 = 所选读后反馈，未选时只设置 read_at（已读、无评价）。"""
+    from secondbrain.sources.arxiv import abs_url
+    from secondbrain.urls import canonicalize_url, content_hash
+
+    urls = validate_manual(urls, state, feedback, ingest, text)
+    _, fs, fetch_fs = _settings()
+    own_client = client is None
+    client = client or HttpClient(fetch_fs)
+    results: list[AddResult] = []
+    conn = db.connect()
+    try:
+        db.ensure_manual_source(conn)
+        for url in urls:
+            m = _ARXIV_URL.search(url)
+            canonical = canonicalize_url(abs_url(m.group(1)) if m else url)
+            item_id = db.item_by_canonical(conn, canonical)
+            result = AddResult(url, "已存在", item_id)
+            if item_id is None:
+                try:
+                    fetched = _fetch_manual(url, client, fetch_fs, text)
+                except Exception as exc:  # 单个 URL 的任何错误都不影响其他
+                    fetched, reason = None, f"{type(exc).__name__}: {exc}"
+                else:
+                    reason = "无法获取正文（页面抓取失败、需要登录或不是文章页）；可粘贴正文后重试"
+                if fetched is None:
+                    result.status, result.message = "失败", reason
+                    results.append(result)
+                    echo(f"✗ {url}：{reason}")
+                    continue
+                entry, content, method = fetched
+                digest = content_hash(entry.title, content)
+                new = db.NewItem(
+                    source_id=db.MANUAL_SOURCE,
+                    url=entry.url,
+                    url_canonical=canonical,
+                    content_hash=digest,
+                    title=entry.title,
+                    author=entry.author,
+                    summary=entry.summary,
+                    content=content,
+                    extract_method=method,
+                    published_at=entry.published_at,
+                )
+                if db.insert_item(conn, new, datetime.now(UTC)):
+                    item_id = db.item_by_canonical(conn, canonical)
+                    db.set_status(conn, [item_id], "manual")
+                    result.status = "新增"
+                else:  # 正文与已有条目相同
+                    item_id = db.item_by_hash(conn, digest) or db.item_by_canonical(conn, canonical)
+                    result.message = "正文与已有条目相同"
+                result.item_id = item_id
+                conn.commit()
+            now = datetime.now(UTC)
+            if state == "later":
+                db.add_feedback(conn, item_id, "later", None, now)
+            elif feedback:
+                db.add_feedback(conn, item_id, feedback, None, now)
+            else:
+                db.mark_read(conn, item_id, now)
+            result.title = conn.execute(
+                "SELECT title FROM items WHERE id = ?", (item_id,)
+            ).fetchone()[0]
+            results.append(result)
+            echo(f"✓ {url}：{result.status} #{item_id} {result.title}")
+    finally:
+        conn.close()
+        if own_client:
+            client.close()
+    summary = None
+    ids = [r.item_id for r in results if r.item_id is not None]
+    if ingest and ids:
+        conn = db.connect()
+        try:
+            done = db.ingested_ids(conn)
+        finally:
+            conn.close()
+        todo = [i for i in ids if i not in done]
+        echo(f"编入 wiki：{len(todo)} 条")
+        summary = ingest_items(todo, echo) if todo else IngestSummary()
+    return {
+        "results": [r.__dict__ for r in results],
+        "ingest": summary.__dict__ if summary else None,
+    }

@@ -32,7 +32,8 @@ uv run sb serve                 # 本地 Web UI：http://127.0.0.1:8000/
 uv run sb usage --since 7d      # token 与费用
 uv run sb profile update        # 根据反馈生成 profile 修改提案，只打印 diff
 uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
-uv run sb sources tune          # 按反馈给出信源 trust 调整建议（--apply 写入 config/sources.yaml），并列出低产出信源
+uv run sb sources tune          # 只读的信源统计：反馈分布、近期产出、低产出停用建议（反馈不再调整 trust）
+uv run sb add <url>... --read --feedback gained   # 手动补录读过 / 想读的文章（--later 为准备读；--ingest 编入 wiki）
 uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
 uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
 uv run sb prereq <item_id>      # 补前置：wiki 已有的给链接，没有的生成简短讲解（AI 生成）
@@ -53,8 +54,9 @@ uv run sb wiki lint             # 检查断链、孤立页、缺字段
 Web 上的其他页面：
 
 - 首页：可以把"有收获"的条目编进 wiki（后台运行，显示进度和费用）。
-- `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；信源 trust 调整建议。
-- `/sources`：信源列表、试抓后添加、启用 / 停用、删除。修改写入 `config/sources.yaml`，**写回时注释不保留**，字段说明见 `config/sources.example.yaml`。
+- `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；运行方式与设置。
+- `/sources`：信源全部由你手动维护。列表（反馈分布、产出、低产出停用建议）、预览、启用 / 停用、删除；"信源目录"列出 example 中还没添加的信源，可以逐个预览、添加。修改按条目文本块写入 `config/sources.yaml`，**保留注释与格式**；`sources: []` 是合法的空配置。
+- `/add`：手动补录文章（每行一个 URL，可批量），"已读"可带读后反馈，"准备读"进入稍后再看；不进每日分级与预算。
 - `/wiki`：体检、到期复习、知识图谱（`/wiki/graph`）。
 - 首页与 `/history`：按形式（论文 / 博客 / 视频）和类型（前沿 / 讲解 / 综述 / 教程 / 观点）筛选，只影响显示。
 - `/ops` 的"设置"：查看 API key 是否已设置（不显示值），写入或清除 `.env` 中的 key；测试连接；选择 cheap / strong 模型与后端（只把与 example 不同的键写入 `config/settings.yaml`）。

@@ -109,3 +109,11 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 3px 0; font-size: 13px; }
 .chip { border: 1px solid var(--border); border-radius: 12px; padding: 0 9px; color: var(--fg); }
 .chip.on { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+.peek-row td { border-bottom: none; padding: 0 8px; }
+.peek { font-size: 13px; margin: 4px 0 8px; }
+.catalog-item form { display: inline; }
+.add-form { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.add-form textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.add-form fieldset { border: 1px solid var(--border); border-radius: 6px; }
+.add-results td.url { word-break: break-all; font-size: 12px; }

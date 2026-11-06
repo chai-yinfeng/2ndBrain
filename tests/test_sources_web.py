@@ -99,7 +99,8 @@ def test_add_toggle_delete(client, env):
     resp = client.post("/sources/add", data=form, follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"] == "/sources?saved=my-blog"
     text = personal(env).read_text(encoding="utf-8")
-    assert text.startswith("# 个人信源配置") and "sources.example.yaml" in text
+    example = (env / "config" / "sources.example.yaml").read_text(encoding="utf-8")
+    assert text.startswith(example)  # 从 example 复制后在末尾追加，注释与格式都保留（ADR 0018）
     sources = config.load_sources(personal(env))
     added = next(s for s in sources if s.id == "my-blog")
     assert (added.trust, added.tags, added.enabled) == (4, ["a", "b"], True)
@@ -117,6 +118,7 @@ def test_add_toggle_delete(client, env):
     assert any(s.id == "my-blog" for s in config.load_sources())  # 未确认不删除
     client.post("/sources/my-blog/delete", data={"confirm": "yes"})
     assert all(s.id != "my-blog" for s in config.load_sources())
+    assert personal(env).read_text(encoding="utf-8").rstrip() == example.rstrip()  # 删除只去掉该块
     assert client.post("/sources/nope/toggle").status_code == 404
 
 

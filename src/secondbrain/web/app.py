@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from secondbrain import __version__, config, db, ops, schedule
+from secondbrain import __version__, config, db, ops, schedule, sources_file
 from secondbrain.extract.transcript import key_point_link
 from secondbrain.llm.base import LLMError, Usage, make_backend
 from secondbrain.llm.usage import full_price, is_peak, record_call, summarize
@@ -39,7 +39,7 @@ from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
-from secondbrain.profile.tune import source_stats, source_yields
+from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
 from secondbrain.sources import FETCHERS
 from secondbrain.sources.homepage import source_homepage
 from secondbrain.web import filters
@@ -246,7 +246,7 @@ def _setting_context() -> dict:
 
 def _active_sources() -> int:
     try:
-        return sum(1 for s in config.load_sources() if s.enabled and not s.needs_scraper)
+        return len(ops.active_sources(config.load_sources()))
     except config.ConfigError:
         return 0
 
@@ -566,6 +566,49 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
 
+    @app.get("/add", response_class=HTMLResponse)
+    def add_page(request: Request) -> HTMLResponse:
+        """手动添加文章（ADR 0018）：不进 L1 / L2 / 分级，只记录状态与反馈。"""
+        return templates.TemplateResponse(
+            request,
+            "add.html",
+            {
+                "task": tasks.get("manual_add"),
+                "read_kinds": {k: db.FEEDBACK_KINDS[k] for k in ops.READ_FEEDBACK},
+            },
+        )
+
+    @app.post("/add", response_class=HTMLResponse)
+    async def add_submit(request: Request) -> HTMLResponse:
+        form = await request.form()
+        urls = str(form.get("urls") or "").splitlines()
+        state = str(form.get("state") or "later")
+        feedback = str(form.get("feedback") or "") or None
+        ingest = bool(form.get("ingest"))
+        text = str(form.get("text") or "").strip() or None
+        try:
+            urls = ops.validate_manual(urls, state, feedback, ingest, text)
+        except ops.OpsError as exc:
+            return task_fragment(request, "manual_add", f"✗ {exc}")
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                return ops.add_manual(
+                    urls,
+                    task.log,
+                    state=state,
+                    feedback=feedback,
+                    ingest=ingest,
+                    text=text,
+                    client=client,
+                )
+
+        try:
+            tasks.start("manual_add", f"手动添加 {len(urls)} 篇", run)
+        except TaskRunning as exc:
+            return task_fragment(request, "manual_add", str(exc))
+        return task_fragment(request, "manual_add")
+
     @app.get("/later", response_class=HTMLResponse)
     def later(request: Request) -> HTMLResponse:
         """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
@@ -757,7 +800,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
-        if kind not in TASKS and not re.fullmatch(r"summary-\d+", kind):
+        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"summary-\d+", kind)
+        if not known:
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind, refresh=bool(refresh))
 
@@ -813,14 +857,14 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         fs = _settings()
         now = datetime.now(UTC)
         midnight = datetime.combine(datetime.now().date(), datetime.min.time()).astimezone()
+        sources_error = None
         try:
-            sources, sources_error = config.load_sources(), None
+            config.load_sources()
         except config.ConfigError as exc:
-            sources, sources_error = [], str(exc)
+            sources_error = str(exc)
         with _conn() as conn:
             today_rows, today_cost = _usage_rows(conn, midnight)
             week_rows, week_cost = _usage_rows(conn, now - timedelta(days=7))
-            stats = source_stats(conn, sources, now, fs.personalize)
         return templates.TemplateResponse(
             request,
             "ops.html",
@@ -834,9 +878,6 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "max_cost": fs.run.max_cost_usd,
                 "running": ops.is_running(),
                 "run_task": tasks.get("run"),
-                "stats": [st for st in stats if st.samples or st.suggested],
-                "silent": sum(1 for st in stats if not (st.samples or st.suggested)),
-                "suggestions": [st for st in stats if st.suggested],
                 "pers": fs.personalize,
                 "sources_error": sources_error,
                 "sched": schedule.status(),
@@ -943,25 +984,6 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             request, ["✓ 已恢复默认：从 config/settings.yaml 删除了模型与后端设置。"] + busy_note()
         )
 
-    @app.post("/ops/tune", response_class=HTMLResponse)
-    def ops_tune(request: Request) -> HTMLResponse:
-        """应用信源 trust 建议（与 sb sources tune --apply 同一逻辑）。"""
-        fs = _settings()
-        lines: list[str] = []
-        try:
-            sources = config.load_sources()
-        except config.ConfigError as exc:
-            lines.append(f"✗ {exc}")
-        else:
-            with _conn() as conn:
-                stats = source_stats(conn, sources, datetime.now(UTC), fs.personalize)
-            changes = {st.source_id: st.suggested for st in stats if st.suggested}
-            if changes:
-                ops.apply_trust(changes, lines.append)
-            else:
-                lines.append("没有 trust 调整建议")
-        return templates.TemplateResponse(request, "_lines.html", {"lines": lines})
-
     # ---------- 信源管理 ----------
 
     @app.get("/sources", response_class=HTMLResponse)
@@ -972,9 +994,11 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         except config.ConfigError as exc:
             sources, error = [], str(exc)
         pers = _settings().personalize
+        catalog = ops.catalog_entries()
         with _conn() as conn:
             overview = db.source_overview(conn)
             yields = source_yields(conn, sources, datetime.now(UTC), pers)
+            dist = feedback_distribution(conn)
         return templates.TemplateResponse(
             request,
             "sources.html",
@@ -982,6 +1006,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "sources": sources,
                 "overview": overview,
                 "yields": yields,
+                "dist": dist,
+                "dist_kinds": DISTRIBUTION_KINDS,
+                "catalog": catalog,
+                "catalog_homepages": {s.id: source_homepage(s) for s in catalog},
                 "homepages": {
                     s.id: source_homepage(
                         s, overview[s.id]["homepage"] if s.id in overview else None
@@ -1030,23 +1058,67 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         form = {k: str(v) for k, v in (await request.form()).items()}
         try:
             source = _source_from_form(form)
-            path, sources = _editable_sources()
+            _, sources = _editable_sources()
             if any(s.id == source.id for s in sources):
                 raise ValueError(f"信源 id 已存在：{source.id}")
-            config.save_sources([*sources, source], path)
+            block = sources_file.dump_entry(source)
+            ops.edit_sources(lambda text: sources_file.append_entry(text, block))
         except (ValueError, config.ConfigError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
 
     @app.post("/sources/{source_id}/toggle")
     def sources_toggle(source_id: str) -> RedirectResponse:
-        path, sources = _editable_sources()
+        _, sources = _editable_sources()
         target = next((s for s in sources if s.id == source_id), None)
         if target is None:
             raise HTTPException(404, "信源不存在")
-        target.enabled = not target.enabled
-        config.save_sources(sources, path)
+        ops.edit_sources(lambda text: sources_file.set_enabled(text, source_id, not target.enabled))
         return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
+
+    @app.post("/sources/catalog/{source_id}/add")
+    def sources_catalog_add(source_id: str) -> RedirectResponse:
+        """把信源目录（sources.example.yaml）中的这一条原样追加到 config/sources.yaml。"""
+        example = (config.config_dir() / "sources.example.yaml").read_text(encoding="utf-8")
+        block = sources_file.entry_text(example, source_id)
+        if block is None:
+            raise HTTPException(404, "目录中没有该信源")
+        _, sources = _editable_sources()
+        if any(s.id == source_id for s in sources):
+            raise HTTPException(400, f"信源 id 已存在：{source_id}")
+        try:
+            ops.edit_sources(lambda text: sources_file.append_entry(text, block))
+        except config.ConfigError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
+
+    @app.post("/sources/{source_id}/peek", response_class=HTMLResponse)
+    def sources_peek(request: Request, source_id: str) -> HTMLResponse:
+        """预览已配置或目录中的信源：只拉取并解析最新约 10 条，不写库、不调用 LLM。"""
+        candidates = {s.id: s for s in ops.catalog_entries()}
+        try:
+            candidates |= {s.id: s for s in config.load_sources()}
+        except config.ConfigError:
+            pass
+        source = candidates.get(source_id)
+        if source is None:
+            raise HTTPException(404, "信源不存在")
+        context: dict = {"source": source, "entries": [], "error": None, "total": 0}
+        if source.needs_scraper:
+            context["error"] = "该信源标记为 needs_scraper：没有可用的 feed，无法预览"
+        else:
+            fs = _fetch_settings()
+            try:
+                with _http_client(fs) as client:
+                    entries = FETCHERS[source.type](source, client, fs)
+            except FetchError as exc:
+                context["error"] = f"抓取失败：{exc}"
+            else:
+                entries.sort(
+                    key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True
+                )
+                context.update(entries=entries[:PREVIEW_ENTRIES], total=len(entries))
+        return templates.TemplateResponse(request, "_peek.html", context)
 
     @app.post("/sources/{source_id}/delete", response_class=HTMLResponse)
     def sources_delete(
@@ -1060,7 +1132,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             return templates.TemplateResponse(
                 request, "source_delete.html", {"source_id": source_id, "path": path}
             )
-        config.save_sources([s for s in sources if s.id != source_id], path)
+        ops.edit_sources(lambda text: sources_file.remove_entry(text, source_id))
         return RedirectResponse("/sources?saved=deleted", status_code=303)
 
     # ---------- wiki ----------

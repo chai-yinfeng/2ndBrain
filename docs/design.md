@@ -113,7 +113,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 - `profile/feedback.py`：汇总近 `personalize.feedback_window_days` 天各条目的当前反馈（M7：不感兴趣 / 太浅 / 有收获 / 太难 / 没价值；含条目标题、信源、content_type、topics）。
 - L1 system prompt = profile + 规则（固定前缀）+ "最近反馈样例"（M7：正例有收获、反例不感兴趣 / 没价值、校准样例太浅 / 太难，各最多 `few_shot_per_polarity` 条，无反馈时省略）；近期"太难"条目的前置知识放在 user 消息开头。
 - `sb profile update`（与 Web `/profile` 共用 `profile/rewrite.py`）：strong 模型输出结构化提案（掌握度表的 update / add / remove，段落的 append / remove，每条带反馈 id 证据）→ 代码按规则校验（M7：升级需要太浅，有收获只能用于 陌生 → 接触过，降级需要太难，每次最多一级）→ 生成新文本与 unified diff；`--apply` 前备份到 `data/profile_history/`。反馈不足时不调用 LLM。LLM 用量记为 stage = PROFILE。
-- `sb sources tune`（`profile/tune.py`）：每个条目取当前反馈（M7：有收获为正，不感兴趣 / 没价值为负），按信源统计正向比例，样本足够时建议 trust ±1；`--apply` 对 `config/sources.yaml` 做行级替换（不存在时从 example 复制）。
+- `sb sources tune`（`profile/tune.py`）：M11 起只读，打印反馈分布、近期产出与低产出停用建议。反馈不再用来建议或修改 trust（ADR 0018）。
 
 ## 视频、长内容与回补（M5，见 ADR 0009）
 
@@ -138,14 +138,25 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - 读之前：`later` 稍后读、`dismiss` 不感兴趣；
   - 读完后：`too_easy` 太浅、`gained` 有收获、`too_hard` 太难、`worthless` 没价值。
 - 条目的当前状态 = 最新一条 feedback（`clear` = 撤销）。读完后四种写 `read_at`，其余清空 `read_at`。`/later` 列出当前为稍后读的条目。
-- `ops.py`：`run_once`（与 `sb run` 相同，持有 `data/run.lock` 的非阻塞 `fcntl.flock`）、`ingest_items`、`apply_trust`，由 CLI 与 Web 共用。
+- `ops.py`：`run_once`（与 `sb run` 相同，持有 `data/run.lock` 的非阻塞 `fcntl.flock`）、`ingest_items`，由 CLI 与 Web 共用（M11 起不再有 `apply_trust`）。
 - `web/tasks.py`：后台线程任务，同类只跑一个；状态片段 `GET /tasks/<kind>` 每 2 秒轮询。
 - 页面：
   - `/`："待编进 wiki" 按钮；
   - `/ops`：用量、立即运行、trust 建议；
-  - `/sources`：列表、试抓、添加、启停、删除确认；写 `config/sources.yaml`，原子写，注释不保留；
+  - `/sources`：列表、试抓、添加、启停、删除确认；写 `config/sources.yaml`（M11 起按文本块编辑，保留注释，见 ADR 0018）；
   - `/wiki`：体检按钮；
   - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
+
+## 信源手动维护与手动添加文章（M11，见 ADR 0018）
+
+- 反馈只影响 AI 判断：画像、few-shot、画像修改提案。trust 由用户手动设置；`/sources` 显示各信源的反馈分布，只供参考。低产出停用建议保留，它只看产出。
+- `sources_file.py`：按条目文本块追加 / 删除 / 改 `enabled`，保留注释，写入前重新解析校验，原子写。支持 `sources: []`。
+- 信源目录：example 中不在当前配置里的条目，可以预览（只解析、不写库）或原样追加（含注释）。
+- 没有启用的信源时，`sb fetch` / `sb run` / 首页只给出提示，不抓取、不调用 LLM。
+- 手动添加（`sb add`、`/add`，`ops.add_manual`）：
+  - 条目归到虚拟信源 `manual`（DB 有 sources 行，enabled = 0，不在 sources.yaml 中），状态为 `manual`，不进 L1 / L2 / 分级 / 预算；
+  - 已存在的条目只更新状态与反馈；
+  - 准备读 = `later` 反馈，已读 = 读后反馈，已读但未评价时只设置 `read_at`。
 
 ## 筛选、信源主页与运维设置（M10，见 ADR 0017）
 
@@ -199,7 +210,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | 表 | 主要字段 | 引入 |
 |---|---|---|
 | `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7）；`homepage`（feed 中读到的主页，M10） | M1（`last_fetch_*` M7 v6，`homepage` M10 v8） |
-| `items` | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
+| `items`（M11：`status = manual` 为手动添加，不进流水线） | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`（全文）, `budget_minutes`（占用预算，M8）, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2（`budget_minutes` M8，schema v7） |
 | `item_ai` | `item_id`, `kind`（summary / prereq）, `data`（JSON）, `model`, `created_at`；`(item_id, kind)` 唯一 | M8 |

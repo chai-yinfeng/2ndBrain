@@ -16,12 +16,12 @@ from secondbrain import config, db
 from secondbrain.cli import app as cli_app
 from secondbrain.llm.fake import FakeBackend
 from secondbrain.llm.schemas import MasteryChange, ProfileProposal, SectionEdit
-from secondbrain.models import FilterSettings, PersonalizeSettings, SourceConfig
+from secondbrain.models import FilterSettings, SourceConfig
 from secondbrain.pipeline.run import run_pipeline, system_prompt
 from secondbrain.profile.feedback import few_shot_block, polarity_examples, recent_feedback
 from secondbrain.profile.loader import load_profile, parse_profile
 from secondbrain.profile.rewrite import apply_proposal, generate_update, save_profile, text_sha
-from secondbrain.profile.tune import apply_trust_changes, source_stats
+from secondbrain.profile.tune import feedback_distribution
 from secondbrain.urls import content_hash
 from secondbrain.web.app import create_app
 
@@ -430,76 +430,38 @@ def _votes(conn, source: str, up: int, down: int, start: int = 100, when: dateti
         db.add_feedback(conn, item, kind, None, when - timedelta(hours=1))
 
 
-def test_source_stats_and_suggestions(conn):
+def test_feedback_distribution_uses_current_state(conn):
+    """ADR 0018：反馈只做分布统计（不再产生 trust 建议）；每个条目只看当前状态。"""
     _votes(conn, "blog", up=5, down=1)
-    _votes(conn, "news", up=1, down=4, start=200)
-    sources = [
-        SourceConfig(id="blog", type="rss", url="u", trust=3),
-        SourceConfig(id="news", type="rss", url="u", trust=1),
-        SourceConfig(id="quiet", type="rss", url="u", trust=3),
-    ]
-    stats = {s.source_id: s for s in source_stats(conn, sources, NOW, PersonalizeSettings())}
-    assert (stats["blog"].positive, stats["blog"].negative, stats["blog"].suggested) == (5, 1, 4)
-    assert stats["news"].suggested is None  # 已是 1，不再下调
-    assert "样本不足" in stats["quiet"].reason
-    lowered = source_stats(
-        conn, [SourceConfig(id="news", type="rss", url="u", trust=3)], NOW, PersonalizeSettings()
-    )
-    assert lowered[0].suggested == 2
-
-
-def test_source_stats_use_latest_signal_per_item(conn):
-    item = add_item(conn, 1, "flip-flop")
+    flip = add_item(conn, 1, "flip-flop", source="news")
     for kind in ("gained", "gained", "dismiss"):
-        db.add_feedback(conn, item, kind, None, NOW - timedelta(hours=1))
-    (st,) = source_stats(
-        conn, [SourceConfig(id="blog", type="rss", url="u")], NOW, PersonalizeSettings()
-    )
-    assert (st.positive, st.negative) == (0, 1)
+        db.add_feedback(conn, flip, kind, None, NOW - timedelta(hours=1))
+    dist = feedback_distribution(conn)
+    assert dist["blog"]["gained"] == 5 and dist["blog"]["dismiss"] == 1
+    assert dist["news"] == {
+        "gained": 0,
+        "too_easy": 0,
+        "too_hard": 0,
+        "worthless": 0,
+        "dismiss": 1,
+        "later": 0,
+    }
 
 
-def test_apply_trust_changes_keeps_comments():
-    text = (
-        "# header comment\n"
-        "sources:\n"
-        "  - id: blog\n"
-        "    type: rss\n"
-        "    trust: 3  # keep me\n"
-        "  - id: other\n"
-        "    trust: 2\n"
-        "  - id: no-trust\n"
-        "    type: rss\n"
-    )
-    new, missing = apply_trust_changes(text, {"blog": 4, "no-trust": 2})
-    assert new == text.replace("trust: 3  # keep me", "trust: 4  # keep me")
-    assert missing == ["no-trust"]
-
-
-def test_sources_tune_cli(env: Path, conn):
-    result = runner.invoke(cli_app, ["sources", "tune"])
-    assert result.exit_code == 0, result.output
-    assert "没有 trust 调整建议" in result.output
-    assert "样本不足" in result.output
-
-    # 让一个 example 中的信源有足够的正向反馈
-    db.upsert_sources(conn, [SourceConfig(id="simon-willison", type="rss", url="u", trust=5)])
+def test_sources_tune_cli_is_read_only(env: Path, conn):
     db.upsert_sources(
         conn, [SourceConfig(id="dan-luu", type="rss", url="u", trust=3, role="expansion")]
     )
     _votes(conn, "dan-luu", up=5, down=0, when=datetime.now(UTC))
     conn.commit()
     result = runner.invoke(cli_app, ["sources", "tune"])
-    assert "trust 3 → 4" in result.output
-    assert not (config.CONFIG_DIR / "sources.yaml").exists()
-
-    result = runner.invoke(cli_app, ["sources", "tune", "--apply"])
     assert result.exit_code == 0, result.output
-    written = (config.CONFIG_DIR / "sources.yaml").read_text(encoding="utf-8")
-    block = written.split("- id: dan-luu", 1)[1].split("- id:", 1)[0]
-    assert "trust: 4" in block
-    example = (config.CONFIG_DIR / "sources.example.yaml").read_text(encoding="utf-8")
-    assert written.count("\n") == example.count("\n")  # 只改了一行
-    assert config.load_sources()[0].id == "vllm-blog"  # 生成的 sources.yaml 仍可解析
+    assert "反馈分布" in result.output and "只供参考" in result.output
+    line = next(x for x in result.output.splitlines() if x.startswith("dan-luu"))
+    assert "trust 3" in line and "反馈   5   0   0   0   0   0" in line
+    assert "→" not in result.output  # 不再有 trust 调整建议
+    assert runner.invoke(cli_app, ["sources", "tune", "--apply"]).exit_code != 0  # 选项已删除
+    assert not (config.CONFIG_DIR / "sources.yaml").exists()
 
 
 # ---------- Web：/profile ----------
