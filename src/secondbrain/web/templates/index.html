@@ -22,6 +22,7 @@
 </section>
 {% if not day %}
   <p class="empty">还没有 digest，先运行 <code>uv run sb run</code>。</p>
+  {% if to_ingest %}{% include "_ingest.html" %}{% endif %}
 {% else %}
   <section class="summary">
     <h1>Digest {{ day }}</h1>
@@ -31,12 +32,7 @@
     </div>
     {% include "_filters.html" %}
     <p class="backlog">此前未读的必读积压：<b>{{ backlog }}</b> 条 · <a href="/later">稍后再看：{{ later }} 条</a></p>
-    <div class="ingest" data-to-ingest="{{ to_ingest }}">
-      <span>待编进 wiki：<b>{{ to_ingest }}</b> 条</span>
-      {% if to_ingest %}<button type="button" class="fb" hx-post="/tasks/wiki_ingest" hx-target="#task-wiki_ingest" hx-swap="outerHTML">编进 wiki</button>{% endif %}
-      <span class="meta">标为「有收获」的条目由 strong 模型编成 wiki 页面；每条约 1 分钟，{{ hints.ingest() }}；累计预估超过 run.max_cost_usd 时停止。</span>
-      {% with kind="wiki_ingest", task=ingest_task, message=None %}{% include "_task.html" %}{% endwith %}
-    </div>
+    {% include "_ingest.html" %}
   </section>
 
   {% for lane, title in page_lanes %}

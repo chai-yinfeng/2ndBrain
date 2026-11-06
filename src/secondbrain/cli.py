@@ -8,6 +8,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 import typer
 
@@ -612,6 +613,47 @@ def deep(
         raise typer.Exit(code=1)
     typer.echo("")
     _print_l2(outcome.response.model_dump(), row["url"], key_point_link)
+
+
+@app.command()
+def add(
+    urls: Annotated[list[str], typer.Argument(help="一个或多个文章 URL")],
+    read: bool = typer.Option(
+        False, "--read/--later", help="已读（--read）或准备读（--later，默认）"
+    ),
+    feedback: str | None = typer.Option(
+        None, "--feedback", help="读后反馈（仅 --read）：gained | too_easy | too_hard | worthless"
+    ),
+    ingest: bool = typer.Option(
+        False, "--ingest", help="添加后编入 wiki（仅 --read --feedback gained）"
+    ),
+    text_file: str | None = typer.Option(
+        None, "--text-file", help="正文文件（单个 URL；付费墙 / 需登录页面抓取失败时的备选）"
+    ),
+) -> None:
+    """手动添加文章：不进 L1 / L2 / 分级，只记录状态与反馈（ADR 0018）。"""
+    from pathlib import Path
+
+    from secondbrain import ops
+
+    text = Path(text_file).read_text(encoding="utf-8") if text_file else None
+    try:
+        out = ops.add_manual(
+            urls,
+            typer.echo,
+            state="read" if read else "later",
+            feedback=feedback,
+            ingest=ingest,
+            text=text,
+        )
+    except ops.OpsError as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    results = out["results"]
+    counts = {k: sum(r["status"] == k for r in results) for k in ("新增", "已存在", "失败")}
+    typer.echo("合计：" + "，".join(f"{k} {v}" for k, v in counts.items()))
+    if out["ingest"]:
+        typer.echo(f"编入 wiki 费用 ${out['ingest']['cost']:.4f}")
 
 
 @app.command()

@@ -566,6 +566,49 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
 
+    @app.get("/add", response_class=HTMLResponse)
+    def add_page(request: Request) -> HTMLResponse:
+        """手动添加文章（ADR 0018）：不进 L1 / L2 / 分级，只记录状态与反馈。"""
+        return templates.TemplateResponse(
+            request,
+            "add.html",
+            {
+                "task": tasks.get("manual_add"),
+                "read_kinds": {k: db.FEEDBACK_KINDS[k] for k in ops.READ_FEEDBACK},
+            },
+        )
+
+    @app.post("/add", response_class=HTMLResponse)
+    async def add_submit(request: Request) -> HTMLResponse:
+        form = await request.form()
+        urls = str(form.get("urls") or "").splitlines()
+        state = str(form.get("state") or "later")
+        feedback = str(form.get("feedback") or "") or None
+        ingest = bool(form.get("ingest"))
+        text = str(form.get("text") or "").strip() or None
+        try:
+            urls = ops.validate_manual(urls, state, feedback, ingest, text)
+        except ops.OpsError as exc:
+            return task_fragment(request, "manual_add", f"✗ {exc}")
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                return ops.add_manual(
+                    urls,
+                    task.log,
+                    state=state,
+                    feedback=feedback,
+                    ingest=ingest,
+                    text=text,
+                    client=client,
+                )
+
+        try:
+            tasks.start("manual_add", f"手动添加 {len(urls)} 篇", run)
+        except TaskRunning as exc:
+            return task_fragment(request, "manual_add", str(exc))
+        return task_fragment(request, "manual_add")
+
     @app.get("/later", response_class=HTMLResponse)
     def later(request: Request) -> HTMLResponse:
         """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
@@ -757,7 +800,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
-        if kind not in TASKS and not re.fullmatch(r"summary-\d+", kind):
+        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"summary-\d+", kind)
+        if not known:
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind, refresh=bool(refresh))
 

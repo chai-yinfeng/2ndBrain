@@ -2,7 +2,7 @@
 {% block title %}稍后再看 · Second Brain{% endblock %}
 {% block content %}
 <h1>稍后再看 <small class="meta">{{ rows | length }} 条</small></h1>
-<p class="meta">在文章上点「稍后读」的条目：不计入积压、不降级、没有期限。读完后点读完后的反馈，或再点一次「稍后读」移出列表。</p>
+<p class="meta"><a href="/add">手动添加文章</a>（已读 / 准备读，可批量）。在文章上点「稍后读」的条目：不计入积压、不降级、没有期限。读完后点读完后的反馈，或再点一次「稍后读」移出列表。</p>
 {% for r in rows %}
 <article class="entry" data-item-id="{{ r.id }}">
   <h3><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a></h3>

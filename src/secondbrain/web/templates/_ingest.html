@@ -1,0 +1,7 @@
+{# 待编进 wiki：标为「有收获」且尚未编入的条目（含手动添加的） #}
+<div class="ingest" data-to-ingest="{{ to_ingest }}">
+  <span>待编进 wiki：<b>{{ to_ingest }}</b> 条</span>
+  {% if to_ingest %}<button type="button" class="fb" hx-post="/tasks/wiki_ingest" hx-target="#task-wiki_ingest" hx-swap="outerHTML">编进 wiki</button>{% endif %}
+  <span class="meta">标为「有收获」的条目由 strong 模型编成 wiki 页面；每条约 1 分钟，{{ hints.ingest() }}；累计预估超过 run.max_cost_usd 时停止。</span>
+  {% with kind="wiki_ingest", task=ingest_task, message=None %}{% include "_task.html" %}{% endwith %}
+</div>
