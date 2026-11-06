@@ -147,6 +147,21 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
   - `/wiki`：体检按钮；
   - `/wiki/graph` 与 `/wiki/graph.json`：节点 = 页面，边 = 已存在页面间的 wikilink。
 
+## html_index 与论文导入增强（M12，见 ADR 0020）
+
+- `html_index` 信源：
+  - 解析列表页链接（`url_pattern` 匹配绝对地址，可选 `max_links`）；
+  - 发布时间：列表页结构化日期 > 正文页 meta > 未知；
+  - 主页兜底为列表页本身。
+- 信源目录每个条目都有明确的 `homepage`。
+- 手动导入的正文来源：
+  - 网页：`citation_pdf_url` 的 PDF 优先，citation_* 补元数据；
+  - DOI：Semantic Scholar → Crossref；
+  - arXiv：API（含 `arxiv:doi`）+ arxiv_html / pdf。
+- HttpClient 遵守 `Retry-After`（上限 `fetch.retry_after_max_seconds`），可附加请求头；可选的 `S2_API_KEY` 作为 `x-api-key` 发送。
+- 跨标识去重：`items.doi` / `items.arxiv_id`（schema v9），查重顺序为规范 URL → DOI → arXiv id。
+- "正文不完整"判定见 `db.INCOMPLETE_SQL`。
+
 ## 信源手动维护与手动添加文章（M11，见 ADR 0018）
 
 - 反馈只影响 AI 判断：画像、few-shot、画像修改提案。trust 由用户手动设置；`/sources` 显示各信源的反馈分布，只供参考。低产出停用建议保留，它只看产出。
@@ -212,7 +227,7 @@ score = (w_rel·relevance + w_q·quality + w_v·max(novelty, refresher_value)) /
 | 表 | 主要字段 | 引入 |
 |---|---|---|
 | `sources` | `id`, `type`, `url` / `query`, `trust`, `role`（core / expansion）, `tags`, `max_age_days`, `enabled`, `backfill`；`last_fetch_at / status / added / message`（最近一次抓取，M7）；`homepage`（feed 中读到的主页，M10） | M1（`last_fetch_*` M7 v6，`homepage` M10 v8） |
-| `items`（M11：`status = manual` 为手动添加，不进流水线） | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5） |
+| `items`（M11：`status = manual` 为手动添加，不进流水线） | `id`, `source_id`, `url`, `url_canonical`（唯一）, `content_hash`, `title`, `author`, `summary`, `content`, `extract_method`（feed / html / arxiv_html / pdf / summary / none / transcript / transcript_ytdlp / no_transcript）, `published_at`, `fetched_at`, `status`, `read_at`, `is_backfill`, `duration_seconds`, `doi`, `arxiv_id` | M1（`read_at` M3，`is_backfill` / `duration_seconds` M5，`doi` / `arxiv_id` M12 v9） |
 | `assessments` | `id`, `item_id`, `stage`（L0 / L1 / L2）, `model`, `data`（JSON：L0 `reason`；L1 `relevance / novelty / quality / content_type / refresher_value / topics / one_line_reason`；L2 `tldr / key_points / why_for_you / est_minutes / prerequisites / scores`）, `score`（排序分）, `created_at` | M2 |
 | `digests` | `date`（本地日期）, `item_id`, `lane`（must_read / worth_it / refresher / serendipity / fyi / archived / deferred）, `rank`, `est_minutes`（全文）, `budget_minutes`（占用预算，M8）, `is_deep_read`, `deferred_from`（首次顺延日期）, `created_at`；`(date, item_id)` 唯一 | M2（`budget_minutes` M8，schema v7） |
 | `item_ai` | `item_id`, `kind`（summary / prereq）, `data`（JSON）, `model`, `created_at`；`(item_id, kind)` 唯一 | M8 |

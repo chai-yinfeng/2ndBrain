@@ -62,7 +62,7 @@
     <label>role <select name="role"><option value="core">core</option><option value="expansion">expansion</option></select></label>
     <label>max_age_days <input name="max_age_days" type="number" min="1" value="30"></label>
     <label class="wide">tags <input name="tags" placeholder="逗号分隔，如 inference, serving"></label>
-    <label class="wide">url_pattern（sitemap）<input name="url_pattern" placeholder="只保留匹配该正则的 URL"></label>
+    <label class="wide">url_pattern（sitemap / html_index）<input name="url_pattern" placeholder="只保留匹配该正则的 URL；html_index 必填（匹配绝对地址的文章链接）"></label>
     <label>use_lastmod（sitemap）<input name="use_lastmod" type="checkbox" value="1"></label>
     <p><button type="submit" class="fb">试抓</button></p>
   </form>

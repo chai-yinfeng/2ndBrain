@@ -30,6 +30,18 @@
   {% if setting.key_in_dotenv %}<button type="button" class="fb" hx-post="/ops/settings/key/clear" hx-target="#key-result" hx-confirm="从 .env 删除 {{ setting.key }} 这一行？">清除</button>{% endif %}
   <div id="key-result"></div>
 
+  <h3>Semantic Scholar API key（可选）</h3>
+  <p>S2_API_KEY：{% if setting.s2.source %}<b>已设置</b>（来源：{{ setting.s2.source }}）{% else %}<b>未设置</b>{% endif %}</p>
+  {% if setting.s2.source == "环境变量" %}<p class="refresh">环境变量优先：该 key 来自启动服务时的环境变量，.env 的修改需要重启服务或 unset 后才生效。</p>{% endif %}
+  <form hx-post="/ops/settings/key" hx-target="#s2-key-result" class="start-form" autocomplete="off">
+    <input type="hidden" name="name" value="S2_API_KEY">
+    <input type="password" name="value" placeholder="粘贴 S2_API_KEY" autocomplete="new-password">
+    <button type="submit" class="fb">保存到 .env</button>
+  </form>
+  <p class="meta">手动添加 DOI 链接时查询 Semantic Scholar 用；不填也能用，只是更容易被限流（429）。写入规则同上，不回显。</p>
+  {% if setting.s2.in_dotenv %}<button type="button" class="fb" hx-post="/ops/settings/key/clear" hx-vals='{"name": "S2_API_KEY"}' hx-target="#s2-key-result" hx-confirm="从 .env 删除 S2_API_KEY 这一行？">清除</button>{% endif %}
+  <div id="s2-key-result"></div>
+
   <h3>测试连接</h3>
   <button type="button" class="fb" hx-post="/ops/settings/ping" hx-target="#ping-result" hx-indicator="#ping-loading">测试连接</button>
   <span class="meta">用当前后端与 cheap 模型发一个极小请求（max_tokens=1，不到 $0.0001），记入用量（阶段 PING）；只显示成功与否、模型与耗时。</span>

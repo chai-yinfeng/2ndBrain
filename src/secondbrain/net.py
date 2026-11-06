@@ -56,20 +56,33 @@ class HttpClient:
             self._sleep(start - now)
 
     def get(
-        self, url: str, *, params: dict | None = None, max_bytes: int | None = None
+        self,
+        url: str,
+        *,
+        params: dict | None = None,
+        max_bytes: int | None = None,
+        headers: dict | None = None,
     ) -> httpx.Response:
-        """GET 并返回 2xx 响应；网络错误与 429/5xx 按配置重试，其余失败抛 FetchError。"""
+        """GET 并返回 2xx 响应；网络错误与 429/5xx 按配置重试，其余失败抛 FetchError。
+        响应带 Retry-After（秒）时按它等待，但不超过 retry_after_max_seconds。"""
         host = urlsplit(url).hostname or ""
         retries = self.settings.retries
         last_error = ""
+        retry_after = 0.0
         for attempt in range(retries + 1):
             if attempt:
-                self._sleep(self.settings.retry_backoff_seconds * 2 ** (attempt - 1))
+                backoff = self.settings.retry_backoff_seconds * 2 ** (attempt - 1)
+                self._sleep(max(backoff, retry_after))
+                retry_after = 0.0
             self._throttle(host)
             try:
-                with self._client.stream("GET", url, params=params) as resp:
+                with self._client.stream("GET", url, params=params, headers=headers) as resp:
                     if resp.status_code in RETRYABLE_STATUS:
                         last_error = f"HTTP {resp.status_code}"
+                        retry_after = _retry_after(
+                            resp.headers.get("retry-after"),
+                            self.settings.retry_after_max_seconds,
+                        )
                         continue
                     if resp.status_code >= 400:
                         raise FetchError(f"HTTP {resp.status_code}：{resp.url}")
@@ -81,3 +94,11 @@ class HttpClient:
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         raise FetchError(f"{last_error}（已重试 {retries} 次）：{url}")
+
+
+def _retry_after(value: str | None, cap: float) -> float:
+    """Retry-After 的秒数（只支持整数秒形式），限制在 [0, cap]。"""
+    try:
+        return min(max(float(value), 0.0), cap) if value else 0.0
+    except ValueError:
+        return 0.0

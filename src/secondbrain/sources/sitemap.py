@@ -81,7 +81,7 @@ def apply_page_meta(entry: RawEntry, html: str, url: str | None = None) -> None:
     if meta.title:
         entry.title = clean_title(meta.title)
     entry.author = entry.author or meta.author
-    if date_in_url(entry.url) is None:
+    if date_in_url(entry.url) is None and not entry.keep_date:
         page_date = parse_iso_datetime(meta.date)
         if page_date:
             entry.published_at = page_date

@@ -557,3 +557,90 @@
 **遗留问题**
 - 未带 key 的 S2 请求偶尔会被 429 限流，需要稍后重试。
 - Borg 在 S2 中没有摘要，所以导入后正文只有标题，建议再次添加时上传 PDF（如 research.google 上的版本）来补全正文。
+
+## M12 — html_index 信源与论文导入增强（2026-11-06，分支 `m12-index-papers`）
+
+**做了什么**（ADR 0020）
+- 信源目录：每个条目都写了 `homepage`，指向博客列表页或频道页，全部实测（核对表见下）。
+- 新信源类型 `html_index`：
+  - 解析列表页 `<a href>`，按 `url_pattern` 过滤、去重、保持顺序，可选 `max_links`；
+  - 列表页结构化日期优先，其次正文页 meta；
+  - 目录新增 `sglang-blog`。
+- 手动导入：
+  - `citation_pdf_url` 优先下载 PDF，citation_* 补元数据；
+  - DOI 查 S2，Crossref 兜底；
+  - Retry-After 有上限（10 秒）；可选 `S2_API_KEY`，`/ops` 可设置。
+- 跨标识去重（schema v9：`items.doi` / `items.arxiv_id`）：按规范 URL → DOI → arXiv id 查重，更完整的正文会补全"已存在"条目；同名手动条目只提示。
+- "正文不完整"：详情页 / 稍后读显示徽标，详情页可补全；新增 `sb items incomplete`。
+- 已存在条目重新抓取：不完整的条目再次导入同一链接时自动重抓，仅在更完整时替换；manual 条目详情页"重新抓取"按钮；`sb add <url> --refetch`（审阅后补充，便于补全 M12 之前导入的条目）。
+- 测试：
+  - 新增 `test_html_index.py`（8 个 + 1 个 live）、`test_paper_import.py`（14 个）；
+  - 修改的旧测试：
+    - `test_m10.py` / `test_manual_fixes.py` 中检验主页推导的两个测试，改用去掉 homepage 的配置，因为 example 现在写了明确的 homepage；
+    - `test_m10.py` 中 schema 版本断言改为 `len(MIGRATIONS)`。
+
+**homepage 核对表**（2026-11-06 用浏览器 UA 实际请求）
+
+| id | homepage | HTTP | 备注 / 页面标题 |
+|---|---|---|---|
+| vllm-blog | https://vllm.ai/blog | 200 | Blog / vLLM |
+| lmsys-sglang-blog | https://lmsys.org/blog/ | 200 | 重定向到 www.lmsys.org/blog/ |
+| sglang-blog | https://www.sglang.io/blog | 200 | SGLang Blog – Releases, Benchmarks &amp; Announcements |
+| pytorch-blog | https://pytorch.org/blog/ | 200 | Blog - PyTorch |
+| horace-he | https://www.thonking.ai/ | 200 | Thonk From First Principles / Horace He / Substack |
+| tri-dao | https://tridao.me/blog/ | 200 | Blog / Tri Dao |
+| hazy-research | https://hazyresearch.stanford.edu/blog | 200 | Hazy Research |
+| tim-dettmers | https://timdettmers.com/ | 200 | Tim Dettmers &mdash; Making deep learning accessible. |
+| chips-and-cheese | https://chipsandcheese.com/ | 200 | Chips and Cheese / Substack |
+| marc-brooker | https://brooker.co.za/blog/ | 200 | Marc Brooker's Blog - Marc's Blog |
+| murat-demirbas | https://muratbuffalo.blogspot.com/ | 200 | Metadata |
+| aphyr-jepsen | https://aphyr.com/posts | 200 | Aphyr - Posts |
+| martin-kleppmann | https://martin.kleppmann.com/archive.html | 200 | Martin Kleppmann&rsquo;s website |
+| karpathy-github | https://karpathy.github.io/ | 200 | Andrej Karpathy blog |
+| karpathy-bearblog | https://karpathy.bearblog.dev/blog/ | 200 | Blog – karpathy |
+| lilian-weng | https://lilianweng.github.io/ | 200 | Lil&#39;Log |
+| sebastian-raschka | https://magazine.sebastianraschka.com/archive | 200 | Archive - Ahead of AI |
+| chip-huyen | https://huyenchip.com/blog/ | 200 | Blog |
+| colah | https://colah.github.io/ | 200 | Home - colah's blog |
+| interconnects | https://www.interconnects.ai/archive | 200 | Archive - Interconnects AI |
+| hf-blog | https://huggingface.co/blog | 200 | Hugging Face – Blog |
+| anthropic-research | https://www.anthropic.com/research | 200 | Research \ Anthropic |
+| simon-willison | https://simonwillison.net/ | 200 | Simon Willison’s Weblog |
+| hamel-husain | https://hamel.dev/ | 200 | Hamel Husain’s Blog – Hamel's Blog |
+| eugene-yan | https://eugeneyan.com/writing/ | 200 | Writing • Eugene Yan |
+| openai-news | https://openai.com/news/ | 200 | OpenAI News / OpenAI |
+| anthropic-news | https://www.anthropic.com/news | 200 | Newsroom \ Anthropic |
+| google-deepmind | https://deepmind.google/blog/ | 200 | /discover/blog/ 重定向，写最终地址 |
+| meta-ai | https://ai.meta.com/blog/ | 400 | 机器请求 400（人工浏览可打开），保留 |
+| qwen-blog | https://qwenlm.github.io/blog/ | 200 | Blog / Qwen |
+| deepseek-news | https://api-docs.deepseek.com/news/ | 200 | 文档站标题通用，页面含 /news/ 条目 |
+| hf-daily-papers | https://huggingface.co/papers | 200 | Daily Papers - Hugging Face |
+| arxiv-cs-cl | https://arxiv.org/list/cs.CL/recent | 200 | Computation and Language |
+| arxiv-cs-lg | https://arxiv.org/list/cs.LG/recent | 200 | Machine Learning |
+| arxiv-cs-dc | https://arxiv.org/list/cs.DC/recent | 200 | Distributed, Parallel, and Cluster Computing |
+| import-ai | https://importai.substack.com/archive | 200 | Archive - Import AI |
+| latent-space | https://www.latent.space/archive | 200 | 重定向到 latent.space/archive/ |
+| lesswrong-curated | https://www.lesswrong.com/recommendations | 200 | /curated 重定向，写最终地址 |
+| alignment-forum | https://www.alignmentforum.org/ | 200 | AI Alignment Forum |
+| gwern | https://gwern.net/ | 200 | Essays · Gwern.net |
+| dan-luu | https://danluu.com/ | 200 |  |
+| hillel-wayne | https://www.hillelwayne.com/post/ | 200 | Blog |
+| karpathy-youtube | https://www.youtube.com/channel/UCXUPKJO5MZQN11PqgIvyuvQ | 200 | Andrej Karpathy - YouTube |
+| stanford-online | https://www.youtube.com/channel/UCBa5G_ESCn8Yd4vw5U-gIcg | 200 | Stanford Online - YouTube |
+| gpu-mode | https://www.youtube.com/channel/UCJgIbYl6C5no72a0NUAPcTA | 200 | GPU MODE - YouTube |
+| dwarkesh-podcast | https://www.youtube.com/channel/UCXl4i9dYBrFOabk0xGmbkRA | 200 | Dwarkesh Patel - YouTube |
+| adam-neely | https://www.youtube.com/channel/UCnkp4xDOwqqJD7sSM3xdUiQ | 200 | Adam Neely - YouTube |
+
+**验收结果**
+- `uv run pytest -q`：356 passed；ruff check / format 通过。
+- roadmap M12 验收命令在临时目录实际运行（fake LLM，联网），结果：
+  - sglang-blog 新增 3 条，日期分别为 2026-11-04 / 10-22 / 10-22；预览解析到 13 条；
+  - USENIX Twine 通过 citation_pdf_url 拿到全文 PDF（84885 字符）；
+  - 先导入 PagedAttention 的 arXiv 链接，再导入 ACM DOI 链接，显示"已存在"（arXiv API 带了 arxiv:doi）；
+  - Dynamo（ACM DOI）只有摘要，被 `sb items incomplete` 列出；
+  - schema 为 v9；S2_API_KEY 设置后不回显。
+
+**遗留问题**
+- 未带 key 时 S2 经常 429。此时如果先导入 DOI、再导入 arXiv（arXiv API 也没有 doi），无法按标识合并，只会提示"可能重复"。
+- html_index 依赖列表页的静态 HTML。
+- 一次全量测试中出现过 1 个未复现的失败（之后连续 16 次全绿），疑似与时间相关的测试偶发不稳定，没有定位到具体用例。
