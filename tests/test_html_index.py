@@ -92,9 +92,14 @@ def test_fetch_uses_page_date_and_limit(tmp_path, monkeypatch):
     rows = conn.execute("SELECT title, published_at FROM items ORDER BY id").fetchall()
     conn.close()
     assert result.added == 2
-    assert [(r["title"], r["published_at"]) for r in rows] == [
-        ("HiCache deep dive", "2026-10-20T00:00:00Z"),  # 正文页 meta 的日期优先于列表页
-        ("MiniMax day 0", "2026-10-29T00:00:00Z"),
+    assert [r["title"] for r in rows] == ["HiCache deep dive", "MiniMax day 0"]
+    # 列表页上有结构化日期（data-post-date）：优先于正文页 meta / 启发式日期
+    listed = html_index.parse_index(
+        fixture_bytes("sglang_blog_index.html").decode(), INDEX, PATTERN, max_links=2
+    )
+    assert [r["published_at"] for r in rows] == [
+        listed[0].published_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        listed[1].published_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     ]
 
 
@@ -140,3 +145,19 @@ def test_live_sglang_index():
         entries = html_index.fetch(src, client, client.settings)
     assert len(entries) >= 5 and all(e.url.startswith(INDEX + "/") for e in entries)
     assert NOW - timedelta(days=3650) < (entries[0].published_at or NOW)
+
+
+def test_page_date_used_when_list_has_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("SB_DATA_DIR", str(tmp_path))
+    index = '<a href="/blog/a">A</a>'
+    routes = {
+        INDEX: httpx.Response(200, text=index),
+        INDEX + "/a": httpx.Response(200, text=ARTICLE),
+    }
+    client = _client(routes)
+    src = SourceConfig(id="s", type="html_index", url=INDEX, url_pattern=PATTERN, max_age_days=3650)
+    conn = db.connect()
+    fetch_sources(conn, [src], client, client.settings, limit=5, now=NOW)
+    (row,) = conn.execute("SELECT published_at FROM items").fetchall()
+    conn.close()
+    assert row["published_at"] == "2026-10-20T00:00:00Z"

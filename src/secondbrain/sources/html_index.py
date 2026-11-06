@@ -1,9 +1,10 @@
 """html_index 信源：没有 RSS / 可用 sitemap 的博客，直接解析列表页（ADR 0020）。
 
 列表页中所有 <a href> 转成绝对 URL，按 url_pattern 过滤、去重并保持页面顺序；可选 max_links 截断。
-发布时间：抓正文页时从页面 meta 读取（与 sitemap 条目相同，page_meta=True）；读不到时用
-列表页上该链接自带的日期（<a> 属性中的 YYYY-MM-DD，或 <a> 内 <time datetime>）；都没有时
-为未知（入库后按抓取时间参与时间窗与排序，详情页显示"发布 未知"）。
+发布时间：列表页上该链接自带的结构化日期（<a> 属性中的 YYYY-MM-DD，或 <a> 内 <time datetime>）
+优先；没有时用正文页 meta 的日期（与 sitemap 条目相同，page_meta=True）；都没有时为未知
+（入库后按抓取时间参与时间窗与排序，详情页显示"发布 未知"）。实测 sglang.io 的文章页没有
+结构化日期，trafilatura 的启发式日期会猜错，所以列表页日期优先（ADR 0020）。
 """
 
 from __future__ import annotations
@@ -68,7 +69,15 @@ def parse_index(html: str, base_url: str, url_pattern: str, max_links: int | Non
         if url in seen or not pattern.search(url):
             continue
         seen.add(url)
-        entries.append(RawEntry(url=url, title=_slug(url), published_at=date, page_meta=True))
+        entries.append(
+            RawEntry(
+                url=url,
+                title=_slug(url),
+                published_at=date,
+                page_meta=True,
+                keep_date=date is not None,
+            )
+        )
         if max_links and len(entries) >= max_links:
             break
     return entries

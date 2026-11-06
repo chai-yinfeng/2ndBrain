@@ -71,6 +71,7 @@ fetch:
   timeout_seconds: 20
   retries: 2                     # 网络错误与 429/5xx 的重试次数
   retry_backoff_seconds: 1.0     # 指数退避基数
+  retry_after_max_seconds: 10    # 429 响应带 Retry-After 时最多等待的秒数（ADR 0020）
   concurrency: 4                 # 同时抓取的信源数
   per_host_interval_seconds: 1.0 # 同一 host 两次请求的最小间隔
   host_intervals:

@@ -94,6 +94,8 @@ class RawEntry:
     published_at: datetime | None = None
     arxiv_id: str | None = None
     video_id: str | None = None  # YouTube 视频 id
+    # 发布时间来自可靠的结构化来源（html_index 列表页上的日期属性）：正文页的启发式日期不覆盖它
+    keep_date: bool = False
     doi: str | None = None  # 论文 DOI（arXiv API 的 arxiv:doi、S2、Crossref、citation_doi）
     # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
     page_meta: bool = False
