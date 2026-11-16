@@ -1,6 +1,6 @@
 # Second Brain
 
-个人"知识过滤 + 分级推荐 + 知识 wiki"系统：从你信任的信源（博客、论文为主，之后加视频）自动采集内容，用 LLM 分层过滤、总结，按推荐等级推送到本地 Web UI；你的反馈驱动个性化；你读完"有收获"的内容被编译进 Markdown 知识库，知识库再反过来告诉过滤层哪些是已知、哪些是新的。
+个人学习材料与知识网络系统。当前 M0–M12 已实现信源采集、LLM 分层过滤、时间预算推荐、阅读反馈与 Markdown wiki；下一阶段以主动导入论文/博客、阅读整理和 Obsidian 兼容的个人知识网络为主线，订阅与推荐保留为辅助功能。新架构见 ADR 0021，M13–M15 尚未实施。
 
 架构见 [docs/design.md](docs/design.md)，路线图见 [docs/roadmap.md](docs/roadmap.md)。
 
@@ -129,5 +129,10 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M8 深度速读与前置知识：深读按速读时间计入预算、`sb summary`、`sb prereq`、存为概念页
 - [x] M9 手动运行与信源产出率：首页"开始今日过滤"、`sb run --all-time`、`/ops` 运行方式开关、速览 / 归档折叠、低产出信源
 - [x] M10 筛选、信源主页与运维设置：`?form=&ctype=` 筛选、信源主页链接、`/ops` 设置 API key / 模型 / 测试连接、CSRF 与 Host 校验
+- [x] M11 信源手动维护与手动添加文章：信源目录、`sb add`、`/add`、DOI/PDF 兜底
+- [x] M12 html_index 与论文导入增强：跨标识去重、正文补全、`sb items incomplete`
+- [ ] M13 统一材料入口与独立知识整理
+- [ ] M14 Wiki 知识网络与浏览主入口
+- [ ] M15 论文名智能导入
 
 详见 [docs/progress.md](docs/progress.md)。
