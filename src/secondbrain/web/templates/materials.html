@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}材料库 · Second Brain{% endblock %}
+{% block content %}
+<h1>材料库</h1>
+<p><a class="fb primary" href="/add">导入 PDF / URL / 文本</a> · <a href="/wiki/graph">知识网络</a></p>
+<p class="meta">导入和整理不代表已读。每日推荐是可选入口，没有 digest 也可以阅读与整理。</p>
+<form method="get" action="/materials">
+  <label>查找材料 <input name="q" value="{{ query }}" type="search"></label>
+  <label>阅读状态 <select name="reading"><option value="">全部</option>{% for key, label in [("unread","未读"),("reading","阅读中"),("read","已读")] %}<option value="{{ key }}"{% if reading == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <button class="fb" type="submit">筛选</button>
+</form>
+{% for row in rows %}
+<article class="card" data-item-id="{{ row.id }}">
+<h2><a href="/item/{{ row.id }}">{{ row.title }}</a></h2>
+<p class="meta">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }} · {{ row.processing_status }} · {{ row.content_completeness }} · {{ row.author or "作者未知" }}</p>
+{% if row.summary %}<p>{{ row.summary }}</p>{% endif %}
+</article>
+{% else %}<p class="empty">没有符合条件的材料。可清除筛选，或直接导入材料，无需配置信源。</p>{% endfor %}
+{% if next_offset is not none %}<p><a href="/materials?q={{ query|urlencode }}&reading={{ reading }}&offset={{ next_offset }}">下一页</a></p>{% endif %}
+{% endblock %}

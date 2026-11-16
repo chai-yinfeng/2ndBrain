@@ -55,6 +55,7 @@ def isolated_config(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     from secondbrain import config
 
     conf = tmp_path_factory.mktemp("config")
+    monkeypatch.setenv("SB_DATA_DIR", str(tmp_path_factory.mktemp("data")))
     for name in ("settings.example.yaml", "sources.example.yaml", "profile.example.md"):
         shutil.copy(config.CONFIG_DIR / name, conf / name)
     monkeypatch.delenv("SB_CONFIG_DIR", raising=False)

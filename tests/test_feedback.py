@@ -90,7 +90,7 @@ def test_toggle_same_kind_undoes(conn):
     assert read_at(conn, item)
     assert db.toggle_feedback(conn, item, "gained", None, NOW) is None  # 再点一次 = 撤销
     assert db.feedback_state(conn, [item]) == {item: None}
-    assert read_at(conn, item) is None
+    assert read_at(conn, item) == db.format_time(NOW)  # 撤销评价不撤销已读事实
     kinds = [r["kind"] for r in db.feedback_for(conn, item)]
     assert kinds == ["gained", "clear"]  # 历史保留
 
@@ -102,7 +102,10 @@ def test_switching_keeps_first_read_time(conn):
     assert db.feedback_state(conn, [item])[item] == "gained"
     assert read_at(conn, item) == db.format_time(NOW)
     db.toggle_feedback(conn, item, "later", None, NOW + timedelta(hours=2))
-    assert read_at(conn, item) is None  # 读之前的状态清空 read_at
+    assert read_at(conn, item) == db.format_time(NOW)  # later 只改变意愿，不改变阅读状态
+    assert db.item_detail(conn, item)["reading_state"] == "read"
+    db.set_reading_state(conn, item, "unread")
+    assert read_at(conn, item) is None  # 只有显式阅读状态操作撤销已读
 
 
 def test_overridden_feedback_is_not_a_signal(conn):

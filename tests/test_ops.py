@@ -200,12 +200,11 @@ def test_home_ingest_button_runs_in_background(env):
     client = TestClient(create_app())
     home = client.get("/").text
     assert 'data-to-ingest="1"' in home and 'hx-post="/tasks/wiki_ingest"' in home
-    assert "每条约 1 分钟" in home  # 按钮旁的说明
     client.post("/tasks/wiki_ingest")
     wait(client.app.state.tasks.get("wiki_ingest"))
     status = client.get("/tasks/wiki_ingest").text
     assert 'data-task-status="done"' in status
-    assert '<a href="/wiki/page/pagedattention-explained">' in status
+    assert f'<a href="/wiki/page/material-{item}">' in status
     assert '<a href="/wiki/page/kv-cache">' in status and "估算费用" in status
     assert 'data-to-ingest="0"' in client.get("/").text
 

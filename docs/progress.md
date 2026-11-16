@@ -658,3 +658,19 @@
 
 **待讨论**
 - 图谱交互、材料页组织、关系语义的后续扩展，以及 Agent 检索、prompt 和思考强度等实现细节，未作为既定实现锁定。
+
+## M13 — 统一材料与独立知识整理（2026-11-16）
+
+**实现**
+- 在独立 worktree `2ndbrain-material-network` / 分支 `m13-m15-material-network` 实施；验收根目录 `/tmp/secondbrain-m13-m15.mrpmhR`，data/config/.env/LaunchAgents 均隔离。未改真实数据、个人配置或 launchd，未推送或创建 PR。
+- schema v10 保留材料 ID 与子表引用，移除强制 manual 信源，增加多来源、原件、完整性及独立阅读/处理状态。PDF、文本、URL、订阅、refetch/complete 共用材料持久化；身份冲突明确拒绝，不按标题强并。
+- CLI/Web 可独立导入、阅读、记笔记、整理入 wiki；稳定材料页和共享概念不依赖 L2、digest 或 gained。新概念为陌生/未复习，重复处理不覆盖个人内容。长文逐段整理，成功和失败用量按阶段记账，保守预估受费用上限约束。
+
+**实际验证**
+- 相关 15 个测试文件首轮 `190 passed, 3 failed, 1 deselected`；失败为旧页面身份/反馈契约及 textarea 行数断言。更新真实契约、删除布局断言后，三项定向回归 `3 passed`。旧库实测额外发现无信源反馈进入个性化时的 None 拼接错误，修复并新增流水线回归；该回归与 `tests/test_profile.py` 合计 `22 passed`。受影响 Python 文件 `uv run ruff check ...` 通过。
+- `m13_smoke.py` 在空信源/fake 环境用 CLI 独立导入本地 PDF、文本和真实博客 URL（Simon Willison 的 “Building Python tools with a one-shot prompt using uv run and Claude Projects”）：3 份材料、7 页 wiki；无 assessments/feedback/digest，仍全部未读，个人笔记经强制重整保留。
+- `check_legacy.py` 在真实旧库只读副本上实际完成 v8→v10：3 材料、3 反馈、3 wiki_ingests、12 个 Markdown 文件保留，原字段/ID 和引用不变，外键检查通过；材料及 wiki/source 路由均可打开。迁移副本另用受控订阅入口新增 1 条并经 fake 生成 1 条推荐，修复后的来源缺省路径正常。
+- WebKit 浏览器在 `127.0.0.1:8765` 实际导入文本、保存中文笔记、点击整理、进入材料知识页、打开来源/独立笔记和原 PDF；生成后仍为未读，刷新后处理状态为 processed。截图保存在本次运行的工具产物中。
+
+**边界**
+- 本阶段知识整理使用 fake，不声称真实模型质量通过；M13 要求的离线流程与旧库迁移已验证。跨端布局、公式和 Obsidian 验收属于 M14，尚未据此标记完成。两个验收脚本在临时目录运行，交付前清理。

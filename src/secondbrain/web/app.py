@@ -17,7 +17,13 @@ from urllib.parse import urlencode, urlsplit
 
 import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -450,6 +456,53 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             response.headers["HX-Refresh"] = "true"
         return response
 
+    @app.get("/materials", response_class=HTMLResponse)
+    def materials(request: Request) -> HTMLResponse:
+        query = request.query_params.get("q", "").strip()
+        reading = request.query_params.get("reading", "")
+        if reading not in {"", "unread", "reading", "read"}:
+            raise HTTPException(400, "未知阅读状态")
+        try:
+            offset = max(0, int(request.query_params.get("offset", "0")))
+        except ValueError as exc:
+            raise HTTPException(400, "分页位置必须为整数") from exc
+        clauses, params = [], []
+        if query:
+            clauses.append("(title LIKE ? OR author LIKE ?)")
+            params.extend([f"%{query}%", f"%{query}%"])
+        if reading:
+            clauses.append("reading_state = ?")
+            params.append(reading)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM items" + where + " ORDER BY id DESC LIMIT 51 OFFSET ?",
+                [*params, offset],
+            ).fetchall()
+        return templates.TemplateResponse(
+            request, "materials.html",
+            {"rows": rows[:50], "query": query, "reading": reading,
+             "next_offset": offset + 50 if len(rows) > 50 else None},
+        )
+
+    @app.get("/vault/{relative:path}")
+    def vault_resource(relative: str):
+        root = config.wiki_dir().resolve()
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(404, "资源不存在或路径越界")
+        suffix = path.suffix.lower()
+        if suffix in {".md", ".txt"}:
+            return PlainTextResponse(
+                path.read_text(encoding="utf-8"), headers={"X-Content-Type-Options": "nosniff"}
+            )
+        if suffix not in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            raise HTTPException(400, "不支持在 Web 打开的资源类型")
+        return FileResponse(
+            path, headers={"X-Content-Type-Options": "nosniff",
+                           "Content-Security-Policy": "default-src 'none'; sandbox"}
+        )
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         day = request.query_params.get("date")
@@ -536,6 +589,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             prereq_cached = db.get_ai(conn, item_id, "prereq") is not None
             prereq_count = len(ops.prereq_names(conn, item_id))
             incomplete = item_id in db.incomplete_ids(conn)
+            origins = db.material_origins(conn, item_id)
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
@@ -561,8 +615,47 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "prereq_count": prereq_count,
                 "incomplete": incomplete,
                 "hints": CostHints(_settings()),
+                "origins": origins,
+                "notes": ops.material_notes(item_id),
+                "material_page": _wiki().find(f"material-{item_id}"),
+                "wiki_task": tasks.get(f"wiki-{item_id}"),
             },
         )
+
+    @app.post("/item/{item_id}/reading")
+    def material_reading(item_id: int, state: str = Form(...)) -> RedirectResponse:
+        if state not in {"unread", "reading", "read"}:
+            raise HTTPException(400, "阅读状态必须为 unread / reading / read")
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+            db.set_reading_state(conn, item_id, state)
+        return RedirectResponse(f"/item/{item_id}", status_code=303)
+
+    @app.post("/item/{item_id}/notes")
+    def material_notes_save(item_id: int, text: str = Form("")) -> RedirectResponse:
+        try:
+            ops.material_notes(item_id, _normalize_newlines(text))
+        except ops.OpsError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return RedirectResponse(f"/item/{item_id}#notes", status_code=303)
+
+    @app.post("/item/{item_id}/wiki", response_class=HTMLResponse)
+    def material_wiki(request: Request, item_id: int) -> HTMLResponse:
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+        kind = f"wiki-{item_id}"
+
+        def run(task: Task) -> dict:
+            result = ops.ingest_items([item_id], task.log)
+            return result.__dict__
+
+        try:
+            tasks.start(kind, "整理材料入 wiki", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
 
     @app.get("/history", response_class=HTMLResponse)
     def history(request: Request) -> HTMLResponse:
@@ -587,7 +680,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/add", response_class=HTMLResponse)
     def add_page(request: Request) -> HTMLResponse:
-        """手动添加文章（ADR 0018）：不进 L1 / L2 / 分级，只记录状态与反馈。"""
+        """统一材料导入：URL、独立 PDF 或文本。"""
         return templates.TemplateResponse(
             request,
             "add.html",
@@ -601,8 +694,9 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     async def add_submit(request: Request) -> HTMLResponse:
         form = await request.form()
         urls = str(form.get("urls") or "").splitlines()
-        state = str(form.get("state") or "later")
-        feedback = str(form.get("feedback") or "") or None
+        state = str(form.get("state") or "unread")
+        title = str(form.get("title") or "").strip() or None
+        feedback = (str(form.get("feedback") or "") or None) if state == "read" else None
         ingest = bool(form.get("ingest"))
         text = str(form.get("text") or "").strip() or None
         upload, pdf = form.get("pdf"), None
@@ -620,7 +714,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 return ops.add_manual(
                     urls,
                     task.log,
-                    state=state,
+                    state=None if state == "unread" else state,
+                    title=title,
                     feedback=feedback,
                     ingest=ingest,
                     text=text,
@@ -629,7 +724,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 )
 
         try:
-            tasks.start("manual_add", f"手动添加 {len(urls)} 篇", run)
+            tasks.start("manual_add", f"导入材料 {len(urls) or 1} 篇", run)
         except TaskRunning as exc:
             return task_fragment(request, "manual_add", str(exc))
         return task_fragment(request, "manual_add")
@@ -852,7 +947,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
-        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"summary-\d+", kind)
+        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"(summary|wiki)-\d+", kind)
         if not known:
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind, refresh=bool(refresh))
@@ -1263,6 +1358,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
 
 _RAW_LINK_RE = re.compile(r"\]\((?:\.\./)+raw/(\d+)\.md\)")
+_VAULT_LINK_RE = re.compile(r"\]\((?:\.\./)+(resources|notes)/([^)]+)\)")
 
 
 def render_markdown(text: str, wiki: Wiki) -> str:
@@ -1278,6 +1374,7 @@ def render_markdown(text: str, wiki: Wiki) -> str:
 
     safe = text.replace("<", "&lt;")
     safe = _RAW_LINK_RE.sub(r"](/item/\1)", safe)
+    safe = _VAULT_LINK_RE.sub(r"](/vault/\1/\2)", safe)
     safe = WIKILINK_RE.sub(link, safe)
     return markdown.markdown(safe, extensions=["tables", "fenced_code", "sane_lists"])
 

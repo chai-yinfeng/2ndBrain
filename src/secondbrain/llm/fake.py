@@ -270,14 +270,19 @@ def _deep_summary(it: dict, keywords: set[str], known: bool) -> dict:
 
 
 def _chunk_notes(payload: dict) -> dict:
-    """逐段提要：视频取前几段带时间戳的字幕，其余取前几行。"""
+    """确定性逐段提要：保留首部和尾部，视频保留时间戳。"""
+    text = payload.get("text", "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    excerpts = [line[:100] for line in lines[:3]]
+    if lines:
+        excerpts.append(lines[-1][-100:])
     points = []
-    for line in payload.get("text", "").splitlines()[:4]:
+    for line in dict.fromkeys(excerpts):
         m = re.match(r"\[((?:\d{1,2}:)?\d{1,2}:\d{2})\]\s*(.*)", line)
         if m:
-            points.append({"t": m.group(1), "text": m.group(2)[:100]})
-        elif line.strip():
-            points.append({"t": None, "text": line.strip()[:100]})
+            points.append({"t": m.group(1), "text": m.group(2)})
+        else:
+            points.append({"t": None, "text": line})
     return {"summary": f"（fake）第 {payload.get('part', '?')} 段", "points": points}
 
 
@@ -286,40 +291,70 @@ def _slug(text: str) -> str:
 
 
 def _wiki_plan(payload: dict) -> dict:
-    """确定性的 wiki 编辑：为条目建 paper 页；前置知识若已有页面则加链接，否则新建概念页。"""
+    """确定性材料整理：材料身份来自 id，概念来自正文；不要求 L2 或读后反馈。"""
     item = payload["item"]
-    paper = _slug(item["title"])
+    material = item["material_slug"]
     index = payload.get("index", "")
-    existing = {p["slug"] for p in payload.get("related_pages", [])}
-    concepts = [_slug(c) for c in (item.get("prerequisites") or [])[:3]]
-    concepts = [c for c in dict.fromkeys(concepts) if c != paper]
-    points = "\n".join(f"- {kp}" for kp in item.get("key_points") or []) or f"- {item['title']}"
-    related = "\n".join(f"- [[{c}]]" for c in concepts)
+    pages = payload.get("related_pages", [])
+    existing = {p["slug"] for p in pages}
+    text = item.get("text") or ""
+    haystack = f"{item['title']} {text}".lower().replace("-", " ")
+    names = [
+        name
+        for name in ("KV cache", "Continuous batching", "PagedAttention", *DEFAULT_KEYWORDS)
+        if name.lower() in haystack
+    ]
+    names_by_key = {}
+    for name in names:
+        names_by_key.setdefault(name.lower(), name)
+    names = list(names_by_key.values())[:2]
+    concepts = []
+    for name in names:
+        match = next(
+            (
+                p["slug"]
+                for p in pages
+                if p["type"] == "concept"
+                and name.lower()
+                in {p["title"].lower(), *(alias.lower() for alias in p.get("aliases", []))}
+            ),
+            None,
+        )
+        concepts.append(match or _slug(name))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    points = list(dict.fromkeys([*(line[:160] for line in lines[:2]), text[-160:].strip()]))
+    points = [point for point in points if point]
+    body = "## 材料陈述\n\n" + "\n".join(f"- {point}" for point in points)
+    if concepts:
+        body += "\n\n## 关联依据\n\n" + "\n".join(
+            f"- [[{concept}]]：材料中出现该概念。" for concept in concepts
+        )
     creates = [
         {
-            "slug": paper,
-            "type": "paper",
+            "slug": material,
+            "type": "material",
             "title": item["title"],
-            "summary": "（fake）" + (item.get("tldr") or item["title"])[:60],
-            "body": f"## 要点\n\n{points}" + (f"\n\n## 相关\n\n{related}" if related else ""),
+            "summary": "（fake）" + item["title"][:60],
+            "body": body,
         }
     ]
     updates = []
-    for c, name in zip(concepts, item.get("prerequisites") or [], strict=False):
-        if c in existing or f"[[{c}]]" in index:
-            updates.append({"slug": c, "action": "add_links", "links": [paper]})
+    for concept, name in zip(concepts, names, strict=True):
+        if concept in existing or f"[[{concept}]]" in index:
+            updates.append({"slug": concept, "action": "add_links", "links": [material]})
         else:
             creates.append(
                 {
-                    "slug": c,
+                    "slug": concept,
                     "type": "concept",
                     "title": name,
                     "summary": f"（fake）{name}",
-                    "body": f"## 是什么\n\n（fake）{name}。\n\n## 相关\n\n- [[{paper}]]",
+                    "body": f"## 材料陈述\n\n（fake）材料提到 {name}。"
+                    f"\n\n## 关联依据\n\n- [[{material}]]：提供该概念的材料出处。",
                 }
             )
     return {
-        "summary": f"（fake）新建 {len(creates)} 页，更新 {len(updates)} 页",
+        "summary": f"（fake）整理材料及 {len(concepts)} 个关联概念",
         "creates": creates,
         "updates": updates,
     }

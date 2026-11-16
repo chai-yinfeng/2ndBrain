@@ -129,3 +129,6 @@ pre.log { overflow-x: auto; font-size: 12px; background: var(--bg); border: 1px 
 .add-form:has(input[name="state"][value="later"]:checked) .when-read { opacity: 0.55; }
 .add-results td.url { word-break: break-all; font-size: 12px; }
 .tag.warn { background: var(--warn); color: #fff; }
+.original-content { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 70vh; overflow-y: auto; }
+#notes textarea { display: block; width: 100%; background: var(--bg); color: var(--fg); padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.card { overflow-wrap: anywhere; padding: 12px 0; border-bottom: 1px solid var(--border); }

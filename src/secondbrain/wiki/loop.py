@@ -12,13 +12,17 @@ SOLID = "扎实"
 def known_knowledge(
     wiki: Wiki | None, rows: list[sqlite3.Row], item_chars: int, max_chars: int
 ) -> str:
-    """与本批候选相关的 wiki 页面及其掌握度（限 max_chars）；没有相关页面时返回空串。"""
+    """只注入有用户掌握度证据的相关概念；机器创建页面不等于用户已知。"""
     if wiki is None or max_chars <= 0 or not wiki.pages:
         return ""
     text = " ".join(
         f"{r['title']} {(r['content'] or r['summary'] or '')[:item_chars]}" for r in rows
     )
-    pages = wiki.mentioned_in(text, limit=30)
+    pages = [
+        page
+        for page in wiki.mentioned_in(text, limit=len(wiki.pages))
+        if page.type == "concept" and page.meta.get("mastery") in {"接触过", "想回炉", SOLID}
+    ][:30]
     if not pages:
         return ""
     lines = ["## 已知知识（来自用户的 wiki）", ""]

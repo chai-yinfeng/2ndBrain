@@ -243,7 +243,7 @@ def test_arxiv_then_doi_is_existing(env):
     assert "已存在 #1" in again.output and len(rows()) == 1
 
 
-def test_same_title_hint_without_merge(env, monkeypatch):
+def test_same_title_does_not_guess_identity(env, monkeypatch):
     other = "https://blog.example.com/twine-copy"
     other_pdf = "https://blog.example.com/twine-copy.pdf"
     page = ABSTRACT_PAGE.replace("10.5555/twine.1", "10.5555/other").replace(USENIX_PDF, other_pdf)
@@ -260,7 +260,7 @@ def test_same_title_hint_without_merge(env, monkeypatch):
     monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(routes))
     runner.invoke(cli_app, ["add", USENIX])
     out = runner.invoke(cli_app, ["add", other])
-    assert "新增 #2" in out.output and "可能重复：#1" in out.output
+    assert "新增 #2" in out.output and "可能重复" not in out.output
     assert len(rows()) == 2
 
 
@@ -299,7 +299,7 @@ def test_incomplete_listing_badge_and_completion(env, tmp_path):
     client = TestClient(create_app())
     page = client.get("/item/1").text
     assert "data-incomplete" in page and 'action="/item/1/complete"' in page
-    assert "data-incomplete" in client.get("/later").text
+    assert rows()[0]["reading_state"] == "unread"  # 默认不再自动放进 later
     resp = client.post(
         "/item/1/complete",
         files={"pdf": ("p.pdf", make_pdf(["Full paper text"]), "application/pdf")},
@@ -308,7 +308,8 @@ def test_incomplete_listing_badge_and_completion(env, tmp_path):
     assert resp.status_code == 303
     assert rows()[0]["extract_method"] == "manual_pdf"
     assert client.post("/item/1/complete", data={}).status_code == 400
-    # PDF 只有一行，仍短于 1500 字符：论文类手动条目继续标为不完整；粘贴长正文后不再标记
+    # 完整性来自采集事实，不由字符数猜测；短而完整的 PDF 也是全文。
+    assert "data-incomplete" not in client.get("/item/1").text
     client.post("/item/1/complete", data={"text": "Full text. " * 300})
     assert "data-incomplete" not in client.get("/item/1").text
     assert "没有正文不完整的条目" in runner.invoke(cli_app, ["items", "incomplete"]).output

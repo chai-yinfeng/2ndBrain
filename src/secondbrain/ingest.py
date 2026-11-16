@@ -1,4 +1,4 @@
-"""采集编排：逐信源抓取 → 时间窗过滤 → URL 去重 → 正文提取 → 入库。"""
+"""订阅采集：抓取、时间窗过滤、完整原文提取 → 统一材料去重/补全与多来源持久化。"""
 
 from __future__ import annotations
 
@@ -48,15 +48,47 @@ def skip_reason(source: SourceConfig) -> str | None:
     return None
 
 
+class ContentCapture:
+    """每条材料独立的抓取上下文；保留实际提取的 PDF 与页面原始响应。"""
+
+    def __init__(self, client):
+        self.client = client
+        self.pdf_data: bytes | None = None
+        self.pdf_metadata: dict = {}
+        self.raw_data: bytes | None = None
+        self.completeness: str | None = None
+
+    def get(self, *args, **kwargs):
+        response = self.client.get(*args, **kwargs)
+        if "html" in response.headers.get("content-type", ""):
+            self.raw_data = response.content
+        return response
+
+    def pdf_text(self, data: bytes, max_pages: int) -> str:
+        metadata: dict = {}
+        self.pdf_data = data
+        text = extract_pdf_text(data, max_pages, metadata=metadata)
+        self.pdf_metadata = metadata
+        return text
+
+    @property
+    def pdf_truncated(self) -> bool:
+        return self.pdf_metadata.get("total_pages", 0) > self.pdf_metadata.get(
+            "extracted_pages", 0
+        )
+
+
 def _pdf_text(client: HttpClient, url: str, fs: FetchSettings) -> str:
     resp = client.get(url, max_bytes=fs.pdf_max_bytes)
-    return extract_pdf_text(resp.content, fs.pdf_max_pages)
+    return client.pdf_text(resp.content, fs.pdf_max_pages)
 
 
 def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> tuple[str, str]:
     """返回 (正文, 提取方式)。拿不到正文时退回摘要。
 
     sitemap 条目（`entry.page_meta`）会顺带用正文页元数据补全 entry 的标题 / 作者 / 发布时间。"""
+    if not isinstance(client, ContentCapture):
+        client = ContentCapture(client)
     if entry.arxiv_id:
         try:
             resp = client.get(f"https://arxiv.org/html/{entry.arxiv_id}")
@@ -77,8 +109,8 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
             return feed_text, "feed"
         try:
             resp = client.get(entry.url, max_bytes=fs.pdf_max_bytes)
-            if "pdf" in resp.headers.get("content-type", ""):
-                text = extract_pdf_text(resp.content, fs.pdf_max_pages)
+            if "pdf" in resp.headers.get("content-type", "") or resp.content.startswith(b"%PDF"):
+                text = client.pdf_text(resp.content, fs.pdf_max_pages)
                 method = "pdf"
             else:
                 text = extract_main_text(resp.text, url=str(resp.url)) or ""
@@ -114,12 +146,11 @@ def collect(
     source: SourceConfig,
     client: HttpClient,
     fs: FetchSettings,
-    known: frozenset[str],
     limit: int | None,
     now: datetime,
     all_time: bool = False,
 ) -> tuple[list[db.NewItem], int, list[str], str | None]:
-    """抓取单个信源，返回 (待入库的新条目, 已知重复数, 问题说明, feed 主页链接)。
+    """抓取单个信源，返回 (候选材料, feed 内重复数, 问题说明, feed 主页链接)。
     只做网络与解析，不写库。
 
     backfill: true 的信源：时间窗之外的历史条目也入库，标记 is_backfill（进入回补池）。
@@ -153,18 +184,22 @@ def collect(
     duplicates = 0
     for entry, is_backfill in [(e, False) for e in recent] + [(e, True) for e in backfill]:
         canonical = canonicalize_url(entry.url)
-        if canonical in known or canonical in seen:
+        if canonical in seen:
             duplicates += 1
             continue
         seen.add(canonical)
+        capture = ContentCapture(client)
         duration = None
         if entry.video_id:
             text, method, duration, note = video_content(entry, fs)
             if note:
                 notes.append(note)
         else:
-            text, method = extract_content(entry, client, fs)
-        text = text[: fs.transcript_max_chars if entry.video_id else fs.content_max_chars]
+            text, method = extract_content(entry, capture, fs)
+        original = text
+        maximum = fs.transcript_max_chars if entry.video_id else fs.content_max_chars
+        text = original[:maximum]
+        truncated = len(original) > maximum or (method == "pdf" and capture.pdf_truncated)
         if is_backfill and entry.published_at is None and len(text) < fs.backfill_min_content_chars:
             notes.append(f"跳过疑似非文章页（发布时间未知且正文过短）：{entry.title}")
             continue
@@ -173,7 +208,7 @@ def collect(
                 source_id=source.id,
                 url=entry.url,
                 url_canonical=canonical,
-                content_hash=content_hash(entry.title, text or (entry.summary or "")),
+                content_hash=content_hash(entry.title, original or (entry.summary or "")),
                 title=entry.title,
                 author=entry.author,
                 summary=entry.summary,
@@ -184,6 +219,17 @@ def collect(
                 duration_seconds=duration,
                 doi=entry.doi,
                 arxiv_id=entry.arxiv_id,
+                original_text=original,
+                truncated=truncated,
+                completeness=(
+                    "missing" if not original.strip() else
+                    "abstract" if method == "summary" else
+                    "partial" if capture.pdf_truncated or method == "feed" else "full"
+                ),
+                pdf_data=capture.pdf_data,
+                raw_data=entry.feed_content.encode() if method == "feed" else capture.raw_data,
+                total_pages=capture.pdf_metadata.get("total_pages"),
+                extracted_pages=capture.pdf_metadata.get("extracted_pages"),
             )
         )
     return items, duplicates, notes, homepage
@@ -202,11 +248,10 @@ def fetch_sources(
     """抓取所有信源。单个信源失败只记录在其结果中，不影响其他信源。"""
     now = now or datetime.now(UTC)
     db.upsert_sources(conn, sources)
-    known = db.known_urls(conn)
     results: list[SourceResult] = []
     with ThreadPoolExecutor(max_workers=fs.concurrency) as pool:
         futures = {
-            s.id: pool.submit(collect, s, client, fs, known, limit, now, all_time)
+            s.id: pool.submit(collect, s, client, fs, limit, now, all_time)
             for s in sources
             if skip_reason(s) is None
         }
@@ -228,7 +273,12 @@ def fetch_sources(
                         source.id, "ok", duplicates=duplicates, notes=notes, homepage=homepage
                     )
                     for item in items:
-                        if db.insert_item(conn, item, now):
+                        try:
+                            _, created, _ = db.persist_material(conn, item, now)
+                        except ValueError as exc:
+                            result.notes.append(f"{item.title}：{exc}")
+                            continue
+                        if created:
                             result.added += 1
                             result.backfilled += int(item.is_backfill)
                             if item.extract_method in FAILED_METHODS:

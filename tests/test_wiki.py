@@ -91,7 +91,7 @@ def _wiki(env):
 
 def test_open_wiki_initializes_skeleton(env):
     wiki = _wiki(env)
-    for folder in ("concepts", "entities", "papers"):
+    for folder in ("concepts", "entities", "papers", "materials"):
         assert (env / "wiki" / "pages" / folder).is_dir()
     assert "## Concepts" in wiki.index_path.read_text(encoding="utf-8")
     assert wiki.log_path.read_text(encoding="utf-8").startswith("# Wiki Log")
@@ -124,7 +124,7 @@ def test_plan_cannot_escape_wiki_dir(env, conn):
         updates=[PageUpdate(slug="no-such-page", action="add_links", links=["a"])],
     )
     result = apply_plan(wiki, plan, row, PROFILE, TODAY)
-    assert result.created == ["outside"]  # 规范化为合法 slug，写在 wiki 内
+    assert result.created == [f"material-{item}", "outside"]  # 材料身份独立，概念 slug 规范化
     assert (env / "wiki" / "pages" / "concepts" / "outside.md").is_file()
     assert not (env.parent / "outside.md").exists()
     assert len(result.rejected) == 2
@@ -136,26 +136,30 @@ def test_plan_cannot_escape_wiki_dir(env, conn):
 
 
 def test_ingest_pending_creates_pages_index_log(env, conn):
-    item = add_item(conn, 1, "PagedAttention explained", l2=L2)
+    item = add_item(
+        conn, 1, "PagedAttention explained", l2=L2,
+        content="PagedAttention manages KV cache. Continuous batching shares resources.",
+    )
     db.add_feedback(conn, item, "gained", None, datetime.now(UTC))
     conn.commit()
     result = runner.invoke(cli_app, ["wiki", "ingest", "--pending"])
     assert result.exit_code == 0, result.output
-    assert "新建：pagedattention-explained, kv-cache, continuous-batching" in result.output
+    assert f"新建：material-{item}, kv-cache, continuous-batching" in result.output
 
     wiki = _wiki(env)
-    paper = wiki.pages["pagedattention-explained"]
-    assert paper.type == "paper" and paper.meta["sources"] == [item]
-    assert "[[kv-cache]]" in paper.body
-    assert f"(../../raw/{item}.md)" in paper.body  # 链接回原文（data/wiki/raw，ADR 0013）
+    material = wiki.pages[f"material-{item}"]
+    assert material.type == "material" and material.meta["sources"] == [item]
+    assert "[[kv-cache]]" in material.body
+    assert f"(../../raw/{item}.md)" in material.body
     raw = env / "wiki" / "raw" / f"{item}.md"
     assert raw.read_text(encoding="utf-8").startswith("# PagedAttention")
     assert not (env / "raw").exists()
     kv = wiki.pages["kv-cache"]
-    # 新概念页一律从"接触过"起步（不继承 profile 中"想回炉"的领域），首次复习间隔 3 天
-    assert kv.meta["mastery"] == "接触过" and kv.meta["interval_days"] == 3
-    assert wiki.pages["continuous-batching"].meta["mastery"] == "接触过"
-    assert paper.meta["mastery"] is None and paper.meta["interval_days"] == 1
+    # 机器整理不是学习证据：新概念保持陌生，尚未复习。
+    assert kv.meta["mastery"] == "陌生" and kv.meta["interval_days"] == 3
+    assert kv.meta["last_reviewed"] is None
+    assert wiki.pages["continuous-batching"].meta["mastery"] == "陌生"
+    assert material.meta["mastery"] is None and material.meta["interval_days"] == 1
     index = wiki.index_path.read_text(encoding="utf-8")
     assert "- [[kv-cache]] — （fake）KV cache" in index
     log = wiki.log_path.read_text(encoding="utf-8")
@@ -171,7 +175,10 @@ def test_ingest_pending_creates_pages_index_log(env, conn):
 
 
 def test_second_item_updates_existing_concepts(env, conn):
-    first = add_item(conn, 1, "PagedAttention explained", l2=L2)
+    first = add_item(
+        conn, 1, "PagedAttention explained", l2=L2,
+        content="PagedAttention manages KV cache. Continuous batching shares resources.",
+    )
     second = add_item(conn, 2, "KV cache quantization", l2={**L2, "prerequisites": ["KV cache"]})
     for item in (first, second):
         db.add_feedback(conn, item, "gained", None, datetime.now(UTC))
@@ -180,7 +187,7 @@ def test_second_item_updates_existing_concepts(env, conn):
     assert result.exit_code == 0, result.output
     kv = _wiki(env).pages["kv-cache"]
     assert sorted(kv.meta["sources"]) == [first, second]
-    assert "[[kv-cache-quantization]]" in kv.body  # 第二条通过 add_links 更新
+    assert f"[[material-{second}]]" in kv.body
     assert db.ingested_ids(conn) == {first, second}
 
 
@@ -191,14 +198,16 @@ def test_ingest_without_pending_is_reported(env):
     assert (env / "wiki" / "index.md").is_file()
 
 
-def test_long_items_send_key_points_not_full_text(env, conn):
+def test_long_items_keep_full_available_text(env, conn):
     from secondbrain.wiki.ingest import item_payload
 
-    item = add_item(conn, 1, "Very long", l2=L2, content="x" * 50_000)
-    payload = item_payload(db.item_detail(conn, item), L2, FilterSettings())
-    assert "text" not in payload and payload["key_points"] == L2["key_points"]
-    short = add_item(conn, 2, "Short one", l2=L2, content="short body " * 10)
-    assert "text" in item_payload(db.item_detail(conn, short), L2, FilterSettings())
+    content = "x" * 50_000 + " final tail"
+    item = add_item(conn, 1, "Very long", l2=L2, content=content)
+    payload = item_payload(db.item_detail(conn, item), None, FilterSettings())
+    assert payload["text"] == content
+    assert payload["text_kind"] == "full"
+    assert payload["full_length_chars"] == len(content)
+    assert payload["key_points"] == []  # 不从 L2 偷换正文
 
 
 # ---------- lint ----------
@@ -437,7 +446,7 @@ def test_dropped_ops_are_reported_and_rest_applied(env, conn):
         (FIXTURES / "wiki_plan_malformed.json").read_text(encoding="utf-8")
     )
     result = apply_plan(_wiki(env), plan, db.item_detail(conn, item), PROFILE, TODAY)
-    assert result.created == ["concept-a", "concept-b"]
+    assert result.created == [f"material-{item}", "concept-a", "concept-b"]
     assert result.updated == []  # 对新建页的 add_links 计入新建
     assert "[[concept-b]]" in _wiki(env).pages["concept-a"].body
     assert sum("解析时丢弃" in r for r in result.rejected) == 2

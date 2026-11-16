@@ -88,7 +88,7 @@ class ChunkNotes(BaseModel):
 
 # ---------- M6：wiki ingest / lint ----------
 
-PageType = Literal["concept", "entity", "paper"]
+PageType = Literal["concept", "entity", "paper", "material"]
 
 
 class PageCreate(BaseModel):

@@ -249,6 +249,60 @@ def items_list(
         typer.echo("（没有条目）")
 
 
+@items_app.command("show")
+def item_show(item_id: int) -> None:
+    """阅读材料原文，不要求推荐或机器评估。"""
+    from secondbrain import ops
+
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, item_id)
+        if row is None:
+            raise typer.BadParameter(f"材料不存在：{item_id}")
+        typer.echo(f"# {row['title']}\n")
+        typer.echo(
+            f"阅读：{row['reading_state']} · 处理：{row['processing_status']}"
+            f" · 完整性：{row['content_completeness']}\n"
+        )
+        for origin in db.material_origins(conn, item_id):
+            typer.echo(f"来源：{origin['kind']} · {origin['locator']}")
+        typer.echo("\n" + (row["original_text"] or row["content"]))
+        notes = ops.material_notes(item_id)
+        if notes:
+            typer.echo("\n## 个人笔记\n\n" + notes)
+    finally:
+        conn.close()
+
+
+@items_app.command("read-state")
+def item_read_state(item_id: int, state: str) -> None:
+    """设置 unread / reading / read；不改变推荐或机器处理状态。"""
+    if state not in {"unread", "reading", "read"}:
+        raise typer.BadParameter("阅读状态必须为 unread / reading / read")
+    conn = db.connect()
+    try:
+        if not db.item_exists(conn, item_id):
+            raise typer.BadParameter(f"材料不存在：{item_id}")
+        db.set_reading_state(conn, item_id, state)
+    finally:
+        conn.close()
+    typer.echo(f"#{item_id} 阅读状态：{state}")
+
+
+@items_app.command("notes")
+def item_notes(item_id: int, file: str | None = typer.Option(None, "--file")) -> None:
+    """查看个人笔记；--file 从文件保存笔记到 vault。"""
+    from pathlib import Path
+
+    from secondbrain import ops
+
+    try:
+        text = Path(file).read_text(encoding="utf-8") if file else None
+        typer.echo(ops.material_notes(item_id, text))
+    except (OSError, ops.OpsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 LANE_TITLES = {
     "must_read": "必读 must_read",
     "worth_it": "值得读 worth_it",
@@ -642,38 +696,38 @@ def deep(
 
 @app.command()
 def add(
-    urls: Annotated[list[str], typer.Argument(help="一个或多个文章 URL")],
-    read: bool = typer.Option(
-        False, "--read/--later", help="已读（--read）或准备读（--later，默认）"
-    ),
+    urls: Annotated[list[str] | None, typer.Argument(help="文章 URL；本地 PDF/文本可省略")] = None,
+    read: bool = typer.Option(False, "--read", help="显式标记已读"),
+    later: bool = typer.Option(False, "--later", help="加入稍后再看"),
+    title: str | None = typer.Option(None, "--title", help="本地材料标题"),
     feedback: str | None = typer.Option(
         None, "--feedback", help="读后反馈（仅 --read）：gained | too_easy | too_hard | worthless"
     ),
-    ingest: bool = typer.Option(
-        False, "--ingest", help="添加后编入 wiki（仅 --read --feedback gained）"
-    ),
-    text_file: str | None = typer.Option(
-        None, "--text-file", help="正文文件（单个 URL；付费墙 / 需登录页面抓取失败时的备选）"
-    ),
-    pdf_file: str | None = typer.Option(
-        None, "--pdf", help="PDF 文件（单个 URL；抓取失败或只有摘要时用它的文本，≤ 30MB）"
-    ),
+    ingest: bool = typer.Option(False, "--ingest", help="导入后整理入 wiki，不改变阅读状态"),
+    text_file: str | None = typer.Option(None, "--text-file", help="独立文本或单个 URL 的正文"),
+    pdf_file: str | None = typer.Option(None, "--pdf", help="独立 PDF 或单个 URL 的原文件，≤30MB"),
     refetch: bool = typer.Option(
         False, "--refetch", help="已存在的条目也重新抓取（仅在拿到更完整正文时替换）"
     ),
 ) -> None:
-    """手动添加文章：不进 L1 / L2 / 分级，只记录状态与反馈（ADR 0018）。"""
+    """导入 URL、本地 PDF 或文本到材料库；不要求信源、推荐或读后反馈。"""
     from pathlib import Path
 
     from secondbrain import ops
 
-    text = Path(text_file).read_text(encoding="utf-8") if text_file else None
-    pdf = Path(pdf_file).read_bytes() if pdf_file else None
+    if read and later:
+        raise typer.BadParameter("--read 与 --later 不能同时使用")
+    try:
+        text = Path(text_file).read_text(encoding="utf-8") if text_file else None
+        pdf = Path(pdf_file).read_bytes() if pdf_file else None
+    except OSError as exc:
+        raise typer.BadParameter(f"无法读取材料文件：{exc}") from exc
     try:
         out = ops.add_manual(
-            urls,
+            urls or [],
             typer.echo,
-            state="read" if read else "later",
+            state="read" if read else "later" if later else None,
+            title=title,
             feedback=feedback,
             ingest=ingest,
             text=text,
@@ -690,6 +744,8 @@ def add(
     typer.echo("合计：" + "，".join(f"{k} {v}" for k, v in counts.items()))
     if out["ingest"]:
         typer.echo(f"编入 wiki 费用 ${out['ingest']['cost']:.4f}")
+    if counts["失败"] or (out["ingest"] and out["ingest"]["failures"]):
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -801,7 +857,8 @@ def wiki_ingest(
             ids = pending_items(conn)
         else:
             done = db.ingested_ids(conn)
-            if item_id in done and not force:
+            row = db.item_detail(conn, item_id)
+            if item_id in done and row["processing_status"] == "processed" and not force:
                 typer.echo(f"{WARN} #{item_id} 已编入 wiki（如需重新编入加 --force）")
                 return
             ids = [item_id]

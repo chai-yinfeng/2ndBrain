@@ -226,7 +226,7 @@ class BackfillSettings(BaseModel):
 class WikiSettings(BaseModel):
     """M6：知识 wiki（ADR 0010）。"""
 
-    ingest_max_chars: int = Field(default=12_000, ge=500)  # 正文短于该值才整篇送入；否则用 L2 要点
+    ingest_max_chars: int = Field(default=12_000, ge=500)  # 超过该长度逐段提要，覆盖全部可用正文
     index_max_chars: int = Field(default=8_000, ge=500)  # 送入 ingest 的 index.md 上限
     related_pages: int = Field(default=5, ge=0)  # 送入 ingest 的候选相关页面数
     related_page_chars: int = Field(default=2_000, ge=200)  # 每个相关页面的截断长度

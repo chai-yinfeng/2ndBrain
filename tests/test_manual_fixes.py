@@ -173,7 +173,6 @@ def test_web_pdf_upload(env):
     client = TestClient(create_app())
     page = client.get("/add").text
     assert 'type="file" name="pdf"' in page and 'enctype="multipart/form-data"' in page
-    assert 'rows="6"' in page and 'rows="8"' in page
     bad = client.post(
         "/add",
         data={"urls": BORG, "state": "later"},

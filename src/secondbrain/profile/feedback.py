@@ -24,7 +24,7 @@ class FeedbackEntry:
     kind: str
     ts: str
     title: str
-    source_id: str
+    source_id: str | None
     note: str | None = None
     content_type: str | None = None
     topics: list[str] = field(default_factory=list)
@@ -102,7 +102,7 @@ def calibration_examples(
 
 
 def _describe(e: FeedbackEntry) -> str:
-    extra = [e.source_id]
+    extra = [e.source_id or "主动导入"]
     if e.content_type:
         extra.append(e.content_type)
     if e.topics:

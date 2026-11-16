@@ -3,7 +3,7 @@
 data/wiki/
   index.md                    按类别列出所有页面：- [[slug]] — 一行摘要（由代码根据页面重建）
   log.md                      只追加：## [YYYY-MM-DD] ingest | Title
-  pages/{concepts,entities,papers}/<slug>.md   YAML frontmatter + Markdown 正文
+  pages/{concepts,entities,papers,materials}/<slug>.md   YAML frontmatter + Markdown 正文
   raw/<item_id>.md            原文（标题、URL、正文）；不是 wiki 页面，lint / index / 图谱都忽略
 """
 
@@ -17,8 +17,15 @@ from pathlib import Path
 
 import yaml
 
-PAGE_TYPES = {"concept": "concepts", "entity": "entities", "paper": "papers"}
-TYPE_TITLES = {"concept": "Concepts", "entity": "Entities", "paper": "Papers"}
+PAGE_TYPES = {
+    "concept": "concepts", "entity": "entities", "paper": "papers", "material": "materials",
+}
+TYPE_TITLES = {
+    "concept": "Concepts",
+    "entity": "Entities",
+    "paper": "Papers",
+    "material": "Materials",
+}
 REQUIRED_FIELDS = (
     "title",
     "type",
@@ -130,6 +137,15 @@ class Wiki:
         path.write_text(f"# {title}\n\nURL: {url}\n\n{content.strip()}\n", encoding="utf-8")
         return path
 
+    def reload_pages(self) -> None:
+        """以 Markdown 为事实来源，写入前重新读取外部编辑、删除与新增的页面。"""
+        self.pages.clear()
+        for folder in PAGE_TYPES.values():
+            for path in sorted((self.root / "pages" / folder).glob("*.md")):
+                self.pages[path.stem] = parse_page(
+                    path.read_text(encoding="utf-8"), path.stem, path
+                )
+
     def raw_link(self, item_id: int, page_type: str) -> str:
         """从 pages/<type>/x.md 指向原文的相对链接（Obsidian 可点开）；
         原文在 data/wiki/raw 时为 ../../raw/<id>.md。"""
@@ -202,9 +218,7 @@ def open_wiki(root: Path, raw_root: Path) -> Wiki:
         (root / "pages" / folder).mkdir(parents=True, exist_ok=True)
     raw_root.mkdir(parents=True, exist_ok=True)
     wiki = Wiki(root=root, raw_root=raw_root)
-    for folder in PAGE_TYPES.values():
-        for path in sorted((root / "pages" / folder).glob("*.md")):
-            wiki.pages[path.stem] = parse_page(path.read_text(encoding="utf-8"), path.stem, path)
+    wiki.reload_pages()
     if not wiki.log_path.exists():
         wiki.log_path.write_text("# Wiki Log\n\n只追加的操作记录。\n", encoding="utf-8")
     if not wiki.index_path.exists():

@@ -153,7 +153,7 @@ backfill:
 
 # 知识 wiki（M6，ADR 0010）：data/wiki/（随 SB_DATA_DIR 移动），Obsidian 兼容。
 wiki:
-  ingest_max_chars: 12000        # 正文短于该值时整篇送入 ingest；更长的用 L2 的 TL;DR 与要点
+  ingest_max_chars: 12000        # 更长的正文逐段提要后整理；不依赖 L2、不静默截尾
   index_max_chars: 8000          # 送入 ingest 的 index.md 上限
   related_pages: 5               # 送入 ingest 的候选相关页面数
   related_page_chars: 2000       # 每个相关页面的截断长度

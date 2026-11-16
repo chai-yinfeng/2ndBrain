@@ -11,8 +11,12 @@ from pypdf import PdfReader
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 
-def extract_pdf_text(data: bytes, max_pages: int) -> str:
+def extract_pdf_text(
+    data: bytes, max_pages: int, *, metadata: dict | None = None
+) -> str:
     reader = PdfReader(io.BytesIO(data))
     count = min(len(reader.pages), max_pages)
+    if metadata is not None:
+        metadata.update(total_pages=len(reader.pages), extracted_pages=count)
     texts = [(reader.pages[i].extract_text() or "").strip() for i in range(count)]
     return "\n\n".join(t for t in texts if t).strip()
