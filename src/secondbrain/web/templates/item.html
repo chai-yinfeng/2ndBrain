@@ -29,7 +29,9 @@
   </section>
   <section>
     <h2>原文与导入来源</h2>
-    <ul>{% for origin in origins %}<li>{{ origin.kind }} · {{ origin.locator }}{% if origin.original_path %} · <a href="/vault/{{ origin.original_path }}">原文件</a>{% endif %}</li>{% endfor %}</ul>
+    <ul>{% for origin in origins %}<li>{{ origin.kind }} · {{ origin.locator }}{% if origin.original_path %} · <a href="/vault/{{ origin.original_path }}">原文件</a>{% endif %}
+      {% if origin.metadata %}<p class="meta">请求版本：{{ origin.metadata.get("requested_version") or "未指定" }} · 实际取得版本：{{ origin.metadata.get("actual_version") or "未知" }}{% if origin.actual_source_url %} · <a href="{{ origin.actual_source_url }}" target="_blank" rel="noopener">实际获取地址</a>{% endif %}</p>{% endif %}
+    </li>{% endfor %}</ul>
     <details><summary>阅读原文（{{ item.content_len }} 字符；{{ item.extract_method }}）</summary><pre class="original-content">{{ item.original_text or item.content }}</pre></details>
   </section>
   <section id="notes">

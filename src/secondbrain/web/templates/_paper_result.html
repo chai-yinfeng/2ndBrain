@@ -1,0 +1,34 @@
+<section data-paper-status="{{ result.status }}">
+<h2>{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}</h2>
+<p>{{ result.message }}</p>
+{% for error in result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+{% if result.ingest %}
+<p class="meta">wiki：新建 {{ result.ingest.get('created', []) | length }} 页、更新 {{ result.ingest.get('updated', []) | length }} 页；整理不代表已读或已掌握。</p>
+{% if result.ingest.get('failures') %}<p class="refresh">wiki 整理有 {{ result.ingest.failures }} 项失败，尚未完成；原因见任务日志。材料仍已保存。</p>{% endif %}
+{% for error in result.ingest.get('errors', []) %}<p class="refresh">wiki 整理失败：{{ error }}</p>{% endfor %}
+{% endif %}
+{% if result.material_id %}
+<p><a href="/item/{{ result.material_id }}">打开材料 #{{ result.material_id }}</a>
+{% if paper_page %}
+ · <a href="/wiki/page/material-{{ result.material_id }}">材料知识页</a> · <a href="/wiki/graph?focus=material-{{ result.material_id }}">局部知识网络</a>
+{% endif %}</p>
+{% endif %}
+{% if result.status == 'abstract_only' %}<p class="meta">未获得全文；摘要不会冒充完整正文。可在材料详情页补充 PDF 或文本。</p>{% endif %}
+{% for c in result.candidates if result.status == 'ambiguous' or (result.selected and c.id == result.selected.id) %}
+<article class="card" data-candidate-id="{{ c.id }}">
+<h3>{{ c.title }}</h3>
+<p>{{ c.authors | join(', ') }} · {{ c.year or '年份未知' }} · {{ c.venue or '会议/期刊未知' }}</p>
+<p class="meta">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
+{% if c.abstract %}<details><summary>摘要</summary><p>{{ c.abstract }}</p></details>{% endif %}
+{% if result.status == 'ambiguous' %}
+<form action="/papers/choose" method="post">
+<input type="hidden" name="search_id" value="{{ result.search_id }}">
+<input type="hidden" name="candidate_id" value="{{ c.id }}">
+<label class="choice"><input type="checkbox" name="ingest" value="1"{% if result.ingest_requested %} checked{% endif %}> 导入后整理入 wiki（不标记已读；按 strong 模型计费）</label>
+<button type="submit" class="fb primary">选择此论文与版本</button>
+</form>
+<p class="meta">CLI：sb paper choose {{ result.search_id }} {{ c.id }}</p>
+{% endif %}
+</article>
+{% endfor %}
+</section>

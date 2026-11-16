@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -26,12 +27,14 @@ digest_app = typer.Typer(help="每日分级推荐。", no_args_is_help=True)
 schedule_app = typer.Typer(help="macOS launchd 定时运行 sb run。", no_args_is_help=True)
 profile_app = typer.Typer(help="用户画像（profile.md）。", no_args_is_help=True)
 wiki_app = typer.Typer(help="知识 wiki（data/wiki，Obsidian 兼容）。", no_args_is_help=True)
+paper_app = typer.Typer(help="按论文名检索、消歧并导入材料。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(profile_app, name="profile")
 app.add_typer(wiki_app, name="wiki")
+app.add_typer(paper_app, name="paper")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -39,6 +42,76 @@ OK, FAIL, WARN = "✓", "✗", "!"
 @app.callback()
 def main() -> None:
     """Second Brain 命令行工具。"""
+
+
+def _paper_result(result: dict, ingest: bool) -> None:
+    typer.echo(f"{result['status']}：{result['message']}")
+    for error in result.get("errors", []):
+        typer.echo(f"! {error}", err=True)
+    for error in (result.get("ingest") or {}).get("errors", []):
+        typer.echo(f"wiki 整理失败：{error}", err=True)
+    candidates = (
+        result.get("candidates", []) if result["status"] == "ambiguous"
+        else [result["selected"]] if result.get("selected") else []
+    )
+    for candidate in candidates:
+        typer.echo(
+            f"{candidate['id']}  {candidate['title']}\n"
+            f"  {', '.join(candidate.get('authors', []))} · {candidate.get('year') or '?'}"
+            f" · {candidate.get('venue', '')} · {candidate.get('version', '')}\n"
+            f"  DOI={candidate.get('doi') or '-'} arXiv={candidate.get('arxiv_id') or '-'}"
+            f" · {candidate.get('provider', '')}"
+        )
+        if result["status"] == "ambiguous":
+            typer.echo(
+                f"  sb paper choose {result['search_id']} {candidate['id']}"
+                + (" --ingest" if ingest else "")
+            )
+    if result.get("material_id"):
+        item_id = result["material_id"]
+        typer.echo(f"材料：/item/{item_id}")
+        if open_wiki(config.wiki_dir(), config.raw_dir()).find(f"material-{item_id}"):
+            typer.echo(f"知识页：/wiki/page/material-{item_id}")
+            typer.echo(f"局部网络：/wiki/graph?focus=material-{item_id}")
+    if (
+        result["status"] in {"failed", "not_found"}
+        or (result.get("ingest") or {}).get("failures")
+        or (result.get("ingest") or {}).get("errors")
+    ):
+        raise typer.Exit(code=1)
+
+
+@paper_app.command("add")
+def paper_add(
+    query: str = typer.Argument(..., help="论文标题或名称"),
+    ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
+) -> None:
+    """检索论文；身份不明确时只列出候选，不自动导入。"""
+    from secondbrain import ops, papers
+
+    try:
+        result = papers.import_by_name(query, typer.echo, ingest=ingest)
+    except (ValueError, ops.OpsError) as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _paper_result(result, ingest)
+
+
+@paper_app.command("choose")
+def paper_choose(
+    search_id: str,
+    candidate_id: str,
+    ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
+) -> None:
+    """从已保存的检索结果中选择；不会重新搜索或接收候选 URL。"""
+    from secondbrain import ops, papers
+
+    try:
+        result = papers.choose_candidate(search_id, candidate_id, typer.echo, ingest=ingest)
+    except (ValueError, ops.OpsError) as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _paper_result(result, ingest)
 
 
 @app.command()
@@ -266,6 +339,13 @@ def item_show(item_id: int) -> None:
         )
         for origin in db.material_origins(conn, item_id):
             typer.echo(f"来源：{origin['kind']} · {origin['locator']}")
+            metadata = json.loads(origin["metadata_json"])
+            if metadata:
+                typer.echo(
+                    f"  请求版本：{metadata.get('requested_version') or '未指定'}"
+                    f"；实际版本：{metadata.get('actual_version') or '未知'}"
+                    f"；实际地址：{metadata.get('actual_url') or '未获得正文'}"
+                )
         typer.echo("\n" + (row["original_text"] or row["content"]))
         notes = ops.material_notes(item_id)
         if notes:

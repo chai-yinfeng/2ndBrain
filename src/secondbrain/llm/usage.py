@@ -42,17 +42,23 @@ def record_call(
     conn: sqlite3.Connection,
     backend: str,
     stage: str,
-    usage: Usage,
+    usage: Usage | None,
     ts: datetime,
     pricing: dict[str, ModelPrice],
     schedule: PricingSchedule,
+    *,
+    error: str | None = None,
+    model: str = "unknown",
 ) -> float:
+    known = usage is not None
+    usage = usage or Usage(model=model)
     cost, peak = estimate_cost(usage, pricing, schedule, ts)
     conn.execute(
         """
         INSERT INTO llm_calls (ts, backend, stage, model, prompt_tokens, cache_hit_tokens,
-                               cache_miss_tokens, completion_tokens, cost_usd, is_peak)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               cache_miss_tokens, completion_tokens, cost_usd, is_peak,
+                               error, usage_known)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             format_time(ts),
@@ -65,6 +71,8 @@ def record_call(
             usage.completion_tokens,
             cost,
             int(peak),
+            error,
+            int(known),
         ),
     )
     return cost

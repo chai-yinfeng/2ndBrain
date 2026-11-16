@@ -4,6 +4,17 @@
 <h1>导入材料</h1>
 <p class="meta">URL、本地 PDF 和粘贴文本共用材料库。不要求信源或推荐；整理入 wiki 不改变阅读状态和掌握度。重复导入保留原身份，只补全正文并记录来源。</p>
 
+<section id="paper-name">
+<h2>按论文名导入</h2>
+<form action="/papers/add" method="post" class="add-form">
+  <div class="field"><label for="paper-query">论文名</label><input id="paper-query" name="query" type="text" required maxlength="1000" placeholder="Attention Is All You Need"></div>
+  <p class="help">后台检索公开元数据与正文；同名或版本不明确时先选择，不会猜测导入。找不到全文会明确标记仅摘要。</p>
+  <label class="choice"><input type="checkbox" name="ingest" value="1"> 导入后整理入 wiki（独立于阅读反馈；按 strong 模型计费）</label>
+  <button type="submit" class="fb primary">检索并导入论文</button>
+</form>
+</section>
+<h2>URL / PDF / 文本</h2>
+
 <form hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" hx-encoding="multipart/form-data" enctype="multipart/form-data" class="add-form">
   <div class="field">
     <label for="add-urls">链接</label>

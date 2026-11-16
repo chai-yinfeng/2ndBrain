@@ -693,3 +693,27 @@
 **未完成条件（M14 仍不标整体完成）**
 - 用户报告隔离 Obsidian 实例出现「找不到钥匙串」提示；立即停止实例，没有要求密码、创建/重置钥匙串或更改真实配置，不再使用临时 HOME 启动方式。
 - 修复后的 Obsidian 材料跳转重验、原文件、局部/全局图、原生编辑链接→Web 重索引一致性尚未完成。Web/CLI 的 Markdown 外部编辑、反链与链接删除已由回归覆盖，不能代替这部分原生交互验收。按 Goal 约定继续完成可达的 M15，不隐瞒缺口。
+
+## M15 — 论文名智能导入（2026-11-16）
+
+**实现**
+- 新增共享 `papers` 服务，CLI `sb paper add / choose` 与 Web `/add` 论文表单共用。完整标题或名称加作者/年份/会议可检索；明确候选自动导入，歧义只选择已保存候选。选择时不重跑查询、不信任客户端 URL；刷新可继续查看同一后台任务。
+- 复用 Semantic Scholar/Crossref/arXiv 与现有正文提取，补充 OpenAlex 和 USENIX 官方检索；搜索不调用 LLM。标题不能证明材料身份；已共享公共标识时允许作者缩写/连字符差异，来源原记录仍保留。
+- schema v11 保存不可变候选、各次导入结果、来源元数据及 LLM 错误/未知用量。所有正文仍走 M13 材料服务，摘要只作兜底，继续寻找其他已知全文地址；已知 arXiv 版本优先明确重放。CLI/材料详情页展示请求与实际版本和实际地址。
+
+**离线与迁移验证**
+- 首轮命令：`uv run pytest -q tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_materials.py tests/test_material_wiki.py tests/test_material_web.py tests/test_paper_import.py tests/test_ops.py tests/test_web.py tests/test_summary.py tests/test_network_web.py tests/test_manual_add.py tests/test_manual_fixes.py`，结果 `151 passed, 8 failed, 1 deselected`。失败来自测试把客户端类型替换成函数、无效 HTML fixture 和摘要必须不含标题的实现断言；修复 fixture/契约后定向 `9 passed`。
+- 真实多 provider 元数据的作者缩写导致原本明确的 DOI/arXiv 记录错误呈现歧义；修复仅在标识一致时的名字归一，并验证不同作者/年份/标识仍需选择，定向 `5 passed`。补充短名称+元数据、已选整理意图保留、明确版本优先与失败保留材料；相关定向 `3 passed`、`4 passed`，最终 `uv run pytest -q tests/test_paper_search.py` 得到 `40 passed`。
+- `ruff check` 对 M15 受影响 Python 文件通过。覆盖准确匹配、同名歧义、无结果、只有摘要、跨版本/已有材料、候选篡改、身份冲突、安全 URL、实际 wiki 链接、费用拒绝和未知用量错误，不把摘要冒充全文。
+- 最终代码在真实旧库的临时副本上完成 v10→v11：4 材料、3 反馈、2 assessments、1 digest、3 wiki_ingests 均保留，外键、7 个知识页及所有旧材料/页面路由和 Markdown 字节检查通过。原真实库仍只读使用，未执行重置。
+
+**真实网络 / 模型 / Web 验收**
+- `m15_live.py` 从完整论文名检索 Orca：USENIX 官方 `/conference/osdi22/presentation/yu` 找到 `https://www.usenix.org/system/files/osdi22-yu.pdf`，实际导入 19/19 页、90,213 字符及完整 PDF，材料 #1、未读、`full`。本次未能核实文件修订号，元数据版本为 published，实际修订号保留 unknown，不伪造。
+- `uv run sb paper add 'Efficient Memory Management for Large Language Model Serving with PagedAttention' --ingest` 实际解析 DOI `10.1145/3600006.3613165` / arXiv `2309.06180`，自动导入材料 #2。明确版本重放取得 `https://arxiv.org/html/2309.06180v1`，保存请求/实际版本 v1、76,477 字符、`full`；原地址和文件/HTML、提取文本保留。
+- `uv run sb paper add 'PagedAttention Kwon 2023'` 及已保存候选的 `sb paper choose` 实际命中同一材料。重复 CLI/Web 提交后仍只有 2 份材料、均未读，无 feedback/digest，外键完整。
+- 已有凭据只读取不回显；一次真实 `deepseek-flash` 整理 PagedAttention：预估预留 `$0.359218`，现有上限 `$0.5`，7 次 WIKI_MAP + 1 次 WIKI 成功、0 错误，应用按用量估算 `$0.013557558`（不是账单声明）。未放宽费用上限；生成材料页、共享概念/实体及网络，mastery 不自动提升。
+- WebKit 浏览器实际完成论文名提交→后台结果→重复材料 #1；又用带错误作者线索的查询得到候选，刷新后按真实 DOI/arXiv 选择正确候选→仍为材料 #2→未读/版本来源→真实机器整理正文→局部网络（6 节点/11 链接），完整页面与来源均可访问。全局网络 8 节点/13 链接，CLI 同样可查看来源和实际版本。
+- Semantic Scholar 曾真实返回 429，已作为 provider 错误持久记录；Crossref/arXiv/USENIX 等可达路径继续完成验收，没有用 fake 候选掩盖网络失败。知识整理同时有离线 fake 与上述一次真实模型证据。
+
+**剩余边界**
+- M15 验收通过；M14 的 Obsidian 剩余项目仍未完成，未因 M15 成功而勾选。关于钥匙串，未执行创建、重置或解锁命令；[Electron 官方说明](https://www.electronjs.org/docs/latest/api/safe-storage) macOS safeStorage 依赖 Keychain，Linux 明文后端选项不能保证解决 macOS 问题，因此没有用未确认的参数再次触发用户提示。

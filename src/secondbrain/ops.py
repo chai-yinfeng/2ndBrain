@@ -198,6 +198,7 @@ class IngestSummary:
     cost: float = 0.0
     failures: int = 0
     pages: int = 0  # wiki 现有页面数
+    errors: list[str] = field(default_factory=list)
 
 
 def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
@@ -221,6 +222,16 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
             conn, backend.name, stage, usage, datetime.now(UTC), fs.pricing, fs.pricing_schedule
         )
         conn.commit()
+        if summary.cost > fs.run.max_cost_usd:
+            message = f"实际费用已超过 run.max_cost_usd=${fs.run.max_cost_usd}，停止"
+            conn.execute(
+                "UPDATE llm_calls SET error = ? WHERE id = last_insert_rowid()", (message,)
+            )
+            conn.commit()
+            error = LLMError(message)
+            error.stage = stage
+            error.accounted = True
+            raise error
 
     try:
         for iid in ids:
@@ -236,11 +247,13 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
                 )
             except LLMError as exc:
                 echo(f"{FAIL} #{iid}：{exc}")
+                summary.errors.append(str(exc))
                 summary.failures += 1
                 continue
             echo(f"#{iid} {row['title']}：预估 ${estimate:.4f}")
             if summary.cost + estimate > fs.run.max_cost_usd:
                 echo(f"{FAIL} 预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
+                summary.errors.append("预估费用超过 run.max_cost_usd 上限")
                 summary.failures += 1
                 break
             before = summary.cost
@@ -249,10 +262,19 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
                     conn, wiki, backend, profile, row, fs, today, on_usage=account
                 )
             except LLMError as exc:
-                if exc.usage:
-                    account(getattr(exc, "stage", "WIKI"), exc.usage)
+                if not getattr(exc, "accounted", False):
+                    summary.cost += record_call(
+                        conn, backend.name, getattr(exc, "stage", "WIKI"), exc.usage,
+                        datetime.now(UTC), fs.pricing, fs.pricing_schedule,
+                        error=str(exc), model=backend.model_name("strong"),
+                    )
+                    conn.commit()
+                summary.errors.append(str(exc))
                 echo(f"{FAIL} #{iid}：{exc}")
                 summary.failures += 1
+                # 用量未知时无法确认剩余预算；不继续发起付费调用。
+                if exc.usage is None or summary.cost >= fs.run.max_cost_usd:
+                    break
                 continue
             cost = summary.cost - before
             summary.created += [s for s in result.created if s not in summary.created]

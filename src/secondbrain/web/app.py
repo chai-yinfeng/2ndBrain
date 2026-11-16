@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -447,10 +449,16 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     ) -> HTMLResponse:
         """refresh：首页的"开始今日过滤"轮询；任务完成时让 HTMX 刷新整页（HX-Refresh）。"""
         task = tasks.get(kind)
+        paper_page = None
+        if task and kind.startswith("paper-") and task.result.get("material_id"):
+            paper_page = _wiki().find(f"material-{task.result['material_id']}")
         response = templates.TemplateResponse(
             request,
             "_task.html",
-            {"kind": kind, "task": task, "message": message, "refresh_on_done": refresh},
+            {
+                "kind": kind, "task": task, "message": message,
+                "refresh_on_done": refresh, "paper_page": paper_page,
+            },
         )
         if refresh and task is not None and task.status == "done":
             response.headers["HX-Refresh"] = "true"
@@ -607,7 +615,12 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             prereq_cached = db.get_ai(conn, item_id, "prereq") is not None
             prereq_count = len(ops.prereq_names(conn, item_id))
             incomplete = item_id in db.incomplete_ids(conn)
-            origins = db.material_origins(conn, item_id)
+            origins = []
+            for source in db.material_origins(conn, item_id):
+                origin = dict(source)
+                origin["metadata"] = json.loads(origin["metadata_json"])
+                origin["actual_source_url"] = safe_url(origin["metadata"].get("actual_url"))
+                origins.append(origin)
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
@@ -707,6 +720,57 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "read_kinds": {k: db.FEEDBACK_KINDS[k] for k in ops.READ_FEEDBACK},
             },
         )
+
+    @app.post("/papers/add", response_class=HTMLResponse)
+    async def paper_add(request: Request) -> HTMLResponse:
+        from secondbrain import papers
+
+        form = await request.form()
+        query = str(form.get("query") or "").strip()
+        if not query:
+            raise HTTPException(422, "请输入论文名")
+        ingest = bool(form.get("ingest"))
+        kind = f"paper-{uuid.uuid4().hex}"
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                result = papers.import_by_name(query, task.log, ingest=ingest, client=client)
+                result["ingest_requested"] = ingest
+                return result
+
+        tasks.start(kind, "检索并导入论文", run)
+        return RedirectResponse(f"/papers/result/{kind}", status_code=303)
+
+    @app.get("/papers/result/{kind}", response_class=HTMLResponse)
+    def paper_result(request: Request, kind: str) -> HTMLResponse:
+        if not re.fullmatch(r"paper-[0-9a-f]{32}", kind) or tasks.get(kind) is None:
+            raise HTTPException(404, "论文任务不存在；服务重启后可用 CLI 选择已保存候选")
+        task = tasks.get(kind)
+        paper_page = None
+        if task.result.get("material_id"):
+            paper_page = _wiki().find(f"material-{task.result['material_id']}")
+        return templates.TemplateResponse(
+            request, "paper_result.html", {"kind": kind, "task": task, "paper_page": paper_page}
+        )
+
+    @app.post("/papers/choose", response_class=HTMLResponse)
+    async def paper_choose(request: Request) -> HTMLResponse:
+        from secondbrain import papers
+
+        form = await request.form()
+        search_id = str(form.get("search_id") or "")
+        candidate_id = str(form.get("candidate_id") or "")
+        ingest = bool(form.get("ingest"))
+        kind = f"paper-{uuid.uuid4().hex}"
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                return papers.choose_candidate(
+                    search_id, candidate_id, task.log, ingest=ingest, client=client
+                )
+
+        tasks.start(kind, "导入已选论文", run)
+        return RedirectResponse(f"/papers/result/{kind}", status_code=303)
 
     @app.post("/add", response_class=HTMLResponse)
     async def add_submit(request: Request) -> HTMLResponse:
@@ -965,7 +1029,11 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
-        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"(summary|wiki)-\d+", kind)
+        known = (
+            kind in TASKS or kind == "manual_add"
+            or re.fullmatch(r"(summary|wiki)-\d+", kind)
+            or (re.fullmatch(r"paper-[0-9a-f]{32}", kind) and tasks.get(kind) is not None)
+        )
         if not known:
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind, refresh=bool(refresh))

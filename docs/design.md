@@ -48,6 +48,14 @@ flowchart LR
 - Markdown 经严格标签/属性/URL 白名单输出；KaTeX 离线渲染公式且 `trust:false`，不以兼容性为由允许不安全 HTML。
 - Obsidian 实际阅读视图已观察到同一页面的公式、表格与代码；完整跨端图谱/资源/编辑联动验收因隔离实例触发钥匙串提示而停止。未重置钥匙串、不要求密码，不把未完成验收标记完成。
 
+## M15 实现边界
+
+- `papers.import_by_name` 和 `choose_candidate` 由 CLI/Web 共用；检索按有界的 Semantic Scholar、Crossref、arXiv、OpenAlex 和 USENIX 公开页面获取元数据，不调用 LLM、不增加依赖。
+- 支持完整标题以及名称加作者/年份/会议描述；公开标识一致时可归并作者缩写/连字符等元数据差异，保留各 provider 记录。标题本身不能证明材料身份；不同作者/年份/标识或未能核对的候选必须选择，不因排序擅自导入。
+- `paper_searches` 保存不可变候选及检索错误，`paper_import_attempts` 保存选择/导入结果；选择只接收保存的 ID，不接受客户端 URL，也不重跑查询改变候选。
+- 正文提取与身份/原件/去重走 M13 的 `ops`/`db.persist_material`；只有摘要的响应作兜底，继续尝试已知正文地址。来源元数据保存请求/实际地址和版本；优先可明确重放的 arXiv 版本，不能确认的实际版本明确标 unknown。
+- schema v11 增加来源 `metadata_json`、LLM 错误与 `usage_known`。未知用量不是已知零用量，错误仍持久保存；wiki 受现有 `run.max_cost_usd` 的预估和用量限制，失败不删除材料。不绕过付费墙、不执行资料中的本地命令。
+
 ## 已实现机制（M0–M12，待按 M13–M15 迁移）
 
 下文记录现有系统，不覆盖上述新目标。特别是“有收获”队列、L2 输入依赖、`items.status` 和 digest 首页均为现状，不是未来主流程的强制约束。

@@ -1,6 +1,6 @@
 # Second Brain
 
-个人学习材料与知识网络系统。M13 起支持独立导入 PDF、URL 与文本、阅读和整理入 wiki；订阅与时间预算推荐保留为辅助功能。目标架构见 ADR 0021，M14–M15 的实施和验收状态见路线图。
+个人学习材料与知识网络系统。支持独立导入 PDF、URL、文本和论文名，阅读、记笔记与整理入 Markdown wiki；订阅与时间预算推荐作为辅助功能保留。M13/M15 已验收，M14 的实现和 Web 验收完成，Obsidian 剩余验收仍未完成，详见路线图。
 
 架构见 [docs/design.md](docs/design.md)，路线图见 [docs/roadmap.md](docs/roadmap.md)。
 
@@ -36,6 +36,9 @@ uv run sb sources tune          # 只读的信源统计：反馈分布、近期�
 uv run sb add --pdf paper.pdf --title "论文标题"  # 独立本地 PDF，无需 URL；默认未读
 uv run sb add --text-file notes.txt --ingest     # 文本导入后整理入 wiki，不代表已读
 uv run sb add https://example.com/post           # URL 与订阅共用材料服务，保留多来源
+uv run sb paper add "PagedAttention Kwon 2023"    # 论文名 + 作者/年份；明确时自动导入
+uv run sb paper add "完整论文标题" --ingest       # 导入后整理入 wiki，阅读状态仍独立
+uv run sb paper choose <search_id> <candidate_id> --ingest # 只在有歧义时选择已保存候选
 uv run sb items show <item_id>                   # 阅读原文与来源，不要求运行推荐
 uv run sb items read-state <item_id> reading     # unread / reading / read
 uv run sb items notes <item_id> --file notes.md  # 个人笔记独立存入同一 vault
@@ -66,11 +69,11 @@ Web 上的其他页面：
 - `/`：材料与知识网络首页；`/materials` 为可按名称与阅读状态筛选的材料库，无信源、无 digest 也能使用。
 - `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；运行方式与设置。
 - `/sources`：信源全部由你手动维护。列表（反馈分布、产出、低产出停用建议）、预览、启用 / 停用、删除；"信源目录"列出 example 中还没添加的信源，可以逐个预览、添加。修改按条目文本块写入 `config/sources.yaml`，**保留注释与格式**；`sources: []` 是合法的空配置。
-- `/add`：独立导入 URL / PDF / 文本；可选择已读、稍后读或保留原阅读状态，整理入 wiki 不要求读后反馈，不进入每日分级与预算。
+- `/add`：独立导入 URL / PDF / 文本，或直接输入论文名。论文检索在后台执行，候选不明确时仅选择论文/版本；未得到全文时明确标摘要。可选择整理入 wiki，不要求推荐或读后反馈。
 - `/wiki`：目录、体检和到期复习；`/wiki/graph`：全局/局部图、名称与别名定位、直接邻居展开。页面详情提供来源、关联、反向链接及返回图谱入口。
 - `/recommendations` 与 `/history`：独立每日推荐及历史，保留预算和形式/类型筛选；不再占用材料首页。
 - `/ops` 的"设置"：查看 API key 是否已设置（不显示值），写入或清除 `.env` 中的 key；测试连接；选择 cheap / strong 模型与后端（只把与 example 不同的键写入 `config/settings.yaml`）。
-- 条目详情页：原文、导入来源和原文件、独立阅读状态、个人笔记、整理入 wiki；深度速读和补前置作为可选机器分析保留。
+- 条目详情页：原文、导入来源、原文件与请求/实际版本、实际获取地址、独立阅读状态、个人笔记、整理入 wiki；深度速读和补前置作为可选机器分析保留。版本无法核实时显示 unknown，不冒充已验证版本。
 
 深读条目（全文时间超过预算 × `deep_read_ratio`）按速读时间（`deep_summary_minutes`，默认 15 分钟）占用每日预算，卡片同时显示全文时间（ADR 0015）。
 
@@ -144,6 +147,6 @@ uv run sb schedule uninstall                    # 卸载
 - [x] M12 html_index 与论文导入增强：跨标识去重、正文补全、`sb items incomplete`
 - [x] M13 统一材料入口与独立知识整理
 - [ ] M14 Wiki 知识网络与浏览主入口
-- [ ] M15 论文名智能导入
+- [x] M15 论文名智能导入
 
 详见 [docs/progress.md](docs/progress.md)。

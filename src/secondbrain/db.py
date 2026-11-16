@@ -260,6 +260,27 @@ MIGRATIONS: list[str] = [
     COMMIT;
     PRAGMA foreign_keys = ON;
     """,
+    # v11：论文名检索会话/不可变候选与导入尝试；来源元数据和失败的 LLM 调用。
+    """
+    CREATE TABLE paper_searches (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        candidates_json TEXT NOT NULL,
+        errors_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE paper_import_attempts (
+        id INTEGER PRIMARY KEY,
+        search_id TEXT NOT NULL REFERENCES paper_searches(id),
+        candidate_id TEXT,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_paper_attempts_search ON paper_import_attempts(search_id);
+    ALTER TABLE item_sources ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE llm_calls ADD COLUMN error TEXT;
+    ALTER TABLE llm_calls ADD COLUMN usage_known INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -398,6 +419,7 @@ class NewItem:
     origin_canonical: str | None = None
     total_pages: int | None = None
     extracted_pages: int | None = None
+    provenance: dict | None = None
 
 
 def text_fingerprint(text: str) -> str | None:
@@ -579,13 +601,15 @@ def persist_material(
         """INSERT INTO item_sources
            (item_id, source_id, kind, locator, canonical, original_path, text_path,
             raw_path, total_pages, extracted_pages, original_chars, content_chars,
-            completeness, truncated, method, content_hash, text_hash, pdf_hash, imported_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            completeness, truncated, method, content_hash, text_hash, pdf_hash, imported_at,
+            metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (item_id, item.source_id, kind, locator,
          item.origin_canonical or item.url_canonical or None,
          resource or text_resource, text_resource, raw_resource, item.total_pages,
          item.extracted_pages, len(original), len(item.content), completeness,
-         int(item.truncated), item.extract_method, item.content_hash, fingerprint, pdf_hash, now),
+         int(item.truncated), item.extract_method, item.content_hash, fingerprint, pdf_hash, now,
+         json.dumps(item.provenance or {}, ensure_ascii=False)),
     )
     return item_id, created, improved
 
