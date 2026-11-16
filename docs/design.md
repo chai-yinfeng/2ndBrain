@@ -36,8 +36,17 @@ flowchart LR
 - `reading_state`（`unread / reading / read`）、`processing_status` 与原有推荐 `status` 分开；重复导入默认保留用户阅读状态。「稍后读」等反馈继续作为独立偏好信号，显式整理不会生成读后反馈。
 - 原 PDF 与提取文本保存到 vault 的 `resources/`，正文保留完整性和截断信息；摘要只标为摘要。wiki 使用实际可用正文，长文逐段提要后整理，不要求 L2，也不静默丢弃尾部。
 - 每份材料的知识页使用 `pages/materials/material-<id>.md`；已有 paper 页保留。新概念为「陌生」，不设置 `last_reviewed`；仅因生成页面不进入「已知知识」信号。
-- 机器整理保守追加、按内容去重，不替换用户文字。独立个人笔记保存在 `notes/material-<id>.md`，CLI/Web 共用；原文、机器内容与笔记各自可追溯。
+- 机器整理保守追加、按内容去重，不替换用户文字。独立个人笔记保存在 `notes/material-<id>-notes.md`，避免与材料页同名；M14 迁移旧笔记路径、保留原字节并更新非代码引用。CLI/Web 共用；原文、机器内容与笔记各自可追溯。
 - `sb add` 和 Web `/add` 接受无 URL 的 PDF/文本；`sb items show / read-state / notes` 与材料详情页支持阅读、状态和笔记；任意材料可用 `sb wiki ingest <id>` 或详情页按钮整理。`--pending` 的「有收获」队列只是批量捷径。
+
+## M14 实现边界与验收限制
+
+- 首页以材料、导入和网络为入口，推荐移到 `/recommendations`；无 digest 不阻塞主流程。CLI `wiki show / graph / reindex` 与 Web 读取同一 vault。
+- 图谱、反向链接、体检使用相同的 Markdown 解析和名称消歧。唯一文件名保留 ID；文件名碰撞用 vault-relative `.md` 路径。中文、别名、相对路径可解析，代码中的 wikilink 不生成边。缺失和歧义分别提示。
+- 根目录及外部知识子目录页面可加入网络；raw、resources、notes、隐藏目录和 index/log 不作为知识节点。外部编辑后重建目录即可，不维护另一份图数据。
+- Web 提供全局图、局部中心、直接邻居逐步展开、名称定位、详情与反向链接。普通边只表示链接，机器推断与来源说明仍放在正文。
+- Markdown 经严格标签/属性/URL 白名单输出；KaTeX 离线渲染公式且 `trust:false`，不以兼容性为由允许不安全 HTML。
+- Obsidian 实际阅读视图已观察到同一页面的公式、表格与代码；完整跨端图谱/资源/编辑联动验收因隔离实例触发钥匙串提示而停止。未重置钥匙串、不要求密码，不把未完成验收标记完成。
 
 ## 已实现机制（M0–M12，待按 M13–M15 迁移）
 

@@ -836,6 +836,74 @@ def _open_wiki():
     return open_wiki(config.wiki_dir(), config.raw_dir())
 
 
+@wiki_app.command("reindex")
+def wiki_reindex() -> None:
+    """从同一 vault 的 Markdown 重建目录；图谱与反向链接实时派生。"""
+    from secondbrain.wiki.graph import build_graph
+
+    wiki = _open_wiki()
+    wiki.rebuild_index()
+    graph = build_graph(wiki, datetime.now().date())
+    typer.echo(f"已重新索引：{len(graph['nodes'])} 页，{len(graph['edges'])} 条页面链接")
+
+
+@wiki_app.command("show")
+def wiki_show(name: str) -> None:
+    """打开知识页正文、关联与反向链接；同名时要求使用稳定 ID。"""
+    from secondbrain.wiki.graph import page_connections
+
+    wiki = _open_wiki()
+    candidates = wiki.resolve(name)
+    if len(candidates) != 1:
+        choices = "、".join(page.slug for page in candidates) or "无匹配页面"
+        raise typer.BadParameter(f"无法唯一定位 {name}：{choices}")
+    page = candidates[0]
+    typer.echo(page.body)
+    connections = page_connections(wiki, page)
+    for key, label in (("outgoing", "关联"), ("backlinks", "反向链接")):
+        typer.echo(f"\n{label}：" + "、".join(p.slug for p in connections[key]))
+    for key, label in (("missing", "缺失"), ("ambiguous", "歧义")):
+        if connections[key]:
+            typer.echo(f"{label}：" + "、".join(connections[key]))
+
+
+@wiki_app.command("graph")
+def wiki_graph(
+    focus: str | None = typer.Option(None, "--focus", help="以名称或稳定 ID 为中心"),
+    depth: int = typer.Option(1, "--depth", min=1, help="局部网络的直接邻居展开层数"),
+) -> None:
+    """列出全局或局部网络；普通连线仅表示 Markdown 页面链接。"""
+    from secondbrain.wiki.graph import build_graph
+
+    wiki = _open_wiki()
+    graph = build_graph(wiki, datetime.now().date())
+    selected = {node["id"] for node in graph["nodes"]}
+    if focus:
+        candidates = wiki.resolve(focus)
+        if len(candidates) != 1:
+            choices = "、".join(page.slug for page in candidates) or "无匹配页面"
+            raise typer.BadParameter(f"无法唯一定位 {focus}：{choices}")
+        selected = {candidates[0].slug}
+        adjacent = {node["id"]: set() for node in graph["nodes"]}
+        for edge in graph["edges"]:
+            adjacent[edge["source"]].add(edge["target"])
+            adjacent[edge["target"]].add(edge["source"])
+        frontier = selected.copy()
+        for _ in range(depth):
+            frontier = {neighbor for node in frontier for neighbor in adjacent[node]} - selected
+            selected.update(frontier)
+            if not frontier:
+                break
+    for node in graph["nodes"]:
+        if node["id"] in selected:
+            typer.echo(f"{node['id']} · {node['label']} · {node['url']}")
+    for edge in graph["edges"]:
+        if edge["source"] in selected and edge["target"] in selected:
+            typer.echo(f"[[{edge['source']}]] — [[{edge['target']}]]")
+    if not selected:
+        typer.echo("知识网络为空；可先导入材料并整理入 wiki。")
+
+
 @wiki_app.command("ingest")
 def wiki_ingest(
     item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),

@@ -174,7 +174,7 @@ def test_external_notes_mastery_and_legacy_paper_survive_reprocessing(material_e
     legacy = Page("legacy-paper", new_meta("Legacy paper", "paper", TODAY), "# 旧论文\n\n旧笔记")
     legacy_path = wiki.save_page(legacy)
     legacy_bytes = legacy_path.read_bytes()
-    notes = wiki.root / "notes" / f"material-{item_id}.md"
+    notes = wiki.root / "notes" / f"material-{item_id}-notes.md"
     notes.parent.mkdir()
     notes.write_text("# 我的独立笔记\n\n不要改写。\n", encoding="utf-8")
     note_bytes = notes.read_bytes()
@@ -202,7 +202,7 @@ def test_external_notes_mastery_and_legacy_paper_survive_reprocessing(material_e
     assert concept.body.count("机器建议而非替换") == 1
     material = wiki.pages[f"material-{item_id}"]
     assert "[[kv-cache|键值缓存]]" in material.body
-    assert f"(../../notes/material-{item_id}.md)" in material.body
+    assert f"(../../notes/material-{item_id}-notes.md)" in material.body
     assert "[[legacy-paper]]" in material.body
     assert "model-invented-title" not in wiki.pages
     assert notes.read_bytes() == note_bytes

@@ -276,7 +276,8 @@ def material_notes(item_id: int, text: str | None = None) -> str:
             raise OpsError(f"材料不存在：{item_id}")
     finally:
         conn.close()
-    path = config.wiki_dir() / "notes" / f"material-{item_id}.md"
+    wiki = open_wiki(config.wiki_dir(), config.raw_dir())
+    path = wiki.root / "notes" / f"material-{item_id}-notes.md"
     if text is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")

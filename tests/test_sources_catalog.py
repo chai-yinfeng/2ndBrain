@@ -141,7 +141,7 @@ def test_empty_sources_are_friendly_everywhere(env):
     assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
     conn.close()
     client = TestClient(create_app())
-    home = client.get("/").text
+    home = client.get("/recommendations").text
     assert "还没有启用的信源" in home and "开始今日过滤" not in home
     assert client.get("/sources").status_code == 200 and client.get("/ops").status_code == 200
     tune = runner.invoke(cli_app, ["sources", "tune"])

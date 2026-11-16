@@ -148,14 +148,14 @@ def seed_digest(day: str) -> int:
 
 def test_home_start_button_until_today_has_run(env):
     client = TestClient(create_app())
-    home = client.get("/").text
+    home = client.get("/recommendations").text
     assert 'data-run-state="todo"' in home and "开始今日过滤" in home
     assert 'name="all_time"' in home and 'name="refresh" value="1"' in home
     assert "（非高峰）" in home  # 费用区间
     seed_digest((datetime.now().date() - timedelta(days=1)).isoformat())
-    assert "开始今日过滤" in client.get("/").text  # 只有昨天的 digest
+    assert "开始今日过滤" in client.get("/recommendations").text  # 只有昨天的 digest
     seed_digest(datetime.now().date().isoformat())
-    home = client.get("/").text
+    home = client.get("/recommendations").text
     assert 'data-run-state="done"' in home and "开始今日过滤" not in home
     assert '<a href="/ops">再运行一次</a>' in home
 
@@ -163,7 +163,7 @@ def test_home_start_button_until_today_has_run(env):
 def test_home_shows_running_when_locked_or_task_running(env):
     client = TestClient(create_app())
     with ops.run_lock():
-        home = client.get("/").text
+        home = client.get("/recommendations").text
         assert 'data-run-state="running"' in home and "开始今日过滤" not in home
         refused = client.post("/tasks/run", data={"refresh": "1"}).text
         assert "已有 sb run 在运行" in refused
@@ -171,7 +171,7 @@ def test_home_shows_running_when_locked_or_task_running(env):
     task = client.app.state.tasks.start(
         "run", "立即运行", lambda t: {"cost": 0.0, "waited": gate.wait(5)}
     )
-    home = client.get("/").text
+    home = client.get("/recommendations").text
     assert 'hx-get="/tasks/run?refresh=1"' in home and 'data-run-state="running"' in home
     gate.set()
     task.thread.join(5)
@@ -194,7 +194,7 @@ def test_web_run_all_time_option(env):
 def test_fyi_and_archived_are_folded_with_working_feedback(env):
     item = seed_digest(datetime.now().date().isoformat())
     client = TestClient(create_app())
-    html = client.get("/").text
+    html = client.get("/recommendations").text
     fyi = html.split('<details class="lane" id="lane-fyi">', 1)[1].split("</details>", 1)[0]
     assert "<summary><h2>速览（1 条）</h2></summary>" in fyi
     assert f'id="feedback-{item}"' in fyi and 'hx-post="/feedback"' in fyi

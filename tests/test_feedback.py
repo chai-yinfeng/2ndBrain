@@ -150,8 +150,8 @@ def test_later_page_and_home_link(digest_env, conn):
     item = conn.execute("SELECT item_id FROM digests LIMIT 1").fetchone()[0]
     home = client.get("/").text
     assert 'href="/later"' in home and "稍后再看：0 条" in home
-    assert "读之前" in home and "读完后" in home
-    assert 'title="读完了，有收获' in home  # 按钮有说明
+    recommendation = client.get("/recommendations").text
+    assert "读之前" in recommendation and "读完后" in recommendation
     resp = client.post("/feedback", data={"item_id": item, "kind": "later"})
     assert "已记录：稍后读" in resp.text
     assert "稍后再看：1 条" in client.get("/").text

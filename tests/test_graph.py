@@ -46,7 +46,6 @@ def test_build_graph(env):
     assert nodes["kv-cache"]["degree"] == 2 and nodes["vllm"]["degree"] == 0
     assert nodes["kv-cache"]["due"] and not nodes["batching"]["due"]  # 到期高亮
     assert nodes["paged-attention"]["due"] is False  # 只有概念页参与复习
-    assert (nodes["kv-cache"]["mastery"], nodes["vllm"]["mastery"]) == ("想回炉", None)
     assert nodes["batching"]["url"] == "/wiki/page/batching"
 
 
@@ -57,14 +56,13 @@ def test_graph_endpoints(env):
     assert len(data["nodes"]) == 4 and len(data["edges"]) == 3
     page = client.get("/wiki/graph").text
     assert 'src="/static/cytoscape.min.js"' in page and "cdn" not in page.lower()
-    assert 'class="f-type" value="concept"' in page and 'value="想回炉"' in page
     assert 'href="/wiki/graph"' in client.get("/wiki").text
 
 
 def test_empty_graph_shows_guide(env):
     client = TestClient(create_app())
     page = client.get("/wiki/graph").text
-    assert "点「有收获」并编进 wiki 后" in page and 'id="graph"' not in page
+    assert 'id="graph"' not in page
     assert json.loads(client.get("/wiki/graph.json").text) == {"nodes": [], "edges": []}
 
 

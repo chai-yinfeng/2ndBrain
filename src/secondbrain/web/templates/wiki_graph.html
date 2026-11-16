@@ -1,59 +1,45 @@
 {% extends "base.html" %}
 {% block title %}知识图谱 · Wiki{% endblock %}
 {% block content %}
-<p class="meta"><a href="/wiki">← Wiki</a></p>
-<h1>知识图谱 <small class="meta">{{ count }} 个页面</small></h1>
+<p class="meta"><a href="/wiki">← Wiki</a> · <a href="/materials">材料库</a></p>
+<h1>知识网络 <small class="meta">{{ count }} 个页面</small></h1>
+<p class="meta">节点可打开完整知识页；连线只表示页面链接，不代表因果、引用或前置关系。</p>
+<form method="post" action="/wiki/reindex"><button class="fb" type="submit">从 Markdown 重新索引</button></form>
 {% if not count %}
-<p class="empty" id="graph-empty">在文章上点「有收获」并编进 wiki 后，这里会出现图谱。</p>
+<p class="empty" id="graph-empty">知识网络为空。<a href="/add">导入材料</a>后可在材料详情页整理入 wiki，无需先运行推荐或提交反馈。</p>
 {% else %}
 <div class="graph-filters">
   <span class="meta">类型：</span>
   {% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ t }}</label>{% endfor %}
   <span class="meta">掌握度：</span>
-  {% for m in ("陌生", "接触过", "想回炉", "扎实", "无") %}<label><input type="checkbox" class="f-mastery" value="{{ m }}" checked> <span class="dot" data-mastery="{{ m }}"></span>{{ m }}</label>{% endfor %}
-  <span class="meta">粗边框 = 今天到期复习；节点大小 ~ 连接数；点击打开页面。</span>
+  {% for m in ("陌生", "接触过", "想回炉", "扎实", "无") %}<label><input type="checkbox" class="f-mastery" value="{{ m }}" checked> {{ m }}</label>{% endfor %}
 </div>
-<div id="graph" data-src="/wiki/graph.json"></div>
+<div class="graph-toolbar">
+  <label>查找名称 / 别名 <input id="node-search" type="search" placeholder="例如 KV cache、键值缓存"></label>
+  <button class="fb" id="graph-global" type="button">全局概览</button>
+  <button class="fb" id="graph-fit" type="button">适应视图</button>
+</div>
+<div class="network-layout">
+  <aside class="network-sidebar">
+    <label for="node-picker">定位节点（同名时按类型和 ID 选择）</label>
+    <select id="node-picker" size="5" aria-label="定位节点"></select>
+    <section id="node-detail" hidden>
+      <h2 id="node-title"></h2>
+      <p class="meta" id="node-kind"></p>
+      <p><a id="node-open" class="fb primary">打开完整页面</a></p>
+      <button class="fb" id="graph-local" type="button">以此为中心</button>
+      <button class="fb" id="graph-expand" type="button">展开直接邻居</button>
+      <h3>相连页面</h3>
+      <div id="node-neighbors"></div>
+    </section>
+  </aside>
+  <div>
+    <p id="graph-status" role="status" aria-live="polite">正在读取 Markdown 网络…</p>
+    <div id="graph" data-src="/wiki/graph.json"></div>
+    <p id="graph-filter-empty" class="empty" hidden>当前筛选没有节点。请调整类型 / 掌握度筛选，或返回全局概览。</p>
+  </div>
+</div>
 <script src="/static/cytoscape.min.js"></script>
-<script>
-(function () {
-  const COLORS = {"陌生": "#d64545", "接触过": "#e0a030", "想回炉": "#7a5cd6", "扎实": "#2f9e5a", "无": "#9aa0a6"};
-  document.querySelectorAll(".dot").forEach(d => d.style.background = COLORS[d.dataset.mastery]);
-  fetch("/wiki/graph.json").then(r => r.json()).then(data => {
-    const elements = [];
-    data.nodes.forEach(n => elements.push({data: {
-      id: n.id, label: n.label, type: n.type, mastery: n.mastery || "无", due: n.due,
-      size: 18 + 8 * Math.sqrt(n.degree), url: n.url, color: COLORS[n.mastery || "无"] || COLORS["无"]
-    }}));
-    data.edges.forEach(e => elements.push({data: {id: e.source + "__" + e.target, source: e.source, target: e.target}}));
-    const fg = getComputedStyle(document.documentElement).getPropertyValue("--fg").trim() || "#1f2328";
-    const cy = cytoscape({
-      container: document.getElementById("graph"),
-      elements: elements,
-      layout: {name: "cose", animate: false, nodeRepulsion: 8000},
-      style: [
-        {selector: "node", style: {
-          "background-color": "data(color)", "label": "data(label)", "width": "data(size)",
-          "height": "data(size)", "font-size": 10, "color": fg, "text-valign": "bottom",
-          "text-margin-y": 3}},
-        {selector: "node[type = 'paper']", style: {"shape": "round-rectangle"}},
-        {selector: "node[type = 'entity']", style: {"shape": "diamond"}},
-        {selector: "node[?due]", style: {"border-width": 4, "border-color": "#d64545"}},
-        {selector: "edge", style: {"width": 1, "line-color": "#b8bcc2", "curve-style": "haystack"}}
-      ]
-    });
-    cy.on("tap", "node", evt => { window.location.href = evt.target.data("url"); });
-    function applyFilters() {
-      const types = new Set([...document.querySelectorAll(".f-type:checked")].map(x => x.value));
-      const levels = new Set([...document.querySelectorAll(".f-mastery:checked")].map(x => x.value));
-      cy.nodes().forEach(n => {
-        const show = types.has(n.data("type")) && levels.has(n.data("mastery"));
-        n.style("display", show ? "element" : "none");
-      });
-    }
-    document.querySelectorAll(".f-type, .f-mastery").forEach(x => x.addEventListener("change", applyFilters));
-  });
-})();
-</script>
+<script src="/static/wiki_graph.js" defer></script>
 {% endif %}
 {% endblock %}

@@ -15,7 +15,7 @@
       <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
     {% elif kind == "run" %}
-      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/">查看今日 digest</a></p>
+      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/recommendations">查看每日推荐</a></p>
     {% elif kind == "manual_add" %}
       <table class="scores add-results">
         <tr><th>URL</th><th>结果</th><th>条目</th></tr>

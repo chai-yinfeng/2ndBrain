@@ -88,7 +88,7 @@ def _first_item(kind: str = "must_read") -> int:
 
 
 def test_index_shows_digest_with_budget(client: TestClient):
-    resp = client.get("/")
+    resp = client.get("/recommendations")
     assert resp.status_code == 200
     html = resp.text
     assert html.count("data-item-id=") == len(TITLES)
@@ -102,15 +102,15 @@ def test_index_shows_digest_with_budget(client: TestClient):
 
 
 def test_index_with_date(client: TestClient):
-    assert "Digest 2026-11-04" in client.get("/?date=2026-11-04").text
-    other = client.get("/?date=2020-01-01")
+    assert "Digest 2026-11-04" in client.get("/recommendations?date=2026-11-04").text
+    other = client.get("/recommendations?date=2020-01-01")
     assert other.status_code == 200 and "data-item-id" not in other.text
-    assert client.get("/?date=yesterday").status_code == 400
+    assert client.get("/recommendations?date=yesterday").status_code == 400
 
 
 def test_index_without_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SB_DATA_DIR", str(tmp_path))
-    resp = TestClient(create_app()).get("/")
+    resp = TestClient(create_app()).get("/recommendations")
     assert resp.status_code == 200
     assert "还没有 digest" in resp.text
 
@@ -127,7 +127,7 @@ def test_item_detail(client: TestClient):
 def test_history(client: TestClient):
     resp = client.get("/history")
     assert resp.status_code == 200
-    assert 'href="/?date=2026-11-04"' in resp.text
+    assert 'href="/recommendations?date=2026-11-04"' in resp.text
 
 
 def test_static_htmx_is_vendored(client: TestClient):

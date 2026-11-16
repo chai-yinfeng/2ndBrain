@@ -62,11 +62,11 @@ def test_item_form(source_type, url, method, expected):
 
 def test_chips_keep_other_dimensions():
     params = {"date": "2026-11-04", "form": "paper", "ctype": None}
-    forms = chips("/", params, "form", {"paper": "论文", "blog": "博客"})
-    assert forms[0] == ("全部", "/?date=2026-11-04", False)
-    assert forms[1] == ("论文", "/?date=2026-11-04&form=paper", True)
-    ctypes = chips("/", params, "ctype", {"survey": "综述"})
-    assert ctypes[1][1] == "/?date=2026-11-04&form=paper&ctype=survey"
+    forms = chips("/recommendations", params, "form", {"paper": "论文", "blog": "博客"})
+    assert forms[0] == ("全部", "/recommendations?date=2026-11-04", False)
+    assert forms[1] == ("论文", "/recommendations?date=2026-11-04&form=paper", True)
+    ctypes = chips("/recommendations", params, "ctype", {"survey": "综述"})
+    assert ctypes[1][1] == "/recommendations?date=2026-11-04&form=paper&ctype=survey"
 
 
 def _seed_mixed_digest():
@@ -113,23 +113,24 @@ def _seed_mixed_digest():
 def test_index_filters_only_affect_display(env):
     _seed_mixed_digest()
     client = TestClient(create_app())
-    full = client.get("/").text
+    full = client.get("/recommendations").text
     assert full.count('class="entry lane-') == 3 and 'data-budget="30/105"' in full
-    assert 'href="/?form=paper"' in full and 'href="/?ctype=explainer"' in full
+    assert 'href="/recommendations?form=paper"' in full
+    assert 'href="/recommendations?ctype=explainer"' in full
 
-    papers = client.get("/?form=paper").text
+    papers = client.get("/recommendations?form=paper").text
     assert "A paper survey" in papers and "A blog explainer" not in papers
     assert 'data-budget="30/105"' in papers  # 预算不受筛选影响
-    assert '<a class="chip on" href="/?form=paper">论文</a>' in papers
-    assert '<a class="chip" href="/">全部</a>' in papers  # "全部"清除该维度
+    assert '<a class="chip on" href="/recommendations?form=paper">论文</a>' in papers
+    assert '<a class="chip" href="/recommendations">全部</a>' in papers
     worth = papers.split('id="lane-worth_it"', 1)[1].split("</section>", 1)[0]
     assert "<small>0</small>" in worth and "（空）" in worth  # 被筛空的 lane 显示空状态
 
-    combo = client.get("/?form=blog&ctype=explainer").text
+    combo = client.get("/recommendations?form=blog&ctype=explainer").text
     assert "A blog explainer" in combo and "A lecture" not in combo and "A quick note" not in combo
     fyi = combo.split('<details class="lane" id="lane-fyi">', 1)[1].split("</details>", 1)[0]
     assert "速览（0 条）" in fyi
-    video = client.get("/?form=video&ctype=bogus").text  # 非法取值视为"全部"
+    video = client.get("/recommendations?form=video&ctype=bogus").text
     assert "A lecture" in video and "A paper survey" not in video
 
 
@@ -137,11 +138,13 @@ def test_history_filtered_counts(env):
     _seed_mixed_digest()
     client = TestClient(create_app())
     html = client.get("/history?ctype=explainer").text
-    row = html.split(f'href="/?date={TODAY}&amp;ctype=explainer"', 1)[1].split("</tr>", 1)[0]
+    row = html.split(
+        f'href="/recommendations?date={TODAY}&amp;ctype=explainer"', 1
+    )[1].split("</tr>", 1)[0]
     cells = [c.split("</td>")[0] for c in row.split("<td>")[1:]]
     assert cells == ["1", "0", "0", "1", "0", "0", "2"]  # 必读 温故 意外 值得读 顺延 速览 合计
     assert 'class="chip on" href="/history?ctype=explainer"' in html
-    assert f'href="/?date={TODAY}"' in client.get("/history").text
+    assert f'href="/recommendations?date={TODAY}"' in client.get("/history").text
 
 
 # ---------- 信源主页与"进入推荐" ----------

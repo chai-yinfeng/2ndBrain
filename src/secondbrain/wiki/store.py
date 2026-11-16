@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -39,8 +40,8 @@ REQUIRED_FIELDS = (
     "updated",
 )
 DEFAULT_EASE = 2.5
-WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
+WIKILINK_RE = re.compile(r"\[\[([^\]\n|#]*)(?:#[^\]\n|]*)?(?:\|[^\]\n]*)?\]\]")
+_SLUG_RE = re.compile(r"[\W_]+")
 MAX_SLUG = 80
 
 
@@ -49,11 +50,61 @@ class WikiError(Exception):
 
 
 def slugify(text: str) -> str:
-    """小写，非 [a-z0-9] 的连续字符替换为短横线，去掉首尾短横线；结果为空时抛 WikiError。"""
-    slug = _SLUG_RE.sub("-", text.lower()).strip("-")[:MAX_SLUG].strip("-")
+    """保留 Unicode 字母和数字；原有 ASCII slug 不变，路径分隔符规范化为短横线。"""
+    slug = _SLUG_RE.sub("-", unicodedata.normalize("NFC", text).lower())
+    slug = slug.strip("-")[:MAX_SLUG].strip("-")
     if not slug:
         raise WikiError(f"无法生成有效的 slug：{text!r}")
     return slug
+
+
+def markdown_without_code(text: str) -> str:
+    """遮盖围栏和行内代码，保留偏移与换行，供 wikilink 消费者共用。"""
+    lines = []
+    fence: str | None = None
+    fence_size = 0
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)", line)
+        if fence is not None:
+            if marker and marker[1][0] == fence and len(marker[1]) >= fence_size:
+                if not marker[2].strip():
+                    fence = None
+            lines.append(re.sub(r"[^\n]", " ", line))
+        elif marker and (marker[1][0] != "`" or "`" not in marker[2]):
+            fence, fence_size = marker[1][0], len(marker[1])
+            lines.append(re.sub(r"[^\n]", " ", line))
+        else:
+            lines.append(line)
+    text = "".join(lines)
+    chars = list(text)
+    position = 0
+    while position < len(text):
+        if text[position] != "`":
+            position += 1
+            continue
+        end = position + 1
+        while end < len(text) and text[end] == "`":
+            end += 1
+        marker = text[position:end]
+        closing = re.search(rf"(?<!`){re.escape(marker)}(?!`)", text[end:])
+        if closing is None:
+            position = end
+            continue
+        stop = end + closing.end()
+        for index in range(position, stop):
+            if chars[index] != "\n":
+                chars[index] = " "
+        position = stop
+    return "".join(chars)
+
+
+def wikilink_targets(text: str) -> set[str]:
+    """保留目标的中文、路径和大小写；别名/标题锚点不属于页面身份。"""
+    return {match[1].strip() for match in WIKILINK_RE.finditer(markdown_without_code(text))}
+
+
+def _name_key(text: str) -> str:
+    return unicodedata.normalize("NFC", text).strip().casefold()
 
 
 @dataclass
@@ -73,15 +124,17 @@ class Page:
 
     @property
     def aliases(self) -> list[str]:
-        return list(self.meta.get("aliases") or [])
+        aliases = self.meta.get("aliases") or []
+        return [aliases] if isinstance(aliases, str) else list(aliases)
 
     def names(self) -> list[str]:
-        """用于匹配的名字：slug（短横线换空格）、标题、别名，小写。"""
-        names = [self.slug.replace("-", " "), self.title, *self.aliases]
-        return [n.lower() for n in names if n]
+        """用于名称查找；文件名与标题/别名均保留，不把中文转为空 slug。"""
+        stem = self.path.stem if self.path else self.slug.rsplit("/", 1)[-1]
+        names = [self.slug, stem, stem.replace("-", " "), self.title, *self.aliases]
+        return [_name_key(n) for n in names if isinstance(n, str) and n]
 
     def links(self) -> set[str]:
-        return {slugify_safe(m) for m in WIKILINK_RE.findall(self.body)} - {""}
+        return wikilink_targets(self.body)
 
 
 def slugify_safe(text: str) -> str:
@@ -122,13 +175,41 @@ class Wiki:
 
     # ---------- 读写 ----------
 
+    def _is_page_path(self, path: Path) -> bool:
+        path = path.resolve()
+        root = self.root.resolve()
+        if not path.is_relative_to(root) or path.suffix.lower() != ".md":
+            return False
+        relative = path.relative_to(root)
+        return (
+            relative.as_posix() not in {"index.md", "log.md"}
+            and not path.is_relative_to(self.raw_root.resolve())
+            and not any(part.startswith(".") for part in relative.parts)
+            and not any(
+                part in {"raw", "resources", "attachments", "assets", "notes"}
+                for part in relative.parts[:-1]
+            )
+        )
+
     def save_page(self, page: Page) -> Path:
-        path = self.page_path(page.slug, page.type)
+        path = page.path.resolve() if page.path else self.page_path(page.slug, page.type)
+        if not self._is_page_path(path):
+            raise WikiError(f"页面路径越界：{path}")
+        if page.path is None and path.exists():
+            raise WikiError(f"页面已存在，请先解析目标再更新：{path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         front = yaml.safe_dump(page.meta, allow_unicode=True, sort_keys=False).strip()
         path.write_text(f"---\n{front}\n---\n\n{page.body.strip()}\n", encoding="utf-8")
+        collision = any(
+            existing.path is not None
+            and existing.path.resolve() != path
+            and _name_key(existing.path.stem) == _name_key(path.stem)
+            for existing in self.pages.values()
+        )
         page.path = path
         self.pages[page.slug] = page
+        if collision:
+            self.reload_pages()
         return path
 
     def write_raw(self, item_id: int, title: str, url: str, content: str) -> Path:
@@ -140,16 +221,28 @@ class Wiki:
     def reload_pages(self) -> None:
         """以 Markdown 为事实来源，写入前重新读取外部编辑、删除与新增的页面。"""
         self.pages.clear()
-        for folder in PAGE_TYPES.values():
-            for path in sorted((self.root / "pages" / folder).glob("*.md")):
-                self.pages[path.stem] = parse_page(
-                    path.read_text(encoding="utf-8"), path.stem, path
-                )
+        paths = sorted(path for path in self.root.rglob("*.md") if self._is_page_path(path))
+        stems: dict[str, int] = {}
+        for path in paths:
+            key = _name_key(path.stem)
+            stems[key] = stems.get(key, 0) + 1
+        for path in paths:
+            slug = path.stem
+            if stems[_name_key(slug)] > 1:
+                slug = path.relative_to(self.root).as_posix()
+            self.pages[slug] = parse_page(path.read_text(encoding="utf-8"), slug, path)
 
-    def raw_link(self, item_id: int, page_type: str) -> str:
+    def reindex(self) -> None:
+        """仅重读页面并重建派生目录；不重写页面、复习状态或用户内容。"""
+        self.reload_pages()
+        self.rebuild_index()
+
+    def raw_link(self, item_id: int, page_type: str, source: Page | None = None) -> str:
         """从 pages/<type>/x.md 指向原文的相对链接（Obsidian 可点开）；
         原文在 data/wiki/raw 时为 ../../raw/<id>.md。"""
         page_dir = self.root / "pages" / PAGE_TYPES[page_type]
+        if source is not None and source.path is not None:
+            page_dir = source.path.parent
         return Path(os.path.relpath(self.raw_path(item_id), page_dir)).as_posix()
 
     def append_log(self, day: date, action: str, title: str, lines: list[str]) -> None:
@@ -174,16 +267,59 @@ class Wiki:
 
     # ---------- 查询 ----------
 
-    def find(self, name: str) -> Page | None:
-        """按 slug / 标题 / 别名查找页面（不区分大小写）。"""
-        slug = slugify_safe(name)
-        if slug in self.pages:
-            return self.pages[slug]
-        lowered = name.strip().lower()
-        for page in self.pages.values():
-            if lowered in page.names():
-                return page
-        return None
+    def resolve(self, name: str, source: Page | None = None) -> list[Page]:
+        """精确 ID 优先；标题/别名歧义返回全部候选，不按遍历顺序选页面。"""
+        target = name.strip()
+        if target.startswith("[[") and target.endswith("]]"):
+            target = target[2:-2]
+        target = target.split("|", 1)[0].split("#", 1)[0].strip()
+        if not target:
+            return [source] if source is not None else []
+        key = _name_key(target)
+        exact = [page for slug, page in self.pages.items() if _name_key(slug) == key]
+        if exact:
+            return sorted(exact, key=lambda page: page.slug)
+        explicit_path = "/" in target or target.lower().endswith(".md")
+        if explicit_path:
+            if not target.lower().endswith(".md"):
+                target += ".md"
+            roots = [self.root]
+            if (
+                source is not None and source.path is not None
+                and not target.startswith(("pages/", "/"))
+            ):
+                roots.insert(0, source.path.parent)
+            for root in roots:
+                path = (root / target.lstrip("/")).resolve()
+                matches = [
+                    page for page in self.pages.values()
+                    if page.path is not None and page.path.resolve() == path
+                ]
+                if matches:
+                    return sorted(matches, key=lambda page: page.slug)
+            # 无匹配路径时仍允许含斜线的真实标题/别名，但不退化为 basename 猜测。
+            if "/" not in target:
+                key = _name_key(target[:-3])
+        matches = [page for page in self.pages.values() if key in page.names()]
+        return sorted(matches, key=lambda page: page.slug)
+
+    def find(self, name: str, source: Page | None = None) -> Page | None:
+        """只返回唯一匹配；缺失与歧义均不猜测。"""
+        matches = self.resolve(name, source)
+        return matches[0] if len(matches) == 1 else None
+
+    def is_resource_link(self, name: str, source: Page | None = None) -> bool:
+        """原文与附件不是知识节点，也不是缺失知识页。"""
+        target = name.split("|", 1)[0].split("#", 1)[0].strip()
+        suffix = Path(target).suffix.lower()
+        if suffix and suffix != ".md":
+            return True
+        root = source.path.parent if source is not None and source.path else self.root
+        path = (root / target.lstrip("/")).resolve()
+        if path.is_relative_to(self.raw_root.resolve()):
+            return True
+        parts = Path(target).parts
+        return any(part in {"raw", "resources", "attachments", "assets", "notes"} for part in parts)
 
     def mentioned_in(self, text: str, limit: int) -> list[Page]:
         """名字出现在 text 中的页面（名字至少 3 个字符），按名字长度降序取前 limit 个。"""
@@ -212,6 +348,38 @@ def parse_page(text: str, slug: str, path: Path | None = None) -> Page:
     return Page(slug=slug, meta=meta, body=body, path=path)
 
 
+def _migrate_material_notes(wiki: Wiki) -> None:
+    """旧独立笔记与材料页重名会让 Obsidian 选错目标；保留字节并更新笔记路径引用。"""
+    replacements = {}
+    for old in sorted((wiki.root / "notes").glob("material-*.md")):
+        if re.fullmatch(r"material-\d+\.md", old.name) is None:
+            continue
+        new = old.with_name(f"{old.stem}-notes.md")
+        if new.exists():
+            raise WikiError(f"笔记迁移目标已存在，未覆盖任何内容：{new}")
+        old.rename(new)
+        replacements[f"notes/{old.name}"] = f"notes/{new.name}"
+    if not replacements:
+        return
+    for page in wiki.pages.values():
+        if page.path is None:
+            continue
+        original = page.path.read_text(encoding="utf-8")
+        edits = [
+            (match.start(), match.end(), replacements[match.group()])
+            for match in re.finditer(
+                r"notes/material-\d+\.md", markdown_without_code(original)
+            )
+            if match.group() in replacements
+        ]
+        updated = original
+        for start, end, replacement in reversed(edits):
+            updated = updated[:start] + replacement + updated[end:]
+        if updated != original:
+            page.path.write_text(updated, encoding="utf-8")
+    wiki.reload_pages()
+
+
 def open_wiki(root: Path, raw_root: Path) -> Wiki:
     """打开 wiki（首次使用时初始化目录、index.md 与 log.md）。"""
     for folder in PAGE_TYPES.values():
@@ -219,6 +387,7 @@ def open_wiki(root: Path, raw_root: Path) -> Wiki:
     raw_root.mkdir(parents=True, exist_ok=True)
     wiki = Wiki(root=root, raw_root=raw_root)
     wiki.reload_pages()
+    _migrate_material_notes(wiki)
     if not wiki.log_path.exists():
         wiki.log_path.write_text("# Wiki Log\n\n只追加的操作记录。\n", encoding="utf-8")
     if not wiki.index_path.exists():

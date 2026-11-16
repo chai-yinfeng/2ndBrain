@@ -15,7 +15,6 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
@@ -49,13 +48,14 @@ from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, 
 from secondbrain.sources import FETCHERS
 from secondbrain.sources.homepage import safe_url, source_homepage
 from secondbrain.web import filters
+from secondbrain.web.render import render_markdown
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
-from secondbrain.wiki.graph import build_graph
+from secondbrain.wiki.graph import build_graph, page_connections
 from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
 from secondbrain.wiki.loop import wiki_refresh_link
 from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
-from secondbrain.wiki.store import WIKILINK_RE, Wiki, open_wiki, slugify_safe
+from secondbrain.wiki.store import Wiki, open_wiki
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -504,7 +504,25 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         )
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
+    def home(request: Request) -> HTMLResponse:
+        wiki = _wiki()
+        with _conn() as conn:
+            rows = conn.execute("SELECT * FROM items ORDER BY id DESC LIMIT 8").fetchall()
+            count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            unread = conn.execute(
+                "SELECT COUNT(*) FROM items WHERE reading_state != 'read'"
+            ).fetchone()[0]
+            to_ingest = len(pending_items(conn))
+            later_count = len(db.items_in_state(conn, "later"))
+        return templates.TemplateResponse(
+            request, "home.html",
+            {"rows": rows, "count": count, "unread": unread, "pages": len(wiki.pages),
+             "to_ingest": to_ingest, "later": later_count, "hints": CostHints(_settings()),
+             "ingest_task": tasks.get("wiki_ingest")},
+        )
+
+    @app.get("/recommendations", response_class=HTMLResponse)
+    def recommendations(request: Request) -> HTMLResponse:
         day = request.query_params.get("date")
         if day:
             try:
@@ -569,7 +587,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "concepts": [] if (form or ctype) else concept_rows,
                 "grades": GRADES,
                 "filter_bar": _filter_bar(
-                    "/", {"date": request.query_params.get("date")}, form, ctype
+                    "/recommendations", {"date": request.query_params.get("date")}, form, ctype
                 ),
             },
         )
@@ -1314,24 +1332,38 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             request, "wiki_graph.html", {"count": len(wiki.pages), "types": types}
         )
 
+    @app.post("/wiki/reindex")
+    def wiki_reindex() -> RedirectResponse:
+        wiki = _wiki()
+        wiki.rebuild_index()
+        return RedirectResponse("/wiki/graph?reindexed=1", status_code=303)
+
     @app.post("/wiki/lint", response_class=HTMLResponse)
     def wiki_lint(request: Request) -> HTMLResponse:
         """体检（不调用 LLM）：断链、缺失页面、孤立页、缺字段、index 不一致。"""
         sections = report_sections(lint(_wiki()))
         return templates.TemplateResponse(request, "_lint.html", {"sections": sections})
 
-    @app.get("/wiki/page/{slug}", response_class=HTMLResponse)
+    @app.get("/wiki/page/{slug:path}", response_class=HTMLResponse)
     def wiki_page(request: Request, slug: str) -> HTMLResponse:
         wiki = _wiki()
-        page = wiki.pages.get(slug) or wiki.find(slug)
-        if page is None:
-            raise HTTPException(404, "页面不存在")
+        candidates = wiki.resolve(slug)
+        if len(candidates) > 1:
+            return templates.TemplateResponse(
+                request, "wiki_choices.html", {"name": slug, "candidates": candidates},
+                status_code=409,
+            )
+        if not candidates:
+            raise HTTPException(404, "页面不存在；可以返回知识网络按名称重新定位")
+        page = candidates[0]
+        connections = page_connections(wiki, page)
         return templates.TemplateResponse(
             request,
             "wiki_page.html",
             {
                 "page": page,
-                "body_html": render_markdown(page.body, wiki),
+                "body_html": render_markdown(page.body, wiki, page),
+                "connections": connections,
                 "due": due_date(page),
                 "grades": GRADES,
             },
@@ -1357,26 +1389,6 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     return app
 
 
-_RAW_LINK_RE = re.compile(r"\]\((?:\.\./)+raw/(\d+)\.md\)")
-_VAULT_LINK_RE = re.compile(r"\]\((?:\.\./)+(resources|notes)/([^)]+)\)")
-
-
-def render_markdown(text: str, wiki: Wiki) -> str:
-    """wiki Markdown → HTML：先转义 "<"（不渲染任何原始 HTML），[[slug]] 变为站内链接，
-    指向原文（raw/<id>.md）的链接变为条目详情页。"""
-
-    def link(match: re.Match) -> str:
-        target = slugify_safe(match.group(1))
-        page = wiki.pages.get(target)
-        if page is None:
-            return f'<span class="missing">{match.group(1).replace("<", "&lt;")}</span>'
-        return f"[{page.title}](/wiki/page/{page.slug})"
-
-    safe = text.replace("<", "&lt;")
-    safe = _RAW_LINK_RE.sub(r"](/item/\1)", safe)
-    safe = _VAULT_LINK_RE.sub(r"](/vault/\1/\2)", safe)
-    safe = WIKILINK_RE.sub(link, safe)
-    return markdown.markdown(safe, extensions=["tables", "fenced_code", "sane_lists"])
 
 
 def _summary_points(summary: dict | None, url: str) -> dict[str, list[tuple[str, str | None]]]:

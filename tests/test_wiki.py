@@ -100,8 +100,7 @@ def test_open_wiki_initializes_skeleton(env):
 def test_slugify_and_path_safety(env):
     assert slugify("Paged Attention (vLLM)") == "paged-attention-vllm"
     assert slugify("../../etc/passwd") == "etc-passwd"
-    with pytest.raises(WikiError):
-        slugify("中文标题")
+    assert slugify("中文标题") == "中文标题"
     wiki = _wiki(env)
     for bad in ("../evil", "a/b", "UPPER", ""):
         with pytest.raises(WikiError):
@@ -124,10 +123,11 @@ def test_plan_cannot_escape_wiki_dir(env, conn):
         updates=[PageUpdate(slug="no-such-page", action="add_links", links=["a"])],
     )
     result = apply_plan(wiki, plan, row, PROFILE, TODAY)
-    assert result.created == [f"material-{item}", "outside"]  # 材料身份独立，概念 slug 规范化
+    assert result.created == [f"material-{item}", "outside", "中文"]
     assert (env / "wiki" / "pages" / "concepts" / "outside.md").is_file()
+    assert (env / "wiki" / "pages" / "concepts" / "中文.md").is_file()
     assert not (env.parent / "outside.md").exists()
-    assert len(result.rejected) == 2
+    assert len(result.rejected) == 1
     files = [p for p in env.rglob("*.md")]
     assert all(p.is_relative_to(env) for p in files)
 
@@ -415,7 +415,7 @@ def test_review_button(client, env):
 
 
 def test_digest_shows_concepts_and_wiki_refresh_links(client):
-    html = client.get(f"/?date={TODAY.isoformat()}").text
+    html = client.get(f"/recommendations?date={TODAY.isoformat()}").text
     assert 'data-concept="kv-cache"' in html and "概念复习" in html
     assert 'data-budget="25/105"' in html  # 20 分钟必读 + 5 分钟概念复习
     # 前置知识命中 wiki 中不扎实的概念 → 链接到 wiki 页面

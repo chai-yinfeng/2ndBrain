@@ -674,3 +674,22 @@
 
 **边界**
 - 本阶段知识整理使用 fake，不声称真实模型质量通过；M13 要求的离线流程与旧库迁移已验证。跨端布局、公式和 Obsidian 验收属于 M14，尚未据此标记完成。两个验收脚本在临时目录运行，交付前清理。
+
+## M14 — 知识网络与主入口（2026-11-16，实现与 Web 验收完成；跨端验收未完成）
+
+**实现**
+- 首页、主导航调整为材料/网络/导入；推荐移到 `/recommendations`，所有历史日期/筛选调用方同步迁移，无旧 root 推荐兼容壳。CLI 增加 `wiki reindex / show / graph --focus --depth`。
+- 图谱、反向链接、lint、渲染共用中文、别名、相对路径和歧义解析；重复文件名使用 vault-relative `.md` ID，外部新增/删除/改链接可重建，代码中的 wikilink 不生成边。全局/局部图、逐步展开、名称定位、详情/来源/反链/返回图谱完整接通。
+- 安全 Markdown 白名单渲染，危险 URL/事件属性/原始 HTML 不执行。KaTeX 0.16.22（MIT，来源及哈希见 README）离线渲染公式，`trust:false`；无新增 Python 依赖。
+- Obsidian 实测发现独立笔记与材料页同名会错误跳转。改为 `notes/material-<id>-notes.md`，迁移旧文件并更新非代码引用；原字节和用户文字保留，Web/CLI 已验证迁移后笔记可读。
+
+**实际验证**
+- 首轮 `uv run pytest -q tests/test_network.py tests/test_graph.py tests/test_wiki_render.py tests/test_network_web.py tests/test_wiki.py tests/test_material_wiki.py tests/test_material_web.py tests/test_web.py tests/test_manual_run.py tests/test_summary.py tests/test_m10.py tests/test_budget.py tests/test_sources_catalog.py tests/test_feedback.py tests/test_ops.py tests/test_longform.py`：`192 passed, 4 failed`。修复旧 raw 链接语义映射及新/旧材料同标题时的旧 paper 关联；更新中文 ID/新首页契约。四个失败项与 renderer 定向复验 `37 passed`。笔记同名修复后的网络/Web/wiki 回归 `21 passed`；代码引用保护定向回归 `1 passed`，相关 `ruff check` 通过。
+- 受影响 Python 文件 `ruff check`、两个新增 JavaScript 文件 `node --check` 通过；后续图布局改动由实际浏览器解析与渲染证明。
+- 临时 vault 的 CLI `wiki reindex` 得到 14 页/12 条链接；`wiki graph --focus 跨端别名 --depth 1/2` 正确逐层包含节点，`wiki show 中文别名` 可读正文/出链/反链。
+- WebKit 实际完成全局图→别名定位→局部 5 节点→从注意力机制展开到 6 节点→正文/来源/反链→回图谱；共享验收概念连接本地论文 PDF 与真实博客 URL。验证重复标题两候选选择、孤立页 1 节点/0 边、筛选空状态、空 vault 引导。1280 桌面与 390 窄屏实际截图覆盖节点/边/长标题、表格/代码/两类公式，窄屏无横向溢出；修复孤立页切换后过度缩放/标签重叠。
+- 隔离 Obsidian 1.15.1 确实打开同一临时 vault，阅读模式截图显示中文/别名、MathJax 公式、表格与原样代码，发现了上述同名跳转缺陷。
+
+**未完成条件（M14 仍不标整体完成）**
+- 用户报告隔离 Obsidian 实例出现「找不到钥匙串」提示；立即停止实例，没有要求密码、创建/重置钥匙串或更改真实配置，不再使用临时 HOME 启动方式。
+- 修复后的 Obsidian 材料跳转重验、原文件、局部/全局图、原生编辑链接→Web 重索引一致性尚未完成。Web/CLI 的 Markdown 外部编辑、反链与链接删除已由回归覆盖，不能代替这部分原生交互验收。按 Goal 约定继续完成可达的 M15，不隐瞒缺口。

@@ -214,10 +214,10 @@ def test_deep_read_cards_offer_summary(env):
     db.upsert_digest(conn, TODAY, Placement(item, "must_read", 1, 90, True, None, 15), NOW)
     conn.commit()
     conn.close()
-    home = TestClient(create_app()).get("/").text
+    home = TestClient(create_app()).get("/recommendations").text
     assert f'hx-post="/summary/{item}"' in home and "速读约 15 分钟 · 全文约 90 分钟" in home
     ops.deep_summary(item, lambda line: None)
-    home = TestClient(create_app()).get("/").text
+    home = TestClient(create_app()).get("/recommendations").text
     assert f'href="/item/{item}#summary"' in home and f'hx-post="/summary/{item}"' not in home
 
 
@@ -295,13 +295,14 @@ def test_save_prereq_as_concept_page(prereq_item, env):
     assert 'href="/wiki/page/pagedattention"' in client.post(f"/prereq/{prereq_item}").text
 
 
-def test_non_ascii_prereq_gets_hashed_slug(env):
+def test_non_ascii_prereq_page_can_be_found_and_reused(env):
     item = add_item("一篇中文文章", "正文。" * 100, l2=l2_with(["注意力机制"]))
     ops.prerequisites(item, lambda line: None)
     slug, created = ops.save_prereq_page(item, "注意力机制")
-    assert created and slug.startswith("concept-")
+    assert created
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     assert wiki.find("注意力机制").slug == slug
+    assert ops.save_prereq_page(item, "注意力机制") == (slug, False)
 
 
 def test_prereq_without_any_prerequisites(env):

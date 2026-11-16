@@ -40,6 +40,9 @@ uv run sb items show <item_id>                   # 阅读原文与来源，不�
 uv run sb items read-state <item_id> reading     # unread / reading / read
 uv run sb items notes <item_id> --file notes.md  # 个人笔记独立存入同一 vault
 uv run sb wiki ingest <item_id>                  # 任意材料显式整理，不要求 L2/反馈
+uv run sb wiki reindex                           # 外部编辑后从 Markdown 重建目录
+uv run sb wiki show <名称或ID>                    # 正文、关联与反向链接；同名时明确选择
+uv run sb wiki graph --focus <名称或ID> --depth 2 # 全局/局部网络及逐层展开
 uv run sb items incomplete      # 列出"正文不完整"的条目（只有摘要等），可在详情页粘贴正文或上传 PDF 补全
 uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
 uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
@@ -60,12 +63,12 @@ uv run sb wiki lint             # 检查断链、孤立页、缺字段
 
 Web 上的其他页面：
 
-- `/materials`：材料库，可按名称与阅读状态筛选；无信源、无 digest 也能使用。
+- `/`：材料与知识网络首页；`/materials` 为可按名称与阅读状态筛选的材料库，无信源、无 digest 也能使用。
 - `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；运行方式与设置。
 - `/sources`：信源全部由你手动维护。列表（反馈分布、产出、低产出停用建议）、预览、启用 / 停用、删除；"信源目录"列出 example 中还没添加的信源，可以逐个预览、添加。修改按条目文本块写入 `config/sources.yaml`，**保留注释与格式**；`sources: []` 是合法的空配置。
 - `/add`：独立导入 URL / PDF / 文本；可选择已读、稍后读或保留原阅读状态，整理入 wiki 不要求读后反馈，不进入每日分级与预算。
-- `/wiki`：体检、到期复习、知识图谱（`/wiki/graph`）。
-- 首页与 `/history`：按形式（论文 / 博客 / 视频）和类型（前沿 / 讲解 / 综述 / 教程 / 观点）筛选，只影响显示。
+- `/wiki`：目录、体检和到期复习；`/wiki/graph`：全局/局部图、名称与别名定位、直接邻居展开。页面详情提供来源、关联、反向链接及返回图谱入口。
+- `/recommendations` 与 `/history`：独立每日推荐及历史，保留预算和形式/类型筛选；不再占用材料首页。
 - `/ops` 的"设置"：查看 API key 是否已设置（不显示值），写入或清除 `.env` 中的 key；测试连接；选择 cheap / strong 模型与后端（只把与 example 不同的键写入 `config/settings.yaml`）。
 - 条目详情页：原文、导入来源和原文件、独立阅读状态、个人笔记、整理入 wiki；深度速读和补前置作为可选机器分析保留。
 
@@ -76,10 +79,10 @@ Web 上的其他页面：
 `data/wiki` 是一个普通的 Markdown 目录，可以直接作为 Obsidian vault 打开：
 
 - 页面在 `pages/{materials,concepts,entities,papers}/`；材料页使用稳定 `material-<id>`，旧 paper 页和链接保留；
-- 原文在 `raw/<条目 id>.md`，原文件与各次提取文本在 `resources/`；个人笔记在 `notes/material-<id>.md`，机器整理不覆盖；
+- 原文在 `raw/<条目 id>.md`，原文件与各次提取文本在 `resources/`；个人笔记在 `notes/material-<id>-notes.md`，机器整理不覆盖。旧同名笔记自动迁移并更新页面引用，避免 Obsidian 将材料链接打开成笔记；
 - `index.md` 与 `log.md` 由 `sb wiki` 维护，请勿手动编辑。
 
-在 Obsidian 的图谱视图里，可以在过滤框输入 `-path:raw` 隐藏原文节点，只看知识页面。
+支持在 vault 根目录或其他知识子目录编辑页面；raw/resources/notes/隐藏目录不进入 Web 知识网络。唯一文件名保留原 ID，重复文件名使用 vault-relative `.md` 路径；重复标题/别名必须选择目标，不随机合并。编辑后可执行 `sb wiki reindex` 或点击 Web「从 Markdown 重新索引」。Obsidian 图谱可用 `-path:raw -path:resources -path:notes -file:index -file:log` 隐藏非知识文件。
 
 导入不等于已读，生成概念页也不等于掌握。新整理出的概念从「陌生」开始，首次显式复习前不设置复习日期。机器内容与个人笔记分开；重复整理保留已有文字。只有摘要的材料会标为 `abstract`，提取范围受限时标为 `partial`，不会冒充全文。
 
@@ -120,6 +123,7 @@ uv run sb schedule uninstall                    # 卸载
 
 - `src/secondbrain/web/static/htmx.min.js`：vendored 的 [htmx](https://htmx.org) **2.0.4**，来源 `https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js`，sha256 `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447`（BSD-2-Clause）。
 - `src/secondbrain/web/static/cytoscape.min.js`：vendored 的 [Cytoscape.js](https://js.cytoscape.org) **3.34.4**（知识图谱，M7），来源 `https://registry.npmjs.org/cytoscape/-/cytoscape-3.34.4.tgz` 中的 `package/dist/cytoscape.min.js`，sha256 `081591ab735b2b6a3b31a3c60f8f3a3e2fee8c92939e0c7820ad1208571b6cd8`（MIT）。
+- `src/secondbrain/web/static/katex/`：vendored [KaTeX](https://katex.org) **0.16.22**（MIT，目录中含 LICENSE），来源 `https://registry.npmjs.org/katex/-/katex-0.16.22.tgz`；仅 JS/CSS 与 CSS 引用的字体。JS sha256 `e8d885505949f3a5f4abdd5dd0d53696bd1371ad26ffbf4f310dcd77c8cdae89`，CSS sha256 `19095127357ed6d29fe0a63a6b000c913a89f7f1963b765dd3715e97c9852e75`。Web 公式启用 `trust:false`，原始 HTML 与危险链接仍被净化。
 
 页面不依赖任何外部 CDN。
 

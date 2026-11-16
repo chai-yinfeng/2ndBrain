@@ -1,8 +1,13 @@
 {% extends "base.html" %}
 {% block title %}{{ page.title }} · Wiki{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/katex/katex.min.css">
+<script src="/static/katex/katex.min.js" defer></script>
+<script src="/static/wiki_math.js" defer></script>
+{% endblock %}
 {% block content %}
 <article class="detail" data-wiki-page="{{ page.slug }}">
-  <p class="meta"><a href="/wiki">← Wiki</a></p>
+  <p class="meta"><a href="/wiki">← Wiki</a> · <a href="/wiki/graph?focus={{ page.slug|urlencode }}">在知识网络中定位</a> · <a href="/wiki/graph">全局概览</a></p>
   <p class="meta">
     {{ page.type }}
     {% if page.meta.mastery %}· 掌握度 {{ page.meta.mastery }}{% endif %}
@@ -12,5 +17,15 @@
   </p>
   {% if page.type == "concept" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
   <section class="wiki-body">{{ body_html | safe }}</section>
+  <section class="page-connections">
+    <h2>页面链接</h2>
+    <p class="meta">以下关系从 Markdown 派生，仅表示页面链接；依据与机器推断请阅读正文。</p>
+    <h3>关联页面</h3>
+    <ul>{% for target in connections.outgoing %}<li><a href="/wiki/page/{{ target.slug }}">{{ target.title }}</a> · {{ target.type }}</li>{% else %}<li class="empty">暂无指向其他知识页的链接。</li>{% endfor %}</ul>
+    <h3>反向链接</h3>
+    <ul>{% for source in connections.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a> · {{ source.type }}</li>{% else %}<li class="empty">尚无其他知识页链接到这里。</li>{% endfor %}</ul>
+    {% if connections.missing %}<p class="missing">缺失目标：{{ connections.missing|join("、") }}</p>{% endif %}
+    {% if connections.ambiguous %}<p class="ambiguous">同名歧义（请使用完整路径）：{{ connections.ambiguous|join("、") }}</p>{% endif %}
+  </section>
 </article>
 {% endblock %}

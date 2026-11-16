@@ -20,7 +20,6 @@ from secondbrain.pipeline.l2_deep import chunk_text, map_messages, notes_text
 from secondbrain.pipeline.run import PROMPTS_DIR
 from secondbrain.profile.loader import Profile
 from secondbrain.wiki.store import (
-    WIKILINK_RE,
     Page,
     Wiki,
     WikiError,
@@ -28,7 +27,6 @@ from secondbrain.wiki.store import (
     append_section,
     new_meta,
     slugify,
-    slugify_safe,
 )
 
 # 对每段提要显式限长；超限报错，不截断。汇总输入与费用预检因此都有确定上界。
@@ -135,18 +133,9 @@ def estimate_ingest_cost(
     return full_price(usage, s.pricing) * max(1.0, s.pricing_schedule.off_peak_multiplier)
 
 
-def _clean_links(text: str) -> str:
-    def fix(match):
-        slug = slugify_safe(match.group(1))
-        tail = match.group(0)[2 + len(match.group(1)) :]
-        return f"[[{slug}{tail}" if slug else match.group(0)
-
-    return WIKILINK_RE.sub(fix, text)
-
-
 def _append_machine(page: Page, item_id: int, text: str) -> None:
     """只追加机器内容；内容标记去重，不替换任何已落盘文字（包括机器区的外部编辑）。"""
-    text = _clean_links(text).strip()
+    text = text.strip()
     if not text:
         return
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
@@ -200,7 +189,7 @@ def apply_plan(
             sources.append(row["id"])
         page.meta["sources"] = sources
         page.meta["updated"] = today.isoformat()
-        raw = wiki.raw_link(row["id"], page.type)
+        raw = wiki.raw_link(row["id"], page.type, source=page)
         link = f"[{row['title']}]({raw})"
         if row["url"]:
             link += f"（[原文]({row['url']})）"
@@ -218,6 +207,9 @@ def apply_plan(
             wiki.page_path(slug, op.type)
         except WikiError as exc:
             result.rejected.append(f"create {op.slug!r}：{exc}")
+            continue
+        if len(wiki.resolve(slug)) > 1:
+            result.rejected.append(f"create {op.slug!r}：名称有歧义，请使用唯一 slug")
             continue
         existing = wiki.pages.get(slug)
         if existing is None and op.type != "material":
@@ -256,7 +248,9 @@ def apply_plan(
     for op in plan.updates:
         page = wiki.find(op.slug)
         if page is None:
-            result.rejected.append(f"update {op.slug!r}：页面不存在")
+            matches = wiki.resolve(op.slug)
+            reason = "名称有歧义，请使用页面 ID/路径" if matches else "页面不存在"
+            result.rejected.append(f"update {op.slug!r}：{reason}")
             continue
         problem = _apply_update(wiki, page, op, row["id"])
         if problem:
@@ -268,10 +262,10 @@ def apply_plan(
         material.meta["summary"] = plan.summary.strip()
     if len(touched) == 1 and not plan.creates and not plan.updates:
         _append_machine(material, row["id"], f"材料陈述：{plan.summary}" if plan.summary else "")
-    notes_path = wiki.root / "notes" / f"{material_slug}.md"
+    notes_path = wiki.root / "notes" / f"{material_slug}-notes.md"
     if notes_path.is_file():
         material.body = add_list_items(
-            material.body, "个人笔记", [f"[独立个人笔记](../../notes/{material_slug}.md)"]
+            material.body, "个人笔记", [f"[独立个人笔记](../../notes/{material_slug}-notes.md)"]
         )
     material.body = add_list_items(
         material.body, "来源", [f"材料正文完整性：{completeness}（不代表用户已读）"]
@@ -284,9 +278,9 @@ def apply_plan(
         if origin.get("original_path"):
             description += f"；[原始文件](../../{origin['original_path']})"
         material.body = add_list_items(material.body, "来源", [description])
-    legacy = wiki.find(row["title"])
-    if legacy is not None and legacy.slug != material_slug and legacy.type == "paper":
-        material.body = add_list_items(material.body, "机器关联", [f"[[{legacy.slug}]]"])
+    legacy = [page for page in wiki.resolve(row["title"]) if page.type == "paper"]
+    if len(legacy) == 1:
+        material.body = add_list_items(material.body, "机器关联", [f"[[{legacy[0].slug}]]"])
     for slug, page in touched.items():
         add_source(page)
         if slug != material_slug:
@@ -308,11 +302,14 @@ def _apply_update(wiki: Wiki, page: Page, op: PageUpdate, item_id: int) -> str |
         # 模型的 replace 只是追加建议，不能替换用户或已生成的任何文字。
         _append_machine(page, item_id, f"### {op.section.strip()}\n\n{op.text}")
     elif op.action == "add_links":
-        slugs = [slugify_safe(link) for link in op.links]
-        slugs = list(dict.fromkeys(slug for slug in slugs if slug))
-        if not slugs:
+        links = list(dict.fromkeys(link.strip() for link in op.links if link.strip()))
+        if not links:
             return "没有有效的链接"
-        page.body = add_list_items(page.body, "机器关联", [f"[[{s}]]" for s in slugs])
+        page.body = add_list_items(
+            page.body, "机器关联",
+            [link if link.startswith("[[") and link.endswith("]]") else f"[[{link}]]"
+             for link in links],
+        )
     else:
         new = [a for a in op.aliases if a and a not in page.aliases]
         if not new:

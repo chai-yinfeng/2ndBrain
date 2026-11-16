@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}选择同名页面 · Wiki{% endblock %}
+{% block content %}
+<h1>「{{ name }}」对应多个页面</h1>
+<p>未自动选择。请根据类型与稳定路径确认目标；可用完整文件路径消除链接歧义。</p>
+<ul>{% for page in candidates %}<li><a href="/wiki/page/{{ page.slug }}">{{ page.title }}</a> · {{ page.type }} · {{ page.slug }}</li>{% endfor %}</ul>
+<p><a href="/wiki/graph">返回知识网络</a></p>
+{% endblock %}
