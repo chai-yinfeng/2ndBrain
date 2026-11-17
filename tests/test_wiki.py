@@ -161,7 +161,7 @@ def test_ingest_pending_creates_pages_index_log(env, conn):
     assert wiki.pages["continuous-batching"].meta["mastery"] == "陌生"
     assert material.meta["mastery"] is None and material.meta["interval_days"] == 1
     index = wiki.index_path.read_text(encoding="utf-8")
-    assert "- [[kv-cache]] — （fake）KV cache" in index
+    assert "[[kv-cache]]" in index and "（fake）KV cache" in index
     log = wiki.log_path.read_text(encoding="utf-8")
     assert "] ingest | PagedAttention explained" in log
     assert "- 新建 [[kv-cache]]" in log

@@ -57,7 +57,7 @@ from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
 from secondbrain.wiki.loop import wiki_refresh_link
 from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
-from secondbrain.wiki.store import Wiki, open_wiki
+from secondbrain.wiki.store import Wiki, WikiError, open_wiki
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -515,16 +515,17 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def home(request: Request) -> HTMLResponse:
         wiki = _wiki()
         with _conn() as conn:
-            rows = conn.execute("SELECT * FROM items ORDER BY id DESC LIMIT 8").fetchall()
+            queue = db.reading_list_items(conn)
+            rows = queue[:8]
             count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-            unread = conn.execute(
-                "SELECT COUNT(*) FROM items WHERE reading_state != 'read'"
-            ).fetchone()[0]
+            unread = len(queue)
             to_ingest = len(pending_items(conn))
-            later_count = len(db.items_in_state(conn, "later"))
+            later_count = len(queue)
         return templates.TemplateResponse(
             request, "home.html",
-            {"rows": rows, "count": count, "unread": unread, "pages": len(wiki.pages),
+            {"rows": rows, "count": count, "unread": unread,
+             "pages": len(build_graph(wiki, datetime.now().date())["nodes"]),
+             "sources_count": len(config.load_sources()),
              "to_ingest": to_ingest, "later": later_count, "hints": CostHints(_settings()),
              "ingest_task": tasks.get("wiki_ingest")},
         )
@@ -548,7 +549,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             l2 = db.latest_assessments(conn, "L2")
             states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
-            later = len(db.items_in_state(conn, "later"))
+            later = len(db.reading_list_items(conn))
             summarized = db.ai_item_ids(conn, "summary")
             to_ingest = len(pending_items(conn))
         form, ctype = filters.clean_filters(
@@ -626,6 +627,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 " WHERE item_id = ? ORDER BY date DESC",
                 (item_id,),
             ).fetchall()
+            queued = any(r["id"] == item_id for r in db.reading_list_items(conn))
+            reading_record = db.get_ai(conn, item_id, "reading_record") or {}
         prereqs = (l2 or {}).get("prerequisites", [])
         return templates.TemplateResponse(
             request,
@@ -650,23 +653,52 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "notes": ops.material_notes(item_id),
                 "material_page": _wiki().find(f"material-{item_id}"),
                 "wiki_task": tasks.get(f"wiki-{item_id}"),
+                "queued": queued,
+                "read_task": tasks.get(f"read-{item_id}"),
+                "discussion_url": reading_record.get("discussion_url") or "",
             },
         )
 
     @app.post("/item/{item_id}/reading")
-    def material_reading(item_id: int, state: str = Form(...)) -> RedirectResponse:
+    async def material_reading(
+        request: Request, item_id: int, state: str = Form(...), notes: str | None = Form(None),
+        discussion_url: str | None = Form(None), force: bool = Form(False),
+    ) -> RedirectResponse:
         if state not in {"unread", "reading", "read"}:
             raise HTTPException(400, "阅读状态必须为 unread / reading / read")
         with _conn() as conn:
             if not db.item_exists(conn, item_id):
                 raise HTTPException(404, "材料不存在")
-            db.set_reading_state(conn, item_id, state)
-        return RedirectResponse(f"/item/{item_id}", status_code=303)
+            if state != "read":
+                db.set_reading_state(conn, item_id, state)
+        if state == "read":
+            form = await request.form()
+            if "notes" in form:
+                notes = _normalize_newlines(str(form["notes"]))
+            if "discussion_url" in form:
+                discussion_url = str(form["discussion_url"]).strip()
+            if discussion_url and safe_url(discussion_url) is None:
+                raise HTTPException(400, "讨论链接只接受 http(s)，不会自动读取私有对话")
+
+            def run(task: Task) -> dict:
+                return ops.register_read(
+                    item_id, task.log, notes=notes, discussion_url=discussion_url, force=force
+                )
+
+            try:
+                tasks.start(f"read-{item_id}", "登记阅读并整理知识", run)
+            except TaskRunning:
+                pass
+        return RedirectResponse(f"/item/{item_id}#register-read", status_code=303)
 
     @app.post("/item/{item_id}/notes")
-    def material_notes_save(item_id: int, text: str = Form("")) -> RedirectResponse:
+    async def material_notes_save(request: Request, item_id: int) -> RedirectResponse:
+        form = await request.form()
+        if "notes" not in form or not isinstance(form["notes"], str):
+            raise HTTPException(422, "需要 notes 字段；未修改已有笔记")
+        notes = form["notes"]
         try:
-            ops.material_notes(item_id, _normalize_newlines(text))
+            ops.material_notes(item_id, _normalize_newlines(notes))
         except ops.OpsError as exc:
             raise HTTPException(404, str(exc)) from exc
         return RedirectResponse(f"/item/{item_id}#notes", status_code=303)
@@ -721,6 +753,14 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
 
+    def finish_paper_read(result: dict, task: Task, read: bool) -> dict:
+        result["read_requested"] = read
+        if read and result.get("material_id"):
+            registered = ops.register_read(result["material_id"], task.log)
+            result["ingest"] = registered["ingest"]
+            result["cached"] = registered["cached"]
+        return result
+
     @app.post("/papers/add", response_class=HTMLResponse)
     async def paper_add(request: Request) -> HTMLResponse:
         from secondbrain import papers
@@ -729,14 +769,13 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         query = str(form.get("query") or "").strip()
         if not query:
             raise HTTPException(422, "请输入论文名")
-        ingest = bool(form.get("ingest"))
+        read = bool(form.get("read"))
         kind = f"paper-{uuid.uuid4().hex}"
 
         def run(task: Task) -> dict:
             with _http_client(_fetch_settings()) as client:
-                result = papers.import_by_name(query, task.log, ingest=ingest, client=client)
-                result["ingest_requested"] = ingest
-                return result
+                result = papers.import_by_name(query, task.log, client=client)
+                return finish_paper_read(result, task, read)
 
         tasks.start(kind, "检索并导入论文", run)
         return RedirectResponse(f"/papers/result/{kind}", status_code=303)
@@ -760,14 +799,13 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         form = await request.form()
         search_id = str(form.get("search_id") or "")
         candidate_id = str(form.get("candidate_id") or "")
-        ingest = bool(form.get("ingest"))
+        read = bool(form.get("read"))
         kind = f"paper-{uuid.uuid4().hex}"
 
         def run(task: Task) -> dict:
             with _http_client(_fetch_settings()) as client:
-                return papers.choose_candidate(
-                    search_id, candidate_id, task.log, ingest=ingest, client=client
-                )
+                result = papers.choose_candidate(search_id, candidate_id, task.log, client=client)
+                return finish_paper_read(result, task, read)
 
         tasks.start(kind, "导入已选论文", run)
         return RedirectResponse(f"/papers/result/{kind}", status_code=303)
@@ -776,11 +814,14 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     async def add_submit(request: Request) -> HTMLResponse:
         form = await request.form()
         urls = str(form.get("urls") or "").splitlines()
-        state = str(form.get("state") or "unread")
+        state = str(form.get("state") or "later")
         title = str(form.get("title") or "").strip() or None
         feedback = (str(form.get("feedback") or "") or None) if state == "read" else None
         ingest = bool(form.get("ingest"))
         text = str(form.get("text") or "").strip() or None
+        reference_only = bool(form.get("reference_only"))
+        learning_notes = str(form.get("learning_notes") or "") or None
+        discussion_url = str(form.get("discussion_url") or "").strip() or None
         upload, pdf = form.get("pdf"), None
         if upload is not None and not isinstance(upload, str) and upload.filename:
             pdf = await upload.read(ops.MAX_PDF_UPLOAD + 1)
@@ -803,6 +844,9 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                     text=text,
                     pdf=pdf,
                     client=client,
+                    reference_only=reference_only,
+                    learning_notes=learning_notes if state == "read" else None,
+                    discussion_url=discussion_url if state == "read" else None,
                 )
 
         try:
@@ -813,13 +857,56 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/later", response_class=HTMLResponse)
     def later(request: Request) -> HTMLResponse:
-        """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
+        """用户自己维护的稍后清单；信源采集与反馈不会自动填充此列表。"""
         with _conn() as conn:
-            rows = db.items_in_state(conn, "later")
+            rows = db.reading_list_items(conn)
             incomplete = db.incomplete_ids(conn)
         return templates.TemplateResponse(
             request, "later.html", {"rows": rows, "incomplete": incomplete}
         )
+
+    @app.post("/reading/{item_id}/add")
+    def reading_add(item_id: int) -> RedirectResponse:
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+            db.add_to_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
+    @app.post("/reading/{item_id}/remove")
+    def reading_remove(item_id: int) -> RedirectResponse:
+        with _conn() as conn:
+            db.remove_from_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
+    @app.post("/reading/import", response_class=HTMLResponse)
+    async def reading_import(request: Request) -> HTMLResponse:
+        form = await request.form()
+        url = str(form.get("url") or "").strip()
+        requested_source = str(form.get("origin_source_id") or "")
+        origin_source_id = (
+            requested_source if requested_source in {s.id for s in config.load_sources()}
+            else None
+        )
+        try:
+            ops.validate_manual([url], "later", None, False, None)
+        except ops.OpsError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                return ops.add_manual(
+                    [url], task.log, state="later", client=client,
+                    origin_source_id=origin_source_id,
+                )
+
+        try:
+            tasks.start("manual_add", "添加到阅读列表", run)
+        except TaskRunning as exc:
+            return task_fragment(request, "manual_add", str(exc))
+        return task_fragment(request, "manual_add")
 
     @app.post("/item/{item_id}/complete")
     async def item_complete(request: Request, item_id: int) -> RedirectResponse:
@@ -1031,7 +1118,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
         known = (
             kind in TASKS or kind == "manual_add"
-            or re.fullmatch(r"(summary|wiki)-\d+", kind)
+            or re.fullmatch(r"(summary|wiki|read)-\d+", kind)
             or (re.fullmatch(r"paper-[0-9a-f]{32}", kind) and tasks.get(kind) is not None)
         )
         if not known:
@@ -1223,11 +1310,19 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def sources_page(request: Request, saved: str | None = None) -> HTMLResponse:
         path, is_example = config.sources_path()
         try:
-            sources, error = config.load_sources(path), None
+            sources, error = ([] if is_example else config.load_sources(path)), None
         except config.ConfigError as exc:
             sources, error = [], str(exc)
         pers = _settings().personalize
         catalog = ops.catalog_entries()
+        catalog_q = request.query_params.get("catalog_q", "").strip()
+        if catalog_q:
+            catalog = [
+                s for s in catalog
+                if catalog_q.casefold() in " ".join(
+                    [s.id, s.url or "", s.homepage or "", *s.tags]
+                ).casefold()
+            ]
         with _conn() as conn:
             overview = db.source_overview(conn)
             yields = source_yields(conn, sources, datetime.now(UTC), pers)
@@ -1255,8 +1350,44 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "error": error,
                 "saved": saved,
                 "types": SourceConfig.model_fields["type"].annotation.__args__,
+                "catalog_q": catalog_q,
             },
         )
+
+    @app.post("/sources/home/preview", response_class=HTMLResponse)
+    def source_home_preview(request: Request, url: str = Form(...)) -> HTMLResponse:
+        from secondbrain.source_discovery import discover_source
+
+        try:
+            fs = _fetch_settings()
+            with _http_client(fs) as client:
+                result = discover_source(url, client, fs)
+            return templates.TemplateResponse(
+                request, "_home_source_preview.html", {"result": result, "error": None}
+            )
+        except (ValueError, FetchError) as exc:
+            return templates.TemplateResponse(
+                request, "_home_source_preview.html", {"result": None, "error": str(exc)}
+            )
+
+    @app.post("/sources/home/follow")
+    def source_home_follow(
+        request: Request, url: str = Form(...), source_id: str = Form("")
+    ):
+        from secondbrain.source_discovery import follow_source
+
+        try:
+            fs = _fetch_settings()
+            with _http_client(fs) as client:
+                result = follow_source(url, client, fs, source_id=source_id or None)
+            if not result.get("saved_id"):
+                return templates.TemplateResponse(
+                    request, "_home_source_preview.html",
+                    {"result": result, "error": "主页未保存；请检查发现结果"}, status_code=400,
+                )
+        except (ValueError, FetchError, config.ConfigError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={result['saved_id']}", status_code=303)
 
     @app.post("/sources/preview", response_class=HTMLResponse)
     async def sources_preview(request: Request) -> HTMLResponse:
@@ -1382,23 +1513,48 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         today = datetime.now().date()
         due = [{"page": p, "due": due_date(p)} for p in due_concepts(wiki, today)]
         index_html = render_markdown(wiki.index_path.read_text(encoding="utf-8"), wiki)
+        with _conn() as conn:
+            pending_read = conn.execute(
+                "SELECT id, title, processing_status FROM items"
+                " WHERE reading_state = 'read' AND processing_status != 'processed'"
+                " ORDER BY id DESC"
+            ).fetchall()
         return templates.TemplateResponse(
             request,
             "wiki.html",
-            {"index_html": index_html, "due": due, "grades": GRADES, "count": len(wiki.pages)},
+            {"index_html": index_html, "due": due, "grades": GRADES,
+             "count": len(build_graph(wiki, today)["nodes"]),
+             "pending_read": pending_read},
         )
 
     @app.get("/wiki/graph.json")
-    def wiki_graph_json() -> JSONResponse:
-        return JSONResponse(build_graph(_wiki(), datetime.now().date()))
+    def wiki_graph_json(drafts: bool = False) -> JSONResponse:
+        return JSONResponse(build_graph(_wiki(), datetime.now().date(), include_drafts=drafts))
 
     @app.get("/wiki/graph", response_class=HTMLResponse)
     def wiki_graph(request: Request) -> HTMLResponse:
         wiki = _wiki()
-        types = sorted({p.type for p in wiki.pages.values()})
+        include_drafts = request.query_params.get("drafts") == "1"
+        graph = build_graph(wiki, datetime.now().date(), include_drafts=include_drafts)
+        types = sorted({node["type"] for node in graph["nodes"]})
         return templates.TemplateResponse(
-            request, "wiki_graph.html", {"count": len(wiki.pages), "types": types}
+            request, "wiki_graph.html",
+            {"count": len(graph["nodes"]), "types": types, "include_drafts": include_drafts},
         )
+
+    @app.post("/wiki/relation")
+    def wiki_relation(
+        source: str = Form(...), target: str = Form(...), mode: str = Form(...),
+        reason: str = Form(""),
+    ) -> RedirectResponse:
+        from secondbrain.wiki.relations import set_relation
+
+        wiki = _wiki()
+        try:
+            result = set_relation(wiki, source, target, mode, reason)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{result['source']}", status_code=303)
 
     @app.post("/wiki/reindex")
     def wiki_reindex() -> RedirectResponse:
@@ -1424,7 +1580,9 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         if not candidates:
             raise HTTPException(404, "页面不存在；可以返回知识网络按名称重新定位")
         page = candidates[0]
-        connections = page_connections(wiki, page)
+        connections = page_connections(wiki, page, include_drafts=page.knowledge_status == "draft")
+        from secondbrain.wiki.relations import relation_controls
+
         return templates.TemplateResponse(
             request,
             "wiki_page.html",
@@ -1434,6 +1592,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "connections": connections,
                 "due": due_date(page),
                 "grades": GRADES,
+                "relation_controls": relation_controls(wiki, page),
             },
         )
 
@@ -1445,7 +1604,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             raise HTTPException(400, f"未知的复习结果：{grade}")
         wiki = _wiki()
         page = wiki.pages.get(slug)
-        if page is None or page.type != "concept":
+        if page is None or page.type != "concept" or page.knowledge_status == "draft":
             raise HTTPException(404, "概念页不存在")
         outcome = review(
             wiki, page, grade, datetime.now().date(), _settings().wiki.mastered_interval_days

@@ -127,6 +127,12 @@ class Page:
         aliases = self.meta.get("aliases") or []
         return [aliases] if isinstance(aliases, str) else list(aliases)
 
+    @property
+    def knowledge_status(self) -> str:
+        """无标记历史页保持 legacy；不能由文件存在推断用户读过。"""
+        status = self.meta.get("knowledge_status")
+        return status if status in ("draft", "recorded", "legacy") else "legacy"
+
     def names(self) -> list[str]:
         """用于名称查找；文件名与标题/别名均保留，不把中文转为空 slug。"""
         stem = self.path.stem if self.path else self.slug.rsplit("/", 1)[-1]
@@ -256,11 +262,17 @@ class Wiki:
         for page_type, heading in TYPE_TITLES.items():
             lines += ["", f"## {heading}", ""]
             entries = sorted(
-                (p for p in self.pages.values() if p.type == page_type), key=lambda p: p.slug
+                (p for p in self.pages.values()
+                 if p.type == page_type and p.knowledge_status != "draft"),
+                key=lambda p: p.slug,
             )
             for p in entries:
                 summary = (p.meta.get("summary") or "").replace("\n", " ").strip()
-                lines.append(f"- [[{p.slug}]] — {summary}" if summary else f"- [[{p.slug}]]")
+                label = (
+                    "〔历史页：阅读状态未知〕"
+                    if p.knowledge_status == "legacy" else "〔已登记〕"
+                )
+                lines.append(f"- [[{p.slug}]] {label}" + (f" — {summary}" if summary else ""))
             if not entries:
                 lines.append("（暂无）")
         self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -333,7 +345,10 @@ class Wiki:
         return [p for _, p in hits[:limit]]
 
     def concepts(self) -> list[Page]:
-        return [p for p in self.pages.values() if p.type == "concept"]
+        return [
+            p for p in self.pages.values()
+            if p.type == "concept" and p.knowledge_status != "draft"
+        ]
 
 
 def parse_page(text: str, slug: str, path: Path | None = None) -> Page:

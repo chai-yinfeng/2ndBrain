@@ -26,6 +26,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     conf.mkdir()
     for name in ("settings.example.yaml", "sources.example.yaml", "profile.example.md"):
         shutil.copy(config.CONFIG_DIR / name, conf / name)
+    shutil.copy(conf / "sources.example.yaml", conf / "sources.yaml")
     monkeypatch.setenv("SB_DATA_DIR", str(data))
     monkeypatch.setattr(config, "CONFIG_DIR", conf)
 
@@ -55,21 +56,24 @@ def personal(env: Path) -> Path:
     return env / "config" / "sources.yaml"
 
 
-def test_list_reads_example_until_first_change(client, env):
+def test_unconfigured_sources_are_reference_only(client, env):
+    personal(env).unlink()
     html = client.get("/sources").text
-    assert "sources.example.yaml" in html and "第一次修改时会先复制" in html
-    assert 'data-source="vllm-blog"' in html and 'data-source="lmsys-sglang-blog"' in html
+    assert config.load_sources() == []
+    assert 'data-source="vllm-blog"' not in html
+    assert 'data-catalog="vllm-blog"' in html
     assert not personal(env).exists()
     assert 'href="/sources"' in html
 
 
 def test_preview_does_not_write(client, env):
+    before = personal(env).read_bytes()
     form = {"id": "my-blog", "type": "rss", "url": FEED, "trust": "4", "tags": "a, b，c"}
     html = client.post("/sources/preview", data=form).text
     assert "试抓成功：解析到 3 条" in html
     assert "Paged KV cache explained" in html and "2026-11-03" in html
     assert 'action="/sources/add"' in html and 'name="tags" value="a, b，c"' in html
-    assert not personal(env).exists()
+    assert personal(env).read_bytes() == before
     conn = db.connect()
     assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
     conn.close()
@@ -95,17 +99,16 @@ def test_preview_sitemap_and_validation(client):
 
 
 def test_add_toggle_delete(client, env):
+    before = personal(env).read_text(encoding="utf-8")
     form = {"id": "my-blog", "type": "rss", "url": FEED, "trust": "4", "tags": "a, b"}
     resp = client.post("/sources/add", data=form, follow_redirects=False)
     assert resp.status_code == 303 and resp.headers["location"] == "/sources?saved=my-blog"
     text = personal(env).read_text(encoding="utf-8")
-    example = (env / "config" / "sources.example.yaml").read_text(encoding="utf-8")
-    assert text.startswith(example)  # 从 example 复制后在末尾追加，注释与格式都保留（ADR 0018）
+    assert text.startswith(before)
     sources = config.load_sources(personal(env))
     added = next(s for s in sources if s.id == "my-blog")
     assert (added.trust, added.tags, added.enabled) == (4, ["a", "b"], True)
-    assert any(s.id == "vllm-blog" for s in sources)  # 从 example 复制后追加
-    assert "needs_scraper: false" not in text  # 默认值不写出
+    assert any(s.id == "vllm-blog" for s in sources)  # 已有正式配置保留。
     assert not list((env / "config").glob(".*.tmp"))  # 原子写入不留临时文件
     assert client.post("/sources/add", data=form).status_code == 400  # id 唯一
 
@@ -118,7 +121,7 @@ def test_add_toggle_delete(client, env):
     assert any(s.id == "my-blog" for s in config.load_sources())  # 未确认不删除
     client.post("/sources/my-blog/delete", data={"confirm": "yes"})
     assert all(s.id != "my-blog" for s in config.load_sources())
-    assert personal(env).read_text(encoding="utf-8").rstrip() == example.rstrip()  # 删除只去掉该块
+    assert personal(env).read_text(encoding="utf-8").rstrip() == before.rstrip()
     assert client.post("/sources/nope/toggle").status_code == 404
 
 

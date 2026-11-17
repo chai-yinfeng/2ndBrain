@@ -21,7 +21,8 @@ def known_knowledge(
     pages = [
         page
         for page in wiki.mentioned_in(text, limit=len(wiki.pages))
-        if page.type == "concept" and page.meta.get("mastery") in {"接触过", "想回炉", SOLID}
+        if page.type == "concept" and page.knowledge_status != "draft"
+        and page.meta.get("mastery") in {"接触过", "想回炉", SOLID}
     ][:30]
     if not pages:
         return ""
@@ -57,6 +58,6 @@ def wiki_refresh_link(wiki: Wiki | None, prerequisite: str) -> tuple[Page | None
     if wiki is None:
         return None, False
     page = wiki.find(prerequisite)
-    if page is None or page.type != "concept":
+    if page is None or page.type != "concept" or page.knowledge_status == "draft":
         return None, False
     return page, page.meta.get("mastery") != SOLID

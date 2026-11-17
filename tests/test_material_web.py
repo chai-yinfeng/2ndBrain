@@ -52,7 +52,7 @@ def test_web_import_notes_and_wiki_do_not_mark_read(isolated_materials):
         item_id = task.result["results"][0]["item_id"]
         assert item_id is not None, task.result
         assert "KV cache web material" in client.get("/materials").text
-        response = client.post(f"/item/{item_id}/notes", data={"text": "我的独立笔记"})
+        response = client.post(f"/item/{item_id}/notes", data={"notes": "我的独立笔记"})
         assert response.status_code == 200
         assert client.post(f"/item/{item_id}/wiki").status_code == 200
         task = app.state.tasks.get(f"wiki-{item_id}")

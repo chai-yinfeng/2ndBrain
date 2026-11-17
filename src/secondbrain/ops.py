@@ -199,11 +199,12 @@ class IngestSummary:
     failures: int = 0
     pages: int = 0  # wiki 现有页面数
     errors: list[str] = field(default_factory=list)
+    cached: list[int] = field(default_factory=list)
 
 
-def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
-    """把条目逐个编进 wiki（strong 模型）；累计预估费用超过 run.max_cost_usd 时停止。"""
-    from secondbrain.wiki.ingest import ingest_item
+def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSummary:
+    """增量编入 wiki；相同正文与个人笔记直接复用，付费调用仍服从单次费用上限。"""
+    from secondbrain.wiki.ingest import ingest_item, material_input_hash, promote_material
 
     summary = IngestSummary()
     config.load_env()
@@ -212,9 +213,8 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
     if not ids:
         summary.pages = len(wiki.pages)
         return summary
-    _, backend = _backend(settings, fs)
-    profile_file, _ = config.ensure_profile()
-    profile = load_profile(profile_file)
+    backend = None
+    profile = None
     conn = db.connect()
 
     def account(stage: str, usage: Usage) -> None:
@@ -234,16 +234,46 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
             raise error
 
     try:
-        for iid in ids:
+        for iid in dict.fromkeys(ids):
             row = db.item_detail(conn, iid)
             if row is None:
                 echo(f"{FAIL} 条目不存在：{iid}")
                 summary.failures += 1
                 continue
+            notes = material_notes(iid)
+            material = wiki.pages.get(f"material-{iid}")
+            compiled = (
+                row["processing_status"] == "processed"
+                and material is not None
+                and material.meta.get("input_hash") == material_input_hash(row, notes)
+            )
+            if compiled and not force:
+                if row["reading_state"] == "read":
+                    summary.updated += [
+                        slug for slug in promote_material(wiki, iid)
+                        if slug not in summary.updated
+                    ]
+                summary.cached.append(iid)
+                echo(f"#{iid} {row['title']}：整理结果未变，复用已有页面（无模型调用）")
+                continue
+            if not compiled:
+                conn.execute("UPDATE items SET processing_status = 'pending' WHERE id = ?", (iid,))
+                conn.commit()
+            if backend is None:
+                try:
+                    _, backend = _backend(settings, fs)
+                except OpsError as exc:
+                    echo(f"{FAIL} #{iid}：{exc}")
+                    summary.errors.append(str(exc))
+                    summary.failures += 1
+                    break
+                profile_file, _ = config.ensure_profile()
+                profile = load_profile(profile_file)
             today = datetime.now().date()
             try:
                 _, estimate, _ = ingest_item(
-                    conn, wiki, backend, profile, row, fs, today, estimate_only=True
+                    conn, wiki, backend, profile, row, fs, today,
+                    estimate_only=True, user_notes=notes,
                 )
             except LLMError as exc:
                 echo(f"{FAIL} #{iid}：{exc}")
@@ -259,7 +289,8 @@ def ingest_items(ids: list[int], echo: Echo) -> IngestSummary:
             before = summary.cost
             try:
                 result, _, _ = ingest_item(
-                    conn, wiki, backend, profile, row, fs, today, on_usage=account
+                    conn, wiki, backend, profile, row, fs, today,
+                    on_usage=account, user_notes=notes,
                 )
             except LLMError as exc:
                 if not getattr(exc, "accounted", False):
@@ -306,21 +337,84 @@ def material_notes(item_id: int, text: str | None = None) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _discussion_reference(value: str) -> str | None:
+    """仅保存公开格式的链接，不请求外部讨论，也不把无效值或凭据带入错误消息。"""
+    from urllib.parse import urlsplit
+
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in ("http", "https")
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and "\\" not in value
+            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+        )
+        _ = parsed.port  # 验证端口格式与范围。
+    except ValueError:
+        valid = False
+    if not valid:
+        raise OpsError("讨论链接须为不含账号密码的有效 http(s) 链接")
+    return value
+
+
+def register_read(
+    item_id: int,
+    echo: Echo,
+    *,
+    notes: str | None = None,
+    discussion_url: str | None = None,
+    force: bool = False,
+) -> dict:
+    """登记外部阅读事实，再增量整理；整理失败不回滚已读或用户输入。"""
+    reference = _discussion_reference(discussion_url) if discussion_url is not None else None
+    conn = db.connect()
+    try:
+        if not db.item_exists(conn, item_id):
+            raise OpsError(f"材料不存在：{item_id}")
+        db.mark_read(conn, item_id, datetime.now(UTC))
+        if discussion_url is not None:
+            db.set_ai(
+                conn, item_id, "reading_record", {"discussion_url": reference},
+                None, datetime.now(UTC),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    if notes is not None:
+        material_notes(item_id, notes)
+    try:
+        summary = ingest_items([item_id], echo, force=force)
+    except OpsError as exc:
+        echo(f"{FAIL} #{item_id}：{exc}")
+        summary = IngestSummary(failures=1, errors=[str(exc)])
+    return {
+        "item_id": item_id,
+        "ingest": summary.__dict__,
+        "cached": item_id in summary.cached,
+    }
+
+
 # ---------- 信源 trust 建议 ----------
 
 
 def ensure_sources_file() -> tuple[Path, bool]:
-    """返回 (config/sources.yaml, 是否刚从 example 复制)。已存在时绝不覆盖。"""
+    """返回 (config/sources.yaml, 是否刚初始化)；初始关注为空，已有文件不动。"""
     target = config.config_dir() / "sources.yaml"
     if target.exists():
         return target, False
-    example = config.config_dir() / "sources.example.yaml"
-    target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+    from secondbrain import sources_file
+
+    sources_file.write("sources: []\n")
     return target, True
 
 
 def edit_sources(edit) -> list:
-    """按文本编辑 config/sources.yaml（保留注释）：不存在时先从 example 复制，
+    """按文本编辑 config/sources.yaml（保留注释）：不存在时先初始化空关注清单，
     edit(text) 返回新文本，校验通过后原子写入（ADR 0018）。"""
     from secondbrain import sources_file
 
@@ -733,6 +827,8 @@ def validate_manual(
     pdf: bytes | None = None,
 ) -> list[str]:
     """检查表单 / 命令行参数；返回去重后的 URL 列表，不合法时抛 OpsError。"""
+    from urllib.parse import urlsplit
+
     from secondbrain.sources.homepage import safe_url
 
     cleaned = []
@@ -740,8 +836,14 @@ def validate_manual(
         url = raw.strip()
         if not url:
             continue
+        try:
+            parsed = urlsplit(url)
+        except ValueError as exc:
+            raise OpsError("不是有效的 http(s) 链接") from exc
+        if parsed.username is not None or parsed.password is not None:
+            raise OpsError("材料链接不接受 URL 中的账号或密码")
         if safe_url(url) is None:
-            raise OpsError(f"不是 http(s) 链接：{url}")
+            raise OpsError("不是有效的 http(s) 链接")
         if url not in cleaned:
             cleaned.append(url)
     if not cleaned and not (text and text.strip()) and not pdf:
@@ -1028,7 +1130,7 @@ def _material(fetched: ManualFetched, fs, *, title: str | None = None, kind="url
         source_id=None,
         url=entry.url,
         url_canonical=fetched.canonical,
-        content_hash=content_hash(title or entry.title, original),
+        content_hash=content_hash(title or entry.title, original or entry.url),
         title=title or entry.title,
         author=entry.author,
         summary=entry.summary,
@@ -1083,6 +1185,10 @@ def add_manual(
     refetch: bool = False,
     client=None,
     title: str | None = None,
+    reference_only: bool = False,
+    learning_notes: str | None = None,
+    discussion_url: str | None = None,
+    origin_source_id: str | None = None,
 ) -> dict:
     """URL / 独立 PDF / 文本共用去重、补全、来源记录；默认不改变已有阅读状态。"""
     import hashlib
@@ -1090,6 +1196,20 @@ def add_manual(
     from secondbrain.models import RawEntry
 
     urls = validate_manual(urls, state, feedback, ingest, text, pdf)
+    if reference_only and (not urls or text or pdf is not None):
+        raise OpsError("网页引用只接受 URL；不抓取正文，请在登记阅读时提供学习笔记")
+    if learning_notes is not None or discussion_url is not None:
+        if state != "read" or len(urls) > 1:
+            raise OpsError("学习记录仅用于单份已读材料")
+        if discussion_url is not None:
+            _discussion_reference(discussion_url)
+    selected_source = None
+    if origin_source_id:
+        selected_source = next(
+            (s for s in config.load_sources() if s.id == origin_source_id), None
+        )
+        if selected_source is None:
+            raise OpsError("该来源不在已关注信源中；未伪造材料来源")
     config.load_env()
     _, _, fetch_fs = _settings()
     fallback = text if text and text.strip() else None
@@ -1103,11 +1223,22 @@ def add_manual(
     results: list[AddResult] = []
     conn = db.connect()
     try:
+        if selected_source is not None:
+            db.upsert_sources(conn, [selected_source])
         for url in urls or [""]:
             label = url or ("本地 PDF" if pdf is not None else "文本")
             try:
                 refetch_note = ""
-                if not url:
+                if reference_only:
+                    row, must_fetch = None, False
+                    doi, arxiv_id = _url_ids(url)
+                    fetched = ManualFetched(
+                        RawEntry(url=url, title=title or url, doi=doi, arxiv_id=arxiv_id),
+                        "", "none",
+                        manual_canonical(url), completeness="missing",
+                        note="仅保存网页引用，未获取正文",
+                    )
+                elif not url:
                     digest = (
                         hashlib.sha256(pdf).hexdigest() if pdf is not None
                         else db.text_fingerprint(fallback)
@@ -1154,10 +1285,16 @@ def add_manual(
                     )
                     fetched.total_pages = pdf_metadata.get("total_pages")
                     fetched.extracted_pages = pdf_metadata.get("extracted_pages")
-                kind = "pdf" if pdf is not None else "text" if fallback else "url"
+                kind = (
+                    "reference" if reference_only else "pdf" if pdf is not None
+                    else "text" if fallback else "url"
+                )
                 material = _material(fetched, fetch_fs, title=title, kind=kind)
                 material.origin_locator = url or fetched.canonical
                 material.origin_canonical = manual_canonical(url) if url else None
+                material.origin_source_id = origin_source_id
+                if origin_source_id:
+                    material.origin_kind = "source_selection"
                 item_id, created, improved = db.persist_material(
                     conn, material, datetime.now(UTC)
                 )
@@ -1174,8 +1311,8 @@ def add_manual(
                 if state in ("unread", "reading", "read"):
                     db.set_reading_state(conn, item_id, state)
                 if state == "later":
-                    db.add_feedback(conn, item_id, "later", None, datetime.now(UTC))
-                elif feedback:
+                    db.add_to_reading_list(conn, item_id)
+                if feedback:
                     db.add_feedback(conn, item_id, feedback, None, datetime.now(UTC))
                 row = db.item_detail(conn, item_id)
                 result = AddResult(label, status, item_id, row["title"], message)
@@ -1194,17 +1331,15 @@ def add_manual(
             client.close()
     summary = None
     ids = list(dict.fromkeys(r.item_id for r in results if r.item_id is not None))
-    if ingest and ids:
-        conn = db.connect()
-        try:
-            todo = [
-                i for i in ids
-                if db.item_detail(conn, i)["processing_status"] != "processed"
-            ]
-        finally:
-            conn.close()
-        echo(f"编入 wiki：{len(todo)} 条")
-        summary = ingest_items(todo, echo) if todo else IngestSummary()
+    if (state == "read" or ingest) and ids:
+        echo(f"编入 wiki：{len(ids)} 条")
+        if state == "read" and len(ids) == 1:
+            recorded = register_read(
+                ids[0], echo, notes=learning_notes, discussion_url=discussion_url
+            )
+            summary = IngestSummary(**recorded["ingest"])
+        else:
+            summary = ingest_items(ids, echo)
     return {
         "results": [r.__dict__ for r in results],
         "ingest": summary.__dict__ if summary else None,

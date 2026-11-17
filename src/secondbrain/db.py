@@ -281,6 +281,17 @@ MIGRATIONS: list[str] = [
     ALTER TABLE llm_calls ADD COLUMN error TEXT;
     ALTER TABLE llm_calls ADD COLUMN usage_known INTEGER NOT NULL DEFAULT 1;
     """,
+    # v12：稍后阅读清单独立于偏好；只迁移当前明确的 later，不自动收录其他材料。
+    """
+    CREATE TABLE reading_list (
+        item_id INTEGER PRIMARY KEY REFERENCES items(id),
+        added_at TEXT NOT NULL
+    );
+    INSERT INTO reading_list (item_id, added_at)
+    SELECT f.item_id, f.ts FROM feedback f
+    WHERE f.kind = 'later'
+      AND f.id = (SELECT MAX(latest.id) FROM feedback latest WHERE latest.item_id = f.item_id);
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -420,6 +431,7 @@ class NewItem:
     total_pages: int | None = None
     extracted_pages: int | None = None
     provenance: dict | None = None
+    origin_source_id: str | None = None
 
 
 def text_fingerprint(text: str) -> str | None:
@@ -604,7 +616,7 @@ def persist_material(
             completeness, truncated, method, content_hash, text_hash, pdf_hash, imported_at,
             metadata_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (item_id, item.source_id, kind, locator,
+        (item_id, item.origin_source_id or item.source_id, kind, locator,
          item.origin_canonical or item.url_canonical or None,
          resource or text_resource, text_resource, raw_resource, item.total_pages,
          item.extracted_pages, len(original), len(item.content), completeness,
@@ -820,11 +832,40 @@ def item_exists(conn: sqlite3.Connection, item_id: int) -> bool:
     return conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone() is not None
 
 
+def reading_list_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """用户显式维护的清单；订阅、抓取和偏好状态不决定成员资格。"""
+    return conn.execute(
+        """SELECT i.id, i.title, i.url, i.source_id, r.added_at,
+                  length(COALESCE(NULLIF(i.original_text, ''), i.content)) AS content_len,
+                  i.reading_state, i.processing_status
+           FROM reading_list r JOIN items i ON i.id = r.item_id
+           ORDER BY r.added_at DESC, i.id DESC"""
+    ).fetchall()
+
+
+def add_to_reading_list(
+    conn: sqlite3.Connection, item_id: int, ts: datetime | None = None
+) -> None:
+    """幂等加入清单，不创建反馈、不改变阅读状态。"""
+    conn.execute(
+        "INSERT OR IGNORE INTO reading_list (item_id, added_at) VALUES (?, ?)",
+        (item_id, format_time(ts or datetime.now(UTC))),
+    )
+    conn.commit()
+
+
+def remove_from_reading_list(conn: sqlite3.Connection, item_id: int) -> None:
+    """移出清单，不改变偏好或已读事实。"""
+    conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    conn.commit()
+
+
 def add_feedback(
     conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
 ) -> None:
     """记录评价；读后反馈同步已读，读前意愿/撤销不撤销阅读事实。"""
     assert kind in FEEDBACK_KINDS or kind == CLEAR_KIND
+    previous = feedback_state(conn, [item_id])[item_id]
     conn.execute(
         "INSERT INTO feedback (item_id, kind, note, ts) VALUES (?, ?, ?, ?)",
         (item_id, kind, note or None, format_time(ts)),
@@ -834,6 +875,14 @@ def add_feedback(
             "UPDATE items SET read_at = COALESCE(read_at, ?), reading_state = 'read' WHERE id = ?",
             (format_time(ts), item_id),
         )
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    elif kind == "later":
+        conn.execute(
+            "INSERT OR IGNORE INTO reading_list (item_id, added_at) VALUES (?, ?)",
+            (item_id, format_time(ts)),
+        )
+    elif kind == CLEAR_KIND and previous == "later":
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
     # 读前反馈仅表达意愿，不撤销已读事实，也不把 reading 改回 unread。
     conn.commit()
 
@@ -1075,6 +1124,8 @@ def set_reading_state(conn: sqlite3.Connection, item_id: int, state: str) -> Non
            WHERE id = ?""",
         (state, state, format_time(datetime.now(UTC)), item_id),
     )
+    if state == "read":
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
     conn.commit()
 
 
@@ -1084,6 +1135,7 @@ def mark_read(conn: sqlite3.Connection, item_id: int, ts: datetime) -> None:
         "UPDATE items SET read_at = COALESCE(read_at, ?), reading_state = 'read' WHERE id = ?",
         (format_time(ts), item_id),
     )
+    conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
     conn.commit()
 
 

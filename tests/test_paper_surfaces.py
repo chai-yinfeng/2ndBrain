@@ -171,7 +171,7 @@ def test_cli_and_web_full_material_wiki_without_read_feedback(paper_env):
     app = create_app()
     with TestClient(app) as client:
         response = client.post(
-            "/papers/add", data={"query": TITLE, "ingest": "1"}, follow_redirects=False
+            "/papers/add", data={"query": TITLE, "read": "1"}, follow_redirects=False
         )
         settle(app)
         page = client.get(response.headers["location"])
@@ -205,12 +205,12 @@ def test_web_preserves_material_and_reports_failed_wiki_processing(paper_env, mo
     monkeypatch.setattr(FakeBackend, "complete_json", fail_wiki)
     app = create_app()
     with TestClient(app) as client:
-        response = client.post("/papers/add", data={"query": TITLE, "ingest": "1"})
+        response = client.post("/papers/add", data={"query": TITLE, "read": "1"})
         settle(app)
         response = client.get(response.url)
         assert "尚未完成" in response.text
         assert "材料仍已保存" in response.text
-        assert rows()[0]["reading_state"] == "unread"
+        assert rows()[0]["reading_state"] == "read"
 
 
 def test_web_ambiguous_selection_retains_requested_wiki_processing(paper_env):
@@ -218,15 +218,15 @@ def test_web_ambiguous_selection_retains_requested_wiki_processing(paper_env):
     paper_env["ambiguous"] = True
     app = create_app()
     with TestClient(app) as client:
-        response = client.post("/papers/add", data={"query": TITLE, "ingest": "1"})
+        response = client.post("/papers/add", data={"query": TITLE, "read": "1"})
         settle(app)
         response = client.get(response.url)
-        assert 'name="ingest" value="1" checked' in response.text
+        assert 'name="read" value="1" checked' in response.text
         task = next(task for task in app.state.tasks._tasks.values() if task.result)
         result = task.result
         chosen = client.post("/papers/choose", data={
             "search_id": result["search_id"],
-            "candidate_id": result["candidates"][0]["id"], "ingest": "1",
+            "candidate_id": result["candidates"][0]["id"], "read": "1",
         })
         settle(app)
         assert "/wiki/page/material-" in client.get(chosen.url).text

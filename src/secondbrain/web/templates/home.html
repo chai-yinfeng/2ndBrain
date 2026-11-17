@@ -1,21 +1,18 @@
 {% extends "base.html" %}
-{% block title %}材料与知识网络 · Second Brain{% endblock %}
+{% block title %}信源、阅读列表与知识库 · Second Brain{% endblock %}
 {% block content %}
-<h1>材料与知识网络</h1>
-<p class="meta">从自己的材料开始阅读、记录和整理；不需要先配置信源或运行每日推荐。</p>
+<h1>信源 → 阅读列表 → 知识库</h1>
+<p class="meta">阅读和讨论可以留在外部。这里只维护你选中的稍后清单，登记阅读后由 AI 增量整理知识。</p>
 <div class="home-actions">
-  <a class="fb primary" href="/add">导入 PDF / URL / 文本</a>
-  <a class="fb" href="/add#paper-name">按论文名导入</a>
-  <a class="fb" href="/materials">材料库 · {{ count }} 份</a>
-  <a class="fb" href="/wiki/graph">知识网络 · {{ pages }} 页</a>
+  <a class="fb" href="/sources">信源 · {{ sources_count }} 个</a>
+  <a class="fb primary" href="/later">阅读列表 · {{ later }} 份</a>
+  <a class="fb" href="/wiki">知识库 · {{ pages }} 页</a>
 </div>
-<p class="meta">待阅读 {{ unread }} 份 · <a href="/later">稍后再看：{{ later }} 条</a></p>
-{% if to_ingest %}{% include "_ingest.html" %}{% else %}<p class="meta" data-to-ingest="0">任意材料都可从详情页整理入 wiki，不必先提交读后反馈。</p>{% endif %}
-<h2>最近材料</h2>
+<p><a href="/add">添加材料</a> · <a href="/materials">材料存档 · {{ count }} 份</a></p>
+<h2>稍后阅读</h2>
 {% for row in rows %}<article class="card" data-item-id="{{ row.id }}">
 <h3><a href="/item/{{ row.id }}">{{ row.title }}</a></h3>
-<p class="meta">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }} · {{ row.processing_status }} · 正文 {{ row.content_completeness }}</p>
-</article>{% else %}<p class="empty">材料库为空。可直接导入本地 PDF 或粘贴文本，无需 URL。</p>{% endfor %}
-<p><a href="/materials">浏览全部材料 →</a></p>
-<details><summary>辅助入口：订阅与每日推荐</summary><p><a href="/recommendations">每日推荐</a> · <a href="/history">推荐历史</a> · <a href="/sources">维护订阅信源</a> · <a href="/ops">运行与用量</a></p></details>
+<p class="meta">由你主动加入；<a href="/item/{{ row.id }}#register-read">登记已读并整理</a></p>
+</article>{% else %}<p class="empty">阅读列表为空。关注信源不会自动加入文章；可以从信源预览挑选，或直接添加 URL、论文、PDF、文本。</p>{% endfor %}
+<details><summary>辅助工具</summary><p><a href="/recommendations">旧推荐结果</a> · <a href="/history">推荐历史</a> · <a href="/ops">设置与用量</a></p></details>
 {% endblock %}

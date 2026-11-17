@@ -244,7 +244,7 @@ def test_machine_links_preserve_chinese_aliases_paths_and_ambiguity(wiki):
     concept = add_page(wiki, "attention", "注意力机制", aliases=["注意力"])
     page = add_page(wiki, "material-1", "机器整理", page_type="material")
     text = "[[注意力#定义|显示文字]] [[重复标题]] [[../concepts/attention.md]] `[[代码]]`"
-    _append_machine(page, 1, text)
+    _append_machine(page, 1, text, wiki=wiki)
     assert text in page.body
     update = PageUpdate(slug=page.slug, action="add_links", links=["注意力|别名", "重复标题"])
     assert _apply_update(wiki, page, update, 1) is None
@@ -262,7 +262,10 @@ def test_ingest_never_merges_an_ambiguous_title_or_stem(wiki):
     plan = WikiPlan(creates=[PageCreate(
         slug="third", title="共同标题", type="concept", summary="独立概念", body="新内容",
     )])
-    row = {"id": 1, "title": "博客", "content": "正文", "summary": "", "url": ""}
+    row = {
+        "id": 1, "title": "博客", "content": "正文", "summary": "", "url": "",
+        "source_id": None,
+    }
     profile = load_profile(FIXTURES / "profile.md")
     result = apply_plan(wiki, plan, row, profile, TODAY)
     assert "third" in result.created

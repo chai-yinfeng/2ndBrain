@@ -2,10 +2,19 @@
 {% block title %}信源 · Second Brain{% endblock %}
 {% block content %}
 <h1>信源 <small class="meta">{{ sources | length }} 个</small></h1>
-<p class="meta">产出统计近 {{ pers.yield_window_days }} 天：入库 ≥ {{ pers.low_yield_min_items }} 条但没有一条<span title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）">进入推荐</span>（必读 / 温故 / 意外 / 值得读，不含速览、归档）的信源标记"低产出，建议停用"；新加入、历史不足 {{ pers.yield_window_days }} 天的不标记。</p>
-<p class="meta">读取 {{ path }}{% if is_example %}（还没有个人配置；第一次修改时会先复制为 config/sources.yaml）{% endif %}。这里的修改写入 config/sources.yaml（gitignore）：按条目文本块追加 / 删除 / 改 enabled，保留注释与其余格式；字段说明见 config/sources.example.yaml。信源全部由你手动维护：反馈只影响 AI 判断，下面的反馈分布只供参考。</p>
+<p class="meta">这是你长期关注、主动寻找内容的入口。关注、预览或采集不会自动把文章塞入阅读列表；选中某一篇后才加入清单。统计与旧推荐功能仅作辅助。</p>
+<p class="meta">{% if is_example %}尚未建立正式关注列表；示例目录只是参考，首次关注只保存你选择的来源。{% else %}关注列表：{{ path }}；修改保留已有注释与其他信源。{% endif %}</p>
 {% if saved %}<p class="saved">已保存{% if saved != "deleted" %}：{{ saved }}{% else %}（已删除）{% endif %}</p>{% endif %}
 {% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
+<section class="entry">
+  <h2>关注博客、网站或账号主页</h2>
+  <form hx-post="/sources/home/preview" hx-target="#homepage-preview" class="add-form">
+    <label for="source-home-url">主页 URL</label><input id="source-home-url" name="url" type="url" required>
+    <button class="fb primary" type="submit">识别并预览（不保存、不调用模型）</button>
+  </form>
+  <div id="homepage-preview"></div>
+</section>
+{% with kind="manual_add", task=None, message=None %}{% include "_task.html" %}{% endwith %}
 
 <section class="entry">
   <table class="scores sources">
@@ -13,8 +22,8 @@
     {% for s in sources %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}
     <tr data-source="{{ s.id }}">
       <td>{% set home = homepages.get(s.id) %}{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer" title="打开信源主页"><b>{{ s.id }}</b></a>{% else %}<b>{{ s.id }}</b>{% endif %}{% if s.tags %}<br><span class="meta">{{ s.tags | join(", ") }}</span>{% endif %}</td>
-      <td>{{ s.type }}</td><td>{{ s.trust }}</td><td>{{ s.role }}</td>
-      <td>{% if not s.enabled %}停用{% elif s.needs_scraper %}needs_scraper{% else %}启用{% endif %}</td>
+      <td>{{ "网页主页" if s.needs_scraper else s.type }}</td><td>{{ s.trust }}</td><td>{{ s.role }}</td>
+      <td>{% if not s.enabled %}停用{% elif s.needs_scraper %}手动浏览主页{% else %}可预览更新{% endif %}</td>
       <td>{% if o and o.last_fetch_at %}{{ "✓" if o.last_fetch_status == "ok" else "✗" }} {{ o.last_fetch_at }}{% if o.last_fetch_status == "ok" %}（新增 {{ o.last_fetch_added }}）{% else %}<br><span class="meta">{{ o.last_fetch_message }}</span>{% endif %}{% else %}<span class="meta">—</span>{% endif %}</td>
       <td>{{ o.items if o else 0 }}</td>
       {% set d = dist.get(s.id, {}) %}
@@ -33,9 +42,10 @@
   </table>
 </section>
 
-<section class="entry" id="catalog">
-  <h2>信源目录 <small class="meta">{{ catalog | length }} 个未添加</small></h2>
-  <p class="meta">来自 config/sources.example.yaml、但还不在你配置里的信源。"预览"只拉取最新约 10 条标题与日期（几秒，不写库、不调用 LLM）；"添加"把这一条原样（含注释）追加到 config/sources.yaml。论文类信源每天量大、读起来投入也大，按需添加。</p>
+<details class="entry" id="catalog"{% if catalog_q %} open{% endif %}>
+  <summary>临时参考目录 · {{ catalog | length }} 个未关注来源</summary>
+  <p class="meta">供你临时浏览、筛选和挑选；只有点“添加”才进入长期关注。清除筛选不会删除已关注来源或材料。</p>
+  <form method="get" action="/sources"><label>筛选目录 <input name="catalog_q" value="{{ catalog_q }}"></label><button class="fb" type="submit">筛选</button> <a href="/sources#catalog">清除筛选并收起</a></form>
   {% for c in catalog %}
   <div class="fyi catalog-item" data-catalog="{{ c.id }}">
     {% set home = catalog_homepages.get(c.id) %}{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer"><b>{{ c.id }}</b></a>{% else %}<b>{{ c.id }}</b>{% endif %}
@@ -48,11 +58,11 @@
     <div id="peek-{{ c.id }}"></div>
   </div>
   {% else %}<p class="empty">（目录中的信源都已添加）</p>{% endfor %}
-</section>
+</details>
 
-<section class="entry">
-  <h2>添加信源</h2>
-  <p class="meta">先「试抓」：只拉取并解析 feed / sitemap / API，列出前 10 条标题与日期，不抓正文、不写数据库（几秒）；确认无误后再保存。</p>
+<details class="entry">
+  <summary>高级：手动配置采集方式</summary>
+  <p class="meta">已有明确 RSS、sitemap 或 HTML 列表规则时使用；普通主页优先用上方识别。试抓只预览，不保存材料。</p>
   <form hx-post="/sources/preview" hx-target="#source-preview" hx-swap="innerHTML" class="source-form">
     <label>id <input name="id" required pattern="[a-z0-9][a-z0-9-]*" placeholder="my-blog"></label>
     <label>类型 <select name="type">{% for t in types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}</select></label>
@@ -67,5 +77,5 @@
     <p><button type="submit" class="fb">试抓</button></p>
   </form>
   <div id="source-preview"></div>
-</section>
+</details>
 {% endblock %}

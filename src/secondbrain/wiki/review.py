@@ -52,7 +52,10 @@ def due_date(page: Page) -> date | None:
 
 def due_concepts(wiki: Wiki, day: date) -> list[Page]:
     """到期（next_due ≤ day）的概念页，最早到期的在前。"""
-    due = [(d, p) for p in wiki.concepts() if (d := due_date(p)) is not None and d <= day]
+    due = [
+        (d, p) for p in wiki.concepts()
+        if p.knowledge_status != "draft" and (d := due_date(p)) is not None and d <= day
+    ]
     return [p for _, p in sorted(due, key=lambda x: (x[0], x[1].slug))]
 
 

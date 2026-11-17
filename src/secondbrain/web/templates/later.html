@@ -1,15 +1,15 @@
 {% extends "base.html" %}
-{% block title %}稍后再看 · Second Brain{% endblock %}
+{% block title %}阅读列表 · Second Brain{% endblock %}
 {% block content %}
-<h1>稍后再看 <small class="meta">{{ rows | length }} 条</small></h1>
-<p class="meta"><a href="/add">手动添加文章</a>（已读 / 准备读，可批量）。在文章上点「稍后读」的条目：不计入积压、不降级、没有期限。读完后点读完后的反馈，或再点一次「稍后读」移出列表。</p>
+<h1>阅读列表 <small class="meta">{{ rows | length }} 份</small></h1>
+<p>这是你自己维护的稍后清单。阅读可以在原网站、ChatGPT 或其他地方完成；登记阅读后移出清单并触发知识整理，不需要提交评价。</p>
+<p><a class="fb primary" href="/add">添加材料</a> · <a href="/sources">浏览信源</a> · <a href="/materials">材料存档</a></p>
 {% for r in rows %}
 <article class="entry" data-item-id="{{ r.id }}">
-  <h3><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a></h3>
-  <p class="meta">{{ r.source_id }} · 标记于 {{ r.state_ts }} · <a href="/item/{{ r.id }}">详情</a>{% if r.id in incomplete %} <a class="tag warn" data-incomplete href="/item/{{ r.id }}#complete">正文不完整</a>{% endif %}</p>
-  {% with item_id=r.id, state="later", with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
+  <h3>{% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}</h3>
+  <p class="meta">{{ r.source_id or "主动添加" }} · 加入 {{ r.added_at }}{% if r.id in incomplete %} · 正文不完整，可附外部学习笔记{% endif %}</p>
+  <p><a class="fb primary" href="/item/{{ r.id }}#register-read">登记已读并整理知识</a> · <a href="/item/{{ r.id }}">材料与学习记录</a></p>
+  <form method="post" action="/reading/{{ r.id }}/remove"><button class="fb" type="submit">移出清单（保留材料）</button></form>
 </article>
-{% else %}
-<p class="empty">（空）</p>
-{% endfor %}
+{% else %}<p class="empty">没有待读材料。信源采集不会自动填满这个列表。</p>{% endfor %}
 {% endblock %}

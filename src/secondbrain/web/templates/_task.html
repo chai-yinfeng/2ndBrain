@@ -11,7 +11,14 @@
   {% if task.error %}<p class="refresh">✗ {{ task.error }}</p>{% endif %}
   {% if task.status == "done" %}
     {% if kind.startswith("paper-") %}{% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}{% endif %}
-    {% if kind == "wiki_ingest" or kind.startswith("wiki-") %}
+    {% if kind.startswith("read-") %}
+      {% set summary=task.result.ingest %}
+      <p>{% if task.result.cached %}已复用现有知识整理，无新增模型调用。{% else %}已登记阅读；新建 {{ summary.created|length }} 页，更新 {{ summary.updated|length }} 页。{% endif %}</p>
+      {% if summary.failures %}<p class="refresh">知识整理尚未完成，已读与笔记已保留，可在登记表单重试。</p>{% endif %}
+      {% for error in summary.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      <p class="meta">本次估算费用 ${{ "%.4f"|format(summary.cost) }}</p>
+      {% for slug in summary.created + summary.updated %}<a href="/wiki/page/{{ slug }}">{{ slug }}</a> {% endfor %}
+    {% elif kind == "wiki_ingest" or kind.startswith("wiki-") %}
       <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>

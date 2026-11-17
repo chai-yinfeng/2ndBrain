@@ -555,6 +555,7 @@ def _import(session, candidate, conn, client, fs, echo, ingest):
         item.provenance = {"search_id": session["id"], "query": session["query"],
                            "candidate": candidate, **provenance}
         material_id, created, improved = db.persist_material(conn, item, datetime.now(UTC))
+        db.add_to_reading_list(conn, material_id)
         conn.commit()
     except (ValueError, ops.ManualFetchError, FetchError) as exc:
         conn.rollback()

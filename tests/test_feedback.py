@@ -113,7 +113,7 @@ def test_overridden_feedback_is_not_a_signal(conn):
     db.add_feedback(conn, item, "gained", None, NOW - timedelta(hours=2))
     db.add_feedback(conn, item, "clear", None, NOW - timedelta(hours=1))
     assert recent_feedback(conn, NOW, 30, 50) == []
-    assert pending_items(conn) == []  # 撤销后不再待编入 wiki
+    assert pending_items(conn) == [item]  # 撤销偏好不撤销已登记的阅读事实。
 
 
 # ---------- 稍后再看与积压 ----------
@@ -149,17 +149,16 @@ def test_later_page_and_home_link(digest_env, conn):
     client = TestClient(create_app())
     item = conn.execute("SELECT item_id FROM digests LIMIT 1").fetchone()[0]
     home = client.get("/").text
-    assert 'href="/later"' in home and "稍后再看：0 条" in home
-    recommendation = client.get("/recommendations").text
-    assert "读之前" in recommendation and "读完后" in recommendation
-    resp = client.post("/feedback", data={"item_id": item, "kind": "later"})
-    assert "已记录：稍后读" in resp.text
-    assert "稍后再看：1 条" in client.get("/").text
+    assert 'href="/later"' in home
+    assert db.reading_list_items(conn) == []
+    client.post(f"/reading/{item}/add")
     page = client.get("/later").text
-    assert f'data-item-id="{item}"' in page and 'class="fb active"' in page
-    undo = client.post("/feedback", data={"item_id": item, "kind": "later"})
-    assert "已撤销：稍后读" in undo.text and 'class="fb active"' not in undo.text
+    assert f'data-item-id="{item}"' in page
+    assert len(db.reading_list_items(conn)) == 1
+    client.post(f"/reading/{item}/remove")
     assert f'data-item-id="{item}"' not in client.get("/later").text
+    assert client.get(f"/item/{item}").status_code == 200
+    assert db.item_detail(conn, item)["reading_state"] == "unread"
 
 
 # ---------- L1：样例与"太难"的前置知识 ----------

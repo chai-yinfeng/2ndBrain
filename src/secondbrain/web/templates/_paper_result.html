@@ -9,8 +9,9 @@
 {% endif %}
 {% if result.material_id %}
 <p><a href="/item/{{ result.material_id }}">打开材料 #{{ result.material_id }}</a>
+ · <a href="/later">阅读列表</a> · <a href="/item/{{ result.material_id }}#register-read">登记阅读与学习记录</a>
 {% if paper_page %}
- · <a href="/wiki/page/material-{{ result.material_id }}">材料知识页</a> · <a href="/wiki/graph?focus=material-{{ result.material_id }}">局部知识网络</a>
+ · <a href="/wiki/page/material-{{ result.material_id }}">{% if paper_page.knowledge_status == "draft" %}机器草稿{% else %}材料知识页{% endif %}</a>{% if paper_page.knowledge_status != "draft" %} · <a href="/wiki/graph?focus=material-{{ result.material_id }}">局部知识网络</a>{% endif %}
 {% endif %}</p>
 {% endif %}
 {% if result.status == 'abstract_only' %}<p class="meta">未获得全文；摘要不会冒充完整正文。可在材料详情页补充 PDF 或文本。</p>{% endif %}
@@ -24,7 +25,7 @@
 <form action="/papers/choose" method="post">
 <input type="hidden" name="search_id" value="{{ result.search_id }}">
 <input type="hidden" name="candidate_id" value="{{ c.id }}">
-<label class="choice"><input type="checkbox" name="ingest" value="1"{% if result.ingest_requested %} checked{% endif %}> 导入后整理入 wiki（不标记已读；按 strong 模型计费）</label>
+<label class="choice"><input type="checkbox" name="read" value="1"{% if result.read_requested %} checked{% endif %}> 此篇已经读过，登记并整理知识（按现有费用上限计费）</label>
 <button type="submit" class="fb primary">选择此论文与版本</button>
 </form>
 <p class="meta">CLI：sb paper choose {{ result.search_id }} {{ c.id }}</p>

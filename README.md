@@ -1,6 +1,6 @@
 # Second Brain
 
-个人学习材料与知识网络系统。支持独立导入 PDF、URL、文本和论文名，阅读、记笔记与整理入 Markdown wiki；订阅与时间预算推荐作为辅助功能保留。M13/M15 已验收，M14 的实现和 Web 验收完成，Obsidian 剩余验收仍未完成，详见路线图。
+个人信源、稍后阅读与知识网络系统。主动关注博客/网站主页、选择值得读的材料，在原站或 ChatGPT 等外部环境阅读后登记，由 AI 增量整理进 Markdown 知识库。支持 URL、网站引用、PDF、文本与论文名；推荐保留为辅助能力。M13/M15 已验收，M14 的原生 Obsidian 剩余验收仍未完成。
 
 架构见 [docs/design.md](docs/design.md)，路线图见 [docs/roadmap.md](docs/roadmap.md)。
 
@@ -14,7 +14,7 @@ cp .env.example .env       # 填写 DEEPSEEK_API_KEY（.env 已 gitignore）
 uv run sb doctor           # 检查环境与配置
 ```
 
-可选：在 `config/settings.yaml` 中只写想改的键，程序会把它深合并覆盖在 `settings.example.yaml` 之上（也可以在 Web `/ops` 的"设置"里改模型与后端）。`sources.yaml` 与 `profile.md` 仍是整份文件，不存在时使用 example。
+可选：在 `config/settings.yaml` 中只写想改的键，程序会把它深合并覆盖在 `settings.example.yaml` 之上（也可以在 Web `/ops` 的"设置"里改模型与后端）。`profile.md` 不存在时使用 example；`sources.yaml` 不存在时表示尚未关注任何信源，example 仅供参考，不自动订阅。
 
 离线开发 / 测试不需要 API key：
 
@@ -26,54 +26,53 @@ uv run pytest -q
 ## 日常使用
 
 ```bash
-uv run sb run --limit 30        # 抓取 → 过滤 → 分级，写入当天 digest（需要 DEEPSEEK_API_KEY）
-uv run sb digest show           # 终端里看 digest
-uv run sb serve                 # 本地 Web UI：http://127.0.0.1:8000/
-uv run sb usage --since 7d      # token 与费用
-uv run sb profile update        # 根据反馈生成 profile 修改提案，只打印 diff
-uv run sb profile update --apply   # 备份到 data/profile_history/ 后写入
-uv run sb sources tune          # 只读的信源统计：反馈分布、近期产出、低产出停用建议（反馈不再调整 trust）
-uv run sb add --pdf paper.pdf --title "论文标题"  # 独立本地 PDF，无需 URL；默认未读
-uv run sb add --text-file notes.txt --ingest     # 文本导入后整理入 wiki，不代表已读
-uv run sb add https://example.com/post           # URL 与订阅共用材料服务，保留多来源
-uv run sb paper add "PagedAttention Kwon 2023"    # 论文名 + 作者/年份；明确时自动导入
-uv run sb paper add "完整论文标题" --ingest       # 导入后整理入 wiki，阅读状态仍独立
-uv run sb paper choose <search_id> <candidate_id> --ingest # 只在有歧义时选择已保存候选
-uv run sb items show <item_id>                   # 阅读原文与来源，不要求运行推荐
-uv run sb items read-state <item_id> reading     # unread / reading / read
-uv run sb items notes <item_id> --file notes.md  # 个人笔记独立存入同一 vault
-uv run sb wiki ingest <item_id>                  # 任意材料显式整理，不要求 L2/反馈
-uv run sb wiki reindex                           # 外部编辑后从 Markdown 重建目录
-uv run sb wiki show <名称或ID>                    # 正文、关联与反向链接；同名时明确选择
-uv run sb wiki graph --focus <名称或ID> --depth 2 # 全局/局部网络及逐层展开
-uv run sb items incomplete      # 列出"正文不完整"的条目（只有摘要等），可在详情页粘贴正文或上传 PDF 补全
-uv run sb deep <item_id>        # 按需精读单条（长内容自动分块；视频要点带时间戳链接）
-uv run sb summary <item_id>     # 深度速读：读全文，写问题 / 方法 / 结果 / 局限 / 前置知识（缓存；--force 重新生成）
-uv run sb prereq <item_id>      # 补前置：wiki 已有的给链接，没有的生成简短讲解（AI 生成）
-uv run sb wiki ingest --pending # 把标了"有收获"的条目编进 data/wiki（Obsidian 可直接打开）
-uv run sb wiki due              # 今天到期复习的概念（复习：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered）
-uv run sb wiki lint             # 检查断链、孤立页、缺字段
+uv run sb serve                                      # 本地 Web：http://127.0.0.1:8000/
+uv run sb sources follow https://example.com/         # 只识别主页并预览，不保存
+uv run sb sources follow https://example.com/ --apply # 明确关注，不自动导入文章
+uv run sb add https://example.com/post                # 获取正文并加入个人稍后清单
+uv run sb add https://example.com/ --reference        # 仅保存网站引用，不请求页面
+uv run sb add --pdf paper.pdf --title "论文标题"       # 本地 PDF，同样进入稍后清单
+uv run sb add --text-file material.txt                # 文本材料
+uv run sb paper add "PagedAttention Kwon 2023"         # 名称检索，无歧义时导入并加入清单
+uv run sb paper choose <search_id> <candidate_id>     # 有歧义时明确选择候选
+uv run sb reading list                               # 用户维护的稍后阅读清单
+uv run sb reading add <item_id>                       # 加入清单，不调用模型
+uv run sb reading remove <item_id>                    # 移出清单，保留材料
+uv run sb reading read <item_id> --notes-file notes.md # 登记外部阅读并自动整理
+uv run sb reading read <item_id> --discussion-url https://chatgpt.com/c/example
+uv run sb paper add "完整论文标题" --read             # 导入时直接登记阅读并整理
+uv run sb items show <item_id>                        # 原文、来源与阅读状态
+uv run sb items notes <item_id> --file notes.md        # 仅保存个人笔记，不调用模型
+uv run sb wiki graph --focus <名称或ID> --depth 2      # 正式知识网络，不包含未读草稿
+uv run sb wiki relation <名称或ID> <名称或ID> pin --reason "我的理解与依据"
+uv run sb wiki relation <名称或ID> <名称或ID> block --reason "不应直接关联"
+uv run sb wiki relation <名称或ID> <名称或ID> reset    # 解除人工约束，不调用模型
+uv run sb wiki reindex                               # 外部编辑 Markdown 后重建目录
+uv run sb usage --since 7d                            # 模型用量和估算费用
 ```
+
+登记阅读不要求评价或先生成 L2。原文/学习笔记不变时复用已有整理，不新增模型调用；主动加 `--force` 才强制重做。正文不完整时可补全正文，或提交学习笔记单独整理，后者明确标记“仅基于用户学习笔记”，不会冒充读过原文。讨论链接只作引用保存，不会抓取 ChatGPT 私密会话；需要纳入整理的内容请粘贴到学习笔记。
+
+辅助能力仍可显式使用：`sb run --limit 30` / `sb digest show`（过滤和推荐）、`sb summary <id>` / `sb prereq <id>`（机器分析）、`sb wiki ingest <id>` 或导入的 `--ingest`（未读时生成草稿）、`sb wiki ingest --pending`（重试已登记阅读但未完成整理的材料）。草稿用 `sb wiki graph --drafts` 或 Web 图谱 `?drafts=1` 查看，不进入默认正式网络、复习或已知知识信号。
 
 `sb serve` 默认只监听 127.0.0.1（`--host` / `--port` 可改）。
 
-文章上的反馈按钮分两组（ADR 0013），写入本地 `feedback` 表：
+阅读列表独立存储，不是推荐反馈的别名。加入/移出清单不会产生偏好反馈；登记阅读移出清单并保留材料、笔记及失败记录，失败后可重试。旧库仅把最新仍为“稍后读”的条目迁入清单，不推断其他文章已经吸收。
 
-- 读之前：**稍后读**（进入 `/later`，不计入积压、没有期限）、**不感兴趣**（负面信号，移出积压）。
-- 读完后：**太浅**、**有收获**（正面信号，进入"编进 wiki"队列）、**太难**（会提示补哪些前置知识）、**没价值**（负面信号）。
-
-每篇文章只有一个当前状态（最新一次点击），再点一次高亮的按钮即撤销。掌握度只在 wiki 概念页的复习按钮里调整：还记得 / 模糊 / 忘了 / 需要回炉 / 已扎实。
+推荐的历史反馈仍保留在详情页辅助区域，供画像和过滤使用；不再以“有收获”作为知识整理的门槛。知识页生成、登记阅读与概念掌握度相互独立；掌握度仍由显式复习调整。
 
 Web 上的其他页面：
 
-- `/`：材料与知识网络首页；`/materials` 为可按名称与阅读状态筛选的材料库，无信源、无 digest 也能使用。
-- `/ops`：今天 / 近 7 天的 LLM 用量；"立即运行"，与 `sb run` 相同，共用 `data/run.lock`，同一时间只跑一个；运行方式与设置。
-- `/sources`：信源全部由你手动维护。列表（反馈分布、产出、低产出停用建议）、预览、启用 / 停用、删除；"信源目录"列出 example 中还没添加的信源，可以逐个预览、添加。修改按条目文本块写入 `config/sources.yaml`，**保留注释与格式**；`sources: []` 是合法的空配置。
-- `/add`：独立导入 URL / PDF / 文本，或直接输入论文名。论文检索在后台执行，候选不明确时仅选择论文/版本；未得到全文时明确标摘要。可选择整理入 wiki，不要求推荐或读后反馈。
-- `/wiki`：目录、体检和到期复习；`/wiki/graph`：全局/局部图、名称与别名定位、直接邻居展开。页面详情提供来源、关联、反向链接及返回图谱入口。
-- `/recommendations` 与 `/history`：独立每日推荐及历史，保留预算和形式/类型筛选；不再占用材料首页。
-- `/ops` 的"设置"：查看 API key 是否已设置（不显示值），写入或清除 `.env` 中的 key；测试连接；选择 cheap / strong 模型与后端（只把与 example 不同的键写入 `config/settings.yaml`）。
-- 条目详情页：原文、导入来源、原文件与请求/实际版本、实际获取地址、独立阅读状态、个人笔记、整理入 wiki；深度速读和补前置作为可选机器分析保留。版本无法核实时显示 unknown，不冒充已验证版本。
+- `/`：信源、阅读列表、知识库三个主入口；`/materials` 是材料存档，不等同于稍后清单。
+- `/sources`：添加博客/账号主页，先识别 RSS/HTML 列表/sitemap 并预览，确认后才关注；无法可靠提取时保存为手动浏览的主页，不假装存在 RSS。不执行站点 JavaScript、不绕过登录。预览文章后可逐篇加入清单，保留所选信源来源；关注本身不导入、不启动推荐。
+- 信源页的参考目录默认折叠，可展开、筛选和清除筛选；只有明确选择的条目会写入 `config/sources.yaml`，原有正式配置、注释和格式保留。
+- `/later`：自己维护的稍后清单；可打开原站、移出清单，或进入详情补充学习记录后登记阅读。
+- `/add`：通用添加材料。URL 可获取正文或仅保存引用；也支持 PDF、文本和论文名。论文候选不明确时只询问身份/版本。
+- 条目详情页：个人学习笔记、讨论引用、登记阅读、复用/强制整理、来源及完整性；机器分析与推荐反馈折叠为辅助功能。
+- `/wiki`：正式知识库、已登记但整理失败的待处理材料、草稿入口；`/wiki/graph` 可直接在网页浏览图谱，无需启动 Obsidian。页面支持固定/禁止关联并保存原因，后续 AI 整理遵守人工约束，不覆盖个人笔记。
+- `/ops`：设置与管理，包含用量、运行方式、API key 状态/配置、模型及画像入口；`/recommendations` 与 `/history` 保留为辅助推荐与历史。
+
+知识整理按当前材料增量进行，不定期重写整库。继续受 `run.max_cost_usd`（example 为 $0.5）的调用前预估及已记录用量限制；这不是服务商侧硬性账单上限。预估、实际 token 用量和错误可追踪，未知用量不当成零费用。固定/禁止关联与保存笔记不调用模型。
 
 深读条目（全文时间超过预算 × `deep_read_ratio`）按速读时间（`deep_summary_minutes`，默认 15 分钟）占用每日预算，卡片同时显示全文时间（ADR 0015）。
 
@@ -87,15 +86,15 @@ Web 上的其他页面：
 
 支持在 vault 根目录或其他知识子目录编辑页面；raw/resources/notes/隐藏目录不进入 Web 知识网络。唯一文件名保留原 ID，重复文件名使用 vault-relative `.md` 路径；重复标题/别名必须选择目标，不随机合并。编辑后可执行 `sb wiki reindex` 或点击 Web「从 Markdown 重新索引」。Obsidian 图谱可用 `-path:raw -path:resources -path:notes -file:index -file:log` 隐藏非知识文件。
 
-导入不等于已读，生成概念页也不等于掌握。新整理出的概念从「陌生」开始，首次显式复习前不设置复习日期。机器内容与个人笔记分开；重复整理保留已有文字。只有摘要的材料会标为 `abstract`，提取范围受限时标为 `partial`，不会冒充全文。
+`human_relations` 是本系统保存在 Markdown frontmatter 中的人工约束；Obsidian 原生图谱不理解“禁止关联”或本系统的草稿过滤。固定关联会写入普通 wikilink，但不承诺两端图完全一致。Obsidian 是闭源应用，并非知识图谱开放协议；本系统的可迁移数据是 Markdown、YAML 与链接。
+
+导入不等于已读，生成概念页也不等于掌握。未读时显式整理生成草稿，登记阅读后进入正式网络；旧页面没有状态标记时保留为 legacy，不自动重写。新概念从「陌生」开始，首次显式复习前不设置日期。机器内容与个人笔记分开；只有摘要标为 `abstract`，提取受限标为 `partial`，不会冒充全文。
 
 ### 手动运行与每日自动（ADR 0016）
 
-默认推荐**手动**：`uv run sb serve` 后打开首页，点顶部的「开始今日过滤」。
+日常无需启动推荐流水线。在 `/sources` 主动选文或通过 `/add` 添加材料即可。
 
-- 按钮旁写着大致耗时与费用；
-- 勾选"不限时间窗（只去重）"时，抓取不按 max_age_days 截断，每个信源仍取最新 fetch_limit 条；终端里对应 `sb run --all-time`；
-- 今天已运行过时，首页只留"再运行一次"入口（在 `/ops`）。
+若需要辅助推荐，可到 `/ops` 点击「立即运行」，或使用 `uv run sb run`；`--all-time` 抓取不按 max_age_days 截断，但仍受每个信源 fetch_limit 限制。关注信源不会自行启用定时任务。
 
 在两种方式之间切换：
 

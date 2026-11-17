@@ -194,19 +194,21 @@ def _seed_digest(item: int) -> None:
     conn.close()
 
 
-def test_home_ingest_button_runs_in_background(env):
+def test_registered_pending_materials_compile_in_background(env):
     item = _gained_item(1, "PagedAttention explained")
     _seed_digest(item)
     client = TestClient(create_app())
-    home = client.get("/").text
-    assert 'data-to-ingest="1"' in home and 'hx-post="/tasks/wiki_ingest"' in home
+    page = client.get("/wiki").text
+    assert f'href="/item/{item}#register-read"' in page
     client.post("/tasks/wiki_ingest")
     wait(client.app.state.tasks.get("wiki_ingest"))
     status = client.get("/tasks/wiki_ingest").text
     assert 'data-task-status="done"' in status
     assert f'<a href="/wiki/page/material-{item}">' in status
     assert '<a href="/wiki/page/kv-cache">' in status and "估算费用" in status
-    assert 'data-to-ingest="0"' in client.get("/").text
+    conn = db.connect()
+    assert db.item_detail(conn, item)["processing_status"] == "processed"
+    conn.close()
 
 
 # ---------- /ops ----------

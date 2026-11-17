@@ -717,3 +717,31 @@
 
 **剩余边界**
 - M15 验收通过；M14 的 Obsidian 剩余项目仍未完成，未因 M15 成功而勾选。关于钥匙串，未执行创建、重置或解锁命令；[Electron 官方说明](https://www.electronjs.org/docs/latest/api/safe-storage) macOS safeStorage 依赖 Keychain，Linux 明文后端选项不能保证解决 macOS 问题，因此没有用未确认的参数再次触发用户提示。
+
+## 阅读流程语义调整（2026-11-17，ADR 0022）
+
+**已实现**
+
+- 信源是长期关注的主页；先识别/预览，再确认关注，不自动把文章加入清单。参考目录折叠、可筛选/清除筛选；没有正式配置时默认零关注，首次保存不复制整份 example。既有正式文件按条目维护，保留其他内容和注释。
+- 通用添加接受博客/网站 URL、仅保存引用、PDF、文本和论文名，默认进入用户维护的稍后清单。来源预览中主动选择的文章保留信源出处，但仍是手动材料，不进入推荐流水线。
+- schema v12 拆出 `reading_list`；加入/移出不要求反馈。CLI `reading list/add/remove/read` 与 Web 共用登记服务；登记外部阅读后移出清单，保存学习笔记和讨论引用并整理知识。讨论不抓取；无正文时支持仅凭明确提交的学习笔记整理，完整性仍为 missing。
+- 相同输入复用知识整理，不新增模型调用，也不要求 API key；有改动或显式 force 才重做。费用预估/记录、错误与失败重试保留，失败不删除已读记录、材料或笔记。
+- 未读机器草稿与 recorded 正式知识分开，默认图/目录/复习/已知知识排除草稿；旧页面保留 legacy，不据此推断掌握度。页面与 CLI 支持 pin/block/reset 及原因，双向禁止约束在机器落盘和图/反链中执行，个人笔记保留。
+- 主导航按信源、阅读列表、知识库、设置与管理组织；旧分析和推荐是辅助入口。本次没有引入 shadcn/ui、React 或整体视觉重设计。
+
+**实际验证**
+
+- 全程在独立 worktree `2ndbrain-material-network`、临时根目录 `/tmp/secondbrain-reading.y3Cpac`；data/config/.env/LaunchAgents 隔离，没有修改真实数据、个人配置或 launchd，没有启动 Obsidian。
+- 离线分组覆盖新增 `test_reading_workflow.py`、`test_knowledge_governance.py`、`test_source_discovery.py`、`test_reading_semantics_web.py`，以及受影响的材料、配置、信源、CLI/Web 约定。分组运行中发现的旧约定用例已迁移，并单独通过；最后来源追溯端到端用例 + `tests/test_materials.py` 为 **17 passed**。相关 Python 文件的 Ruff 检查通过；本次未重跑全套测试，不把这些结果表述为全套通过。
+- 真实 Web 操作：从 `https://simonwillison.net/` 识别 RSS、确认关注、预览并选择 `Release: llm 0.37.3`；确认队列、材料原文及信源出处；保存示例外部学习笔记/讨论引用并登记。重复登记显示复用/无模型调用；新增只保存引用的网站材料停留在稍后清单，没有请求该网站。
+- 真实 DeepSeek：在该临时材料上 force 一次，保留原有 `$0.5` 应用限制，预估 `$0.0372`；一次 `deepseek-flash` WIKI 调用成功，按实际 usage 与配置价格估算 **$0.002735634**，错误为空、usage_known=1。新增 SQLite JSON functions 和依赖升级行为概念，更新材料页。仅是这份短材料的样本，不代表均价或服务商账单承诺。
+- 人工约束：网页禁止 material-1 ↔ llm 后，fake 和真实模型重新整理均未恢复该边，个人笔记保持；另用标为“验收示例”的理由固定 llm ↔ sqlite-json-functions，网页图观察到 **4 节点/4 链接**。390px 窄屏阅读列表实际观察，无水平溢出。
+- CLI 实跑主页识别预览，前后 `sources.yaml` 字节相同；`sources list` 只有明确关注的一项，`reading list` 仅剩未读引用。切到真实模型后端并移除该进程 API key，再执行 `reading read 1` 仍复用成功，数据库模型调用计数没有增加。
+- 旧 v11 验收副本再复制到临时 migration-data，注入 later/clear 历史以检查最新意图后实际升到 v12：4 材料、6 反馈、2 分析、1 digest、3 wiki_ingests 保持；仅最新 later 的 #4 入队，原阅读状态保持。12 个 Markdown 文件哈希一致，4 个材料详情和 7 个知识页均能打开，foreign_key_check 无错误。
+
+**可查看状态与限制**
+
+- 预览服务 `sb-reading-final-preview`：`http://127.0.0.1:8765/`，使用上述临时数据，默认 fake 后端，继续体验不会调用付费模型；其中已有一次真实模型的整理结果。示例笔记/人工关联明确是验收内容，不代表用户已确认的理解。
+- 真实网站主页发现实测 RSS；HTML 列表、sitemap、无订阅的手动主页、公网/重定向/体积边界由离线受控测试覆盖，不承诺任意动态或登录账号自动提取。私密 ChatGPT 对话未抓取。
+- M14 原生 Obsidian 跳转、资源、图谱与原生编辑联动的剩余验收仍未完成，不改勾选；本次新增的草稿/禁止关联规则也不声称原生 Obsidian 会执行。用户先查看业务结果，再讨论整体 UI 风格。
+- 本轮只本地提交，不 push、不创建 PR。

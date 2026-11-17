@@ -44,7 +44,9 @@ def lint(wiki: Wiki) -> LintReport:
         missing = [f for f in REQUIRED_FIELDS if f not in page.meta]
         if missing:
             report.missing_fields[slug] = missing
-        links = connections[slug]
+        links = connections.get(slug)
+        if links is None:
+            continue
         if links["missing"]:
             report.broken_links[slug] = links["missing"]
         if links["ambiguous"]:
@@ -62,7 +64,7 @@ def lint(wiki: Wiki) -> LintReport:
             report.index_dangling.append(name)
         else:
             report.ambiguous_links.setdefault("index", []).append(name)
-    report.index_missing = sorted(set(wiki.pages) - listed)
+    report.index_missing = sorted(set(connections) - listed)
     report.index_dangling.sort()
     return report
 

@@ -10,12 +10,13 @@
   <p class="meta"><a href="/wiki">← Wiki</a> · <a href="/wiki/graph?focus={{ page.slug|urlencode }}">在知识网络中定位</a> · <a href="/wiki/graph">全局概览</a></p>
   <p class="meta">
     {{ page.type }}
+    · {{ {"recorded":"已登记阅读后的知识","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}
     {% if page.meta.mastery %}· 掌握度 {{ page.meta.mastery }}{% endif %}
     {% if page.type == "concept" and due %}· 下次复习 {{ due }}（间隔 {{ page.meta.interval_days }} 天，ease {{ page.meta.ease }}）{% endif %}
     {% if page.aliases %}· 别名：{{ page.aliases | join("、") }}{% endif %}
     {% if page.meta.sources %}· 来源：{% for sid in page.meta.sources %}<a href="/item/{{ sid }}">#{{ sid }}</a>{% if not loop.last %} {% endif %}{% endfor %}{% endif %}
   </p>
-  {% if page.type == "concept" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
+  {% if page.type == "concept" and page.knowledge_status != "draft" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
   <section class="wiki-body">{{ body_html | safe }}</section>
   <section class="page-connections">
     <h2>页面链接</h2>
@@ -26,6 +27,20 @@
     <ul>{% for source in connections.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a> · {{ source.type }}</li>{% else %}<li class="empty">尚无其他知识页链接到这里。</li>{% endfor %}</ul>
     {% if connections.missing %}<p class="missing">缺失目标：{{ connections.missing|join("、") }}</p>{% endif %}
     {% if connections.ambiguous %}<p class="ambiguous">同名歧义（请使用完整路径）：{{ connections.ambiguous|join("、") }}</p>{% endif %}
+  </section>
+  <section id="human-relations">
+    <h2>人工介入关联</h2>
+    <p class="meta">保留关联不会增加掌握度；禁止关联对两个方向都生效，后续 AI 整理不能恢复。关系依据保存在页面里，不只是一条连线。</p>
+    {% for control in relation_controls %}<div class="fyi" data-human-mode="{{ control.mode }}"><b>{{ control.other }}</b> · {{ "固定关联" if control.mode == "pin" else "禁止关联" }} · {{ control.reason or "未填写原因" }}{% if control.incoming %}（来自对端页面）{% endif %}
+      <form method="post" action="/wiki/relation"><input type="hidden" name="source" value="{{ page.slug }}"><input type="hidden" name="target" value="{{ control.other }}"><input type="hidden" name="mode" value="reset"><button class="fb" type="submit">恢复自动关联</button></form>
+    </div>{% else %}<p class="empty">尚无人工约束。</p>{% endfor %}
+    <form method="post" action="/wiki/relation" class="add-form">
+      <input type="hidden" name="source" value="{{ page.slug }}">
+      <label for="relation-target">对端知识页名称或稳定 ID</label><input id="relation-target" name="target" required>
+      <label for="relation-mode">人工决定</label><select id="relation-mode" name="mode"><option value="pin">固定关联，后续 AI 保留</option><option value="block">禁止关联，后续 AI 不得恢复</option><option value="reset">解除约束，允许自动维护</option></select>
+      <label for="relation-reason">关系依据或禁止原因</label><textarea id="relation-reason" name="reason" rows="3"></textarea>
+      <button class="fb" type="submit">保存人工决定（不调用模型）</button>
+    </form>
   </section>
 </article>
 {% endblock %}

@@ -103,7 +103,8 @@ def test_default_import_preserves_reading_and_explicit_state_resets(env):
     conn = db.connect()
     assert db.item_detail(conn, iid)["reading_state"] == "read"
     assert db.item_detail(conn, iid)["read_at"] == before
-    assert db.feedback_state(conn, [iid])[iid] == "later"
+    assert db.feedback_state(conn, [iid])[iid] is None
+    assert [row["id"] for row in db.reading_list_items(conn)] == [iid]
     conn.close()
     add_result([], text="An independent reading state", state="unread")
     conn = db.connect()

@@ -140,6 +140,10 @@ def test_unread_material_ingests_without_feedback_l2_or_recommendation(material_
     assert wiki.pages["kv-cache"].meta["last_reviewed"] is None
     assert due_concepts(wiki, TODAY) == []
     assert known_knowledge(wiki, [row], 500, 2000) == ""
+    from secondbrain import ops
+
+    ops.register_read(item_id, lambda _: None)
+    wiki.reload_pages()
     review(wiki, wiki.pages["kv-cache"], "remembered", TODAY)
     assert "KV cache（concept；掌握度：接触过）" in known_knowledge(wiki, [row], 500, 2000)
 

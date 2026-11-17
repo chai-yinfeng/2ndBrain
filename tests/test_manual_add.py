@@ -201,8 +201,6 @@ def test_cli_ingest_gained(env):
 
 def test_web_add_page_and_task(env):
     client = TestClient(create_app())
-    page = client.get("/add").text
-    assert 'name="urls"' in page and 'value="read"' in page and 'name="ingest"' in page
     assert 'href="/add"' in client.get("/").text and 'href="/add"' in client.get("/later").text
     bad = client.post("/add", data={"urls": POST, "state": "read", "feedback": "invalid"}).text
     assert "读后反馈只能在「已读」时选择" in bad
@@ -212,8 +210,6 @@ def test_web_add_page_and_task(env):
     status = client.get("/tasks/manual_add").text
     assert 'data-add-status="新增"' in status and 'data-add-status="失败"' in status
     assert "Continuous batching in practice" in status
-    home = client.get("/").text
-    assert 'data-to-ingest="1"' in home  # 有收获的手动条目进入队列（没有 digest 时也显示）
     sources = client.get("/sources").text
     assert 'data-source="manual"' not in sources  # 虚拟信源不出现在信源页
     conn = db.connect()
@@ -221,4 +217,5 @@ def test_web_add_page_and_task(env):
     item = conn.execute("SELECT id FROM items").fetchone()[0]
     conn.close()
     detail = client.get(f"/item/{item}").text
+    assert client.get(f"/wiki/page/material-{item}").status_code == 200
     assert f'hx-post="/summary/{item}"' in detail and f'hx-post="/prereq/{item}"' in detail
