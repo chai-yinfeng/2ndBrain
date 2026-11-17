@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Digest {{ day or "" }} · Second Brain{% endblock %}
 {% block content %}
-<section class="start-run" id="start-run" data-run-state="{% if (run_task and run_task.running) or run_locked %}running{% elif ran_today %}done{% else %}todo{% endif %}">
+<header class="page-header">
+  <div><p class="eyebrow">辅助推荐</p><h1>推荐结果{% if day %} · {{ day }}{% endif %}</h1><p class="meta">自动过滤的分级结果，与主动维护的阅读清单分开。</p></div>
+  <div class="page-actions"><a class="fb" href="/history">推荐历史</a><a class="fb" href="/later">稍后阅读</a></div>
+</header>
+<section class="start-run panel" id="start-run" data-run-state="{% if (run_task and run_task.running) or run_locked %}running{% elif ran_today %}done{% else %}todo{% endif %}">
   {% if run_task and run_task.running %}
     {% with kind="run", task=run_task, message=None, refresh_on_done=True %}{% include "_task.html" %}{% endwith %}
   {% elif run_locked %}
@@ -24,8 +28,8 @@
   <p class="empty">还没有 digest，先运行 <code>uv run sb run</code>。</p>
   {% if to_ingest %}{% include "_ingest.html" %}{% endif %}
 {% else %}
-  <section class="summary">
-    <h1>Digest {{ day }}</h1>
+  <section class="summary panel">
+    <h2>今日阅读预算</h2>
     <div class="budget" data-budget="{{ used }}/{{ budget }}">
       <progress value="{{ [used, budget] | min }}" max="{{ budget or 1 }}"></progress>
       <span>今日已排 {{ used }} / {{ budget }} 分钟</span>
@@ -38,8 +42,9 @@
   {% for lane, title in page_lanes %}
     {% set entries = lanes.get(lane, []) %}
     {% if entries or lane != "deferred" %}
-    <section class="lane" id="lane-{{ lane }}">
-      <h2>{{ title }} <small>{{ entries | length + (concepts | length if lane == "refresher" else 0) }}</small></h2>
+    <section class="lane panel" id="lane-{{ lane }}">
+      <h2>{{ title }} <small class="meta">{{ entries | length + (concepts | length if lane == "refresher" else 0) }}</small></h2>
+      <div class="compact-list">
       {% if lane == "refresher" %}{% for c in concepts %}
       <article class="entry concept" data-concept="{{ c.slug }}">
         <h3>概念复习：<a href="/wiki/page/{{ c.slug }}">{{ c.title }}</a></h3>
@@ -49,6 +54,7 @@
       </article>
       {% endfor %}{% endif %}
       {% for e in entries %}{% include "_entry.html" %}{% else %}{% if not (lane == "refresher" and concepts) %}<p class="empty">（空）</p>{% endif %}{% endfor %}
+      </div>
     </section>
     {% endif %}
   {% endfor %}
@@ -57,15 +63,19 @@
   {# 速览与归档默认折叠（不依赖 JS）；折叠区域内的反馈按钮照常可用 #}
   {% for lane, title in (("fyi", "速览"), ("archived", "归档")) %}
   {% set rest = lanes.get(lane, []) %}
-  <details class="lane" id="lane-{{ lane }}">
-    <summary><h2>{{ title }}（{{ rest | length }} 条）</h2></summary>
+  <details class="lane panel" id="lane-{{ lane }}">
+    <summary>{{ title }}（{{ rest | length }} 条）</summary>
     {% for e in rest %}
-    <div class="fyi" data-item-id="{{ e.item_id }}">
+    <div class="fyi list-row" data-item-id="{{ e.item_id }}">
+      <div class="row-main">
       <a href="/item/{{ e.item_id }}">{{ e.title }}</a>
       <span class="meta">（{{ e.source_id }} · {{ e.est_minutes }} 分钟）</span>
       <span class="reason">{{ e.reason }}</span>
+      </div>
+      <div class="entry-actions">
       {% if not e.has_l2 %}{% with item_id=e.item_id, no_transcript=e.no_transcript, hint=hints.l2(e.content_len) %}{% include "_deep_button.html" %}{% endwith %}{% endif %}
       {% with item_id=e.item_id, state=e.state, with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
+      </div>
     </div>
     {% else %}<p class="empty">（空）</p>{% endfor %}
   </details>

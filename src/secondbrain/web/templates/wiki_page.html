@@ -1,46 +1,43 @@
 {% extends "base.html" %}
 {% block title %}{{ page.title }} · Wiki{% endblock %}
 {% block head %}
+<link rel="stylesheet" href="/static/wiki_graph.css">
 <link rel="stylesheet" href="/static/katex/katex.min.css">
 <script src="/static/katex/katex.min.js" defer></script>
 <script src="/static/wiki_math.js" defer></script>
 {% endblock %}
 {% block content %}
-<article class="detail" data-wiki-page="{{ page.slug }}">
-  <p class="meta"><a href="/wiki">← Wiki</a> · <a href="/wiki/graph?focus={{ page.slug|urlencode }}">在知识网络中定位</a> · <a href="/wiki/graph">全局概览</a></p>
-  <p class="meta">
-    {{ page.type }}
-    · {{ {"recorded":"已登记阅读后的知识","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}
-    {% if page.meta.mastery %}· 掌握度 {{ page.meta.mastery }}{% endif %}
-    {% if page.type == "concept" and due %}· 下次复习 {{ due }}（间隔 {{ page.meta.interval_days }} 天，ease {{ page.meta.ease }}）{% endif %}
-    {% if page.aliases %}· 别名：{{ page.aliases | join("、") }}{% endif %}
-    {% if page.meta.sources %}· 来源：{% for sid in page.meta.sources %}<a href="/item/{{ sid }}">#{{ sid }}</a>{% if not loop.last %} {% endif %}{% endfor %}{% endif %}
-  </p>
-  {% if page.type == "concept" and page.knowledge_status != "draft" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
-  <section class="wiki-body">{{ body_html | safe }}</section>
-  <section class="page-connections">
-    <h2>页面链接</h2>
-    <p class="meta">以下关系从 Markdown 派生，仅表示页面链接；依据与机器推断请阅读正文。</p>
-    <h3>关联页面</h3>
-    <ul>{% for target in connections.outgoing %}<li><a href="/wiki/page/{{ target.slug }}">{{ target.title }}</a> · {{ target.type }}</li>{% else %}<li class="empty">暂无指向其他知识页的链接。</li>{% endfor %}</ul>
-    <h3>反向链接</h3>
-    <ul>{% for source in connections.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a> · {{ source.type }}</li>{% else %}<li class="empty">尚无其他知识页链接到这里。</li>{% endfor %}</ul>
-    {% if connections.missing %}<p class="missing">缺失目标：{{ connections.missing|join("、") }}</p>{% endif %}
-    {% if connections.ambiguous %}<p class="ambiguous">同名歧义（请使用完整路径）：{{ connections.ambiguous|join("、") }}</p>{% endif %}
-  </section>
-  <section id="human-relations">
-    <h2>人工介入关联</h2>
-    <p class="meta">保留关联不会增加掌握度；禁止关联对两个方向都生效，后续 AI 整理不能恢复。关系依据保存在页面里，不只是一条连线。</p>
-    {% for control in relation_controls %}<div class="fyi" data-human-mode="{{ control.mode }}"><b>{{ control.other }}</b> · {{ "固定关联" if control.mode == "pin" else "禁止关联" }} · {{ control.reason or "未填写原因" }}{% if control.incoming %}（来自对端页面）{% endif %}
-      <form method="post" action="/wiki/relation"><input type="hidden" name="source" value="{{ page.slug }}"><input type="hidden" name="target" value="{{ control.other }}"><input type="hidden" name="mode" value="reset"><button class="fb" type="submit">恢复自动关联</button></form>
-    </div>{% else %}<p class="empty">尚无人工约束。</p>{% endfor %}
-    <form method="post" action="/wiki/relation" class="add-form">
-      <input type="hidden" name="source" value="{{ page.slug }}">
-      <label for="relation-target">对端知识页名称或稳定 ID</label><input id="relation-target" name="target" required>
-      <label for="relation-mode">人工决定</label><select id="relation-mode" name="mode"><option value="pin">固定关联，后续 AI 保留</option><option value="block">禁止关联，后续 AI 不得恢复</option><option value="reset">解除约束，允许自动维护</option></select>
-      <label for="relation-reason">关系依据或禁止原因</label><textarea id="relation-reason" name="reason" rows="3"></textarea>
-      <button class="fb" type="submit">保存人工决定（不调用模型）</button>
-    </form>
-  </section>
+<article class="detail wiki-article" data-wiki-page="{{ page.slug }}">
+  <nav class="wiki-breadcrumb" aria-label="面包屑"><a href="/wiki">知识库</a><span aria-hidden="true">/</span><span>{{ page.type }}</span><span aria-hidden="true">/</span><span>{{ page.title }}</span></nav>
+  <header class="page-header"><div><p class="eyebrow">{{ page.type }} / KNOWLEDGE PAGE</p><h1>{{ page.title }}</h1><p class="meta">{{ {"recorded":"已登记阅读后的知识","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}</p></div><div class="page-actions"><a class="fb" href="/wiki/graph?focus={{ page.slug|urlencode }}{% if page.knowledge_status == 'draft' %}&amp;drafts=1{% endif %}">在知识网络中定位</a><a class="fb" href="/wiki/graph{% if page.knowledge_status == 'draft' %}?drafts=1{% endif %}">全局概览</a></div></header>
+  <div class="wiki-page-layout">
+    <div class="wiki-reading-column">
+      <section class="wiki-body panel wiki-prose">{{ body_html | safe }}</section>
+      <section class="page-connections panel">
+        <h2>页面链接</h2><p class="help">以下关系从 Markdown 派生，仅表示页面链接；依据与机器推断请阅读正文。</p>
+        <div class="wiki-connection-columns"><div><h3>关联页面</h3><ul class="wiki-link-list">{% for target in connections.outgoing %}<li><a href="/wiki/page/{{ target.slug }}">{{ target.title }}</a><span class="tag">{{ target.type }}</span></li>{% else %}<li class="empty">暂无指向其他知识页的链接。</li>{% endfor %}</ul></div><div><h3>反向链接</h3><ul class="wiki-link-list">{% for source in connections.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a><span class="tag">{{ source.type }}</span></li>{% else %}<li class="empty">尚无其他知识页链接到这里。</li>{% endfor %}</ul></div></div>
+        {% if connections.missing %}<p class="missing">缺失目标：{{ connections.missing|join("、") }}</p>{% endif %}
+        {% if connections.ambiguous %}<p class="ambiguous">同名歧义（请使用完整路径）：{{ connections.ambiguous|join("、") }}</p>{% endif %}
+      </section>
+      <section id="human-relations" class="panel">
+        <h2>人工介入关联</h2><p class="help">保留关联不会增加掌握度；禁止关联对两个方向都生效，后续 AI 整理不能恢复。关系依据保存在页面里，不只是一条连线。</p>
+        {% for control in relation_controls %}<div class="fyi wiki-human-rule" data-human-mode="{{ control.mode }}"><div><b>{{ control.other }}</b> <span class="tag">{{ "固定关联" if control.mode == "pin" else "禁止关联" }}</span><p class="meta">{{ control.reason or "未填写原因" }}{% if control.incoming %}（来自对端页面）{% endif %}</p></div>
+          <form method="post" action="/wiki/relation"><input type="hidden" name="source" value="{{ page.slug }}"><input type="hidden" name="target" value="{{ control.other }}"><input type="hidden" name="mode" value="reset"><button class="fb" type="submit">恢复自动关联</button></form>
+        </div>{% else %}<p class="empty">尚无人工约束。</p>{% endfor %}
+        <form method="post" action="/wiki/relation" class="add-form form-panel wiki-relation-form">
+          <input type="hidden" name="source" value="{{ page.slug }}">
+          <div class="field"><label for="relation-target">对端知识页名称或稳定 ID</label><input id="relation-target" name="target" required><p class="help">同名页面请使用完整稳定路径，避免误选。</p></div>
+          <div class="field"><label for="relation-mode">人工决定</label><select id="relation-mode" name="mode"><option value="pin">固定关联，后续 AI 保留</option><option value="block">禁止关联，后续 AI 不得恢复</option><option value="reset">解除约束，允许自动维护</option></select></div>
+          <div class="field"><label for="relation-reason">关系依据或禁止原因</label><textarea id="relation-reason" name="reason" rows="3"></textarea></div>
+          <button class="fb" type="submit">保存人工决定（不调用模型）</button>
+        </form>
+      </section>
+    </div>
+    <aside class="wiki-page-sidebar">
+      <section class="panel"><h2>页面信息</h2><dl class="wiki-facts"><dt>稳定路径</dt><dd class="wiki-stable-path">{{ page.slug }}</dd><dt>类型</dt><dd>{{ page.type }}</dd><dt>别名</dt><dd>{{ page.aliases|join("、") or "暂无别名" }}</dd>{% if page.meta.mastery %}<dt>掌握度</dt><dd>{{ page.meta.mastery }}</dd>{% endif %}</dl></section>
+      <section class="panel"><h2>来源材料</h2>{% if page.meta.sources %}<div class="wiki-source-links">{% for sid in page.meta.sources %}<a class="fb" href="/item/{{ sid }}">材料 #{{ sid }}</a>{% endfor %}</div>{% else %}<p class="empty">未记录来源材料。</p>{% endif %}</section>
+      {% if page.type == "concept" and page.knowledge_status != "draft" %}<section class="panel wiki-review"><h2>复习这个概念</h2>{% if due %}<p class="help">下次复习 {{ due }} · 间隔 {{ page.meta.interval_days }} 天 · ease {{ page.meta.ease }}</p>{% endif %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}</section>{% endif %}
+    </aside>
+  </div>
 </article>
 {% endblock %}

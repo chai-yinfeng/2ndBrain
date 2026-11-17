@@ -1,25 +1,28 @@
 {% extends "base.html" %}
 {% block title %}知识库 · Second Brain{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/wiki_graph.css">{% endblock %}
 {% block content %}
-<h1>知识库 <small class="meta">{{ count }} 个页面 · <a href="/wiki/graph">知识图谱</a></small></h1>
-<p class="meta">登记阅读后由 AI 增量生成概念与关联。机器草稿默认不在这里展示；历史页面保留但不冒充新登记记录。</p>
-{% if pending_read %}<section class="entry"><h2>已登记，待整理</h2><ul>{% for item in pending_read %}<li><a href="/item/{{ item.id }}#register-read">{{ item.title }}</a> · 可查看错误、补充学习记录或重试</li>{% endfor %}</ul></section>{% endif %}
-<p><a href="/later">阅读列表</a> · <a href="/materials?reading=read">已登记材料</a> · <a href="/wiki/graph?drafts=1">高级：查看机器草稿</a></p>
-<section class="entry">
-  <h2>体检</h2>
-  <button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查 wiki</button>
-  <span class="meta">检查断链、缺失页面、孤立页、frontmatter 缺字段、index 不一致；只报告不修改，不调用 LLM，一秒内完成。</span>
-  <div id="lint-result"></div>
-</section>
-<section class="entry">
-  <h2>今日到期复习 <small>{{ due | length }}</small></h2>
-  {% for d in due %}
-  <div class="fyi" data-concept="{{ d.page.slug }}">
-    <a href="/wiki/page/{{ d.page.slug }}">{{ d.page.title }}</a>
-    <span class="meta">（掌握度 {{ d.page.meta.mastery or "—" }} · 间隔 {{ d.page.meta.interval_days }} 天 · 到期 {{ d.due }}）</span>
-    {% with slug=d.page.slug %}{% include "_review_buttons.html" %}{% endwith %}
-  </div>
-  {% else %}<p class="empty">（没有到期的概念）</p>{% endfor %}
-</section>
-<section class="entry wiki-body">{{ index_html | safe }}</section>
+<header class="page-header"><div><p class="eyebrow">KNOWLEDGE WORKSPACE</p><h1>知识库 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">登记阅读后由 AI 增量生成概念与关联。机器草稿默认不在这里展示；历史页面保留但不冒充新登记记录。</p></div><div class="page-actions"><a class="fb" href="/materials?reading=read">已登记材料</a><a class="fb primary" href="/wiki/graph">探索知识图谱</a></div></header>
+<nav class="subnav" aria-label="知识库视图"><a href="/wiki" aria-current="page">知识页面</a><a href="/wiki/graph">知识图谱</a><a href="/later">阅读列表</a></nav>
+{% if pending_read %}<section class="panel wiki-pending"><h2>已登记，待整理 <small>{{ pending_read|length }}</small></h2><p class="help">登记记录已保留，可查看错误、补充学习记录或重试整理。</p><ul class="wiki-link-list">{% for item in pending_read %}<li><a href="/item/{{ item.id }}#register-read">{{ item.title }}</a></li>{% endfor %}</ul></section>{% endif %}
+<div class="wiki-overview">
+  <section class="panel wiki-index"><div class="wiki-section-heading"><h2>知识页面</h2><span class="meta">Markdown 索引</span></div><div class="wiki-body">{{ index_html | safe }}</div></section>
+  <aside class="wiki-overview-sidebar">
+    <section class="panel wiki-review">
+      <div class="wiki-section-heading"><h2>今日到期复习 <small>{{ due | length }}</small></h2><span class="tag">间隔复习</span></div>
+      {% for d in due %}
+      <div class="fyi" data-concept="{{ d.page.slug }}">
+        <a href="/wiki/page/{{ d.page.slug }}">{{ d.page.title }}</a>
+        <p class="meta">掌握度 {{ d.page.meta.mastery or "—" }} · 间隔 {{ d.page.meta.interval_days }} 天 · 到期 {{ d.due }}</p>
+        {% with slug=d.page.slug %}{% include "_review_buttons.html" %}{% endwith %}
+      </div>
+      {% else %}<p class="empty">没有到期的概念，按自己的节奏继续阅读。</p>{% endfor %}
+    </section>
+    <section class="panel wiki-health">
+      <h2>知识库体检</h2><p class="help">检查断链、缺失页面、孤立页、frontmatter 缺字段和 index 不一致。只报告，不修改，不调用 LLM。</p>
+      <button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查 wiki</button><div id="lint-result"></div>
+    </section>
+    <details class="panel wiki-advanced"><summary>高级视图</summary><p class="help">机器草稿未登记为已读知识。</p><a href="/wiki/graph?drafts=1">查看包含机器草稿的图谱</a></details>
+  </aside>
+</div>
 {% endblock %}

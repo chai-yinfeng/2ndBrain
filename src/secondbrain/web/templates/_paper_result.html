@@ -1,4 +1,4 @@
-<section data-paper-status="{{ result.status }}">
+<section class="paper-result" data-paper-status="{{ result.status }}">
 <h2>{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}</h2>
 <p>{{ result.message }}</p>
 {% for error in result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
@@ -8,21 +8,21 @@
 {% for error in result.ingest.get('errors', []) %}<p class="refresh">wiki 整理失败：{{ error }}</p>{% endfor %}
 {% endif %}
 {% if result.material_id %}
-<p><a href="/item/{{ result.material_id }}">打开材料 #{{ result.material_id }}</a>
- · <a href="/later">阅读列表</a> · <a href="/item/{{ result.material_id }}#register-read">登记阅读与学习记录</a>
+<p class="toolbar"><a class="fb primary" href="/item/{{ result.material_id }}">打开材料 #{{ result.material_id }}</a>
+ <a class="fb" href="/later">阅读列表</a> <a class="fb" href="/item/{{ result.material_id }}#register-read">登记阅读与学习记录</a>
 {% if paper_page %}
  · <a href="/wiki/page/material-{{ result.material_id }}">{% if paper_page.knowledge_status == "draft" %}机器草稿{% else %}材料知识页{% endif %}</a>{% if paper_page.knowledge_status != "draft" %} · <a href="/wiki/graph?focus=material-{{ result.material_id }}">局部知识网络</a>{% endif %}
 {% endif %}</p>
 {% endif %}
 {% if result.status == 'abstract_only' %}<p class="meta">未获得全文；摘要不会冒充完整正文。可在材料详情页补充 PDF 或文本。</p>{% endif %}
 {% for c in result.candidates if result.status == 'ambiguous' or (result.selected and c.id == result.selected.id) %}
-<article class="card" data-candidate-id="{{ c.id }}">
+<article class="panel paper-candidate" data-candidate-id="{{ c.id }}">
 <h3>{{ c.title }}</h3>
-<p>{{ c.authors | join(', ') }} · {{ c.year or '年份未知' }} · {{ c.venue or '会议/期刊未知' }}</p>
-<p class="meta">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
+<p class="meta">{{ c.authors | join(', ') }} · {{ c.year or '年份未知' }} · {{ c.venue or '会议/期刊未知' }}</p>
+<p class="meta break-anywhere">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
 {% if c.abstract %}<details><summary>摘要</summary><p>{{ c.abstract }}</p></details>{% endif %}
 {% if result.status == 'ambiguous' %}
-<form action="/papers/choose" method="post">
+<form action="/papers/choose" method="post" class="add-form">
 <input type="hidden" name="search_id" value="{{ result.search_id }}">
 <input type="hidden" name="candidate_id" value="{{ c.id }}">
 <label class="choice"><input type="checkbox" name="read" value="1"{% if result.read_requested %} checked{% endif %}> 此篇已经读过，登记并整理知识（按现有费用上限计费）</label>

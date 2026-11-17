@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}选择同名页面 · Wiki{% endblock %}
+{% block head %}<link rel="stylesheet" href="/static/wiki_graph.css">{% endblock %}
 {% block content %}
-<h1>「{{ name }}」对应多个页面</h1>
-<p>未自动选择。请根据类型与稳定路径确认目标；可用完整文件路径消除链接歧义。</p>
-<ul>{% for page in candidates %}<li><a href="/wiki/page/{{ page.slug }}">{{ page.title }}</a> · {{ page.type }} · {{ page.slug }}</li>{% endfor %}</ul>
-<p><a href="/wiki/graph">返回知识网络</a></p>
+<nav class="wiki-breadcrumb" aria-label="面包屑"><a href="/wiki">知识库</a><span aria-hidden="true">/</span><span>同名页面</span></nav>
+<header class="page-header"><div><p class="eyebrow">RESOLVE A PAGE</p><h1>「{{ name }}」对应多个页面</h1><p class="meta">未自动选择。请根据类型与稳定路径确认目标；可用完整文件路径消除链接歧义。</p></div><a class="fb" href="/wiki/graph">返回知识网络</a></header>
+<section class="panel compact-list" aria-label="候选知识页面">{% for page in candidates %}<div class="list-row"><div class="row-main"><a href="/wiki/page/{{ page.slug }}">{{ page.title }}</a><p class="meta wiki-stable-path">{{ page.slug }}</p></div><span class="tag">{{ page.type }}</span><a class="fb" href="/wiki/page/{{ page.slug }}">打开页面</a></div>{% endfor %}</section>
 {% endblock %}

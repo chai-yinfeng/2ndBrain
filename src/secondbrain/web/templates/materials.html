@@ -1,21 +1,22 @@
 {% extends "base.html" %}
 {% block title %}材料存档 · Second Brain{% endblock %}
 {% block content %}
-<h1>材料存档</h1>
-<p><a class="fb primary" href="/add">添加材料</a> · <a href="/later">阅读列表</a> · <a href="/wiki">知识库</a></p>
-<p class="meta">这里包含已发现、主动添加和已读的材料，不等同于你的稍后清单；只有你选择的内容才进入阅读列表。</p>
-<form method="get" action="/materials">
+<div class="page-header"><div><p class="eyebrow">资料</p><h1>材料存档</h1><p class="meta">所有已保存的材料，不等同于稍后清单。需要阅读时，再加入列表。</p></div><div class="page-actions"><a class="fb" href="/later">阅读列表</a><a class="fb primary" href="/add">添加材料</a></div></div>
+<form method="get" action="/materials" class="toolbar">
   <label>查找材料 <input name="q" value="{{ query }}" type="search"></label>
   <label>阅读状态 <select name="reading"><option value="">全部</option>{% for key, label in [("unread","未读"),("reading","阅读中"),("read","已读")] %}<option value="{{ key }}"{% if reading == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
   <button class="fb" type="submit">筛选</button>
 </form>
+<div class="compact-list">
 {% for row in rows %}
-<article class="card" data-item-id="{{ row.id }}">
-<h2><a href="/item/{{ row.id }}">{{ row.title }}</a></h2>
-<p class="meta">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }} · {{ row.processing_status }} · {{ row.content_completeness }} · {{ row.author or "作者未知" }}</p>
-{% if row.summary %}<p>{{ row.summary }}</p>{% endif %}
-<form method="post" action="/reading/{{ row.id }}/add"><button class="fb" type="submit">加入阅读列表</button></form>
+<article class="list-row" data-item-id="{{ row.id }}">
+  <div class="row-main">
+    <h2><a href="/item/{{ row.id }}">{{ row.title }}</a><span class="tag">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }}</span></h2>
+    <p class="meta">{{ row.author or "作者未知" }} · {{ row.processing_status }} · {{ row.content_completeness }}</p>
+  </div>
+  <div class="row-actions"><form method="post" action="/reading/{{ row.id }}/add"><button class="fb small" type="submit">加入阅读列表</button></form></div>
 </article>
 {% else %}<p class="empty">没有符合条件的材料。可清除筛选，或直接导入材料，无需配置信源。</p>{% endfor %}
+</div>
 {% if next_offset is not none %}<p><a href="/materials?q={{ query|urlencode }}&reading={{ reading }}&offset={{ next_offset }}">下一页</a></p>{% endif %}
 {% endblock %}

@@ -1,18 +1,21 @@
 {% extends "base.html" %}
 {% block title %}信源、阅读列表与知识库 · Second Brain{% endblock %}
 {% block content %}
-<h1>信源 → 阅读列表 → 知识库</h1>
-<p class="meta">阅读和讨论可以留在外部。这里只维护你选中的稍后清单，登记阅读后由 AI 增量整理知识。</p>
-<div class="home-actions">
-  <a class="fb" href="/sources">信源 · {{ sources_count }} 个</a>
-  <a class="fb primary" href="/later">阅读列表 · {{ later }} 份</a>
-  <a class="fb" href="/wiki">知识库 · {{ pages }} 页</a>
+<div class="page-header">
+  <div><p class="eyebrow">个人工作空间</p><h1>从感兴趣，到理解</h1><p class="meta">收集值得读的内容，学习之后，留下一张自己的知识网络。</p></div>
+  <a class="fb primary" href="/add">添加材料</a>
 </div>
-<p><a href="/add">添加材料</a> · <a href="/materials">材料存档 · {{ count }} 份</a></p>
-<h2>稍后阅读</h2>
-{% for row in rows %}<article class="card" data-item-id="{{ row.id }}">
-<h3><a href="/item/{{ row.id }}">{{ row.title }}</a></h3>
-<p class="meta">由你主动加入；<a href="/item/{{ row.id }}#register-read">登记已读并整理</a></p>
-</article>{% else %}<p class="empty">阅读列表为空。关注信源不会自动加入文章；可以从信源预览挑选，或直接添加 URL、论文、PDF、文本。</p>{% endfor %}
-<details><summary>辅助工具</summary><p><a href="/recommendations">旧推荐结果</a> · <a href="/history">推荐历史</a> · <a href="/ops">设置与用量</a></p></details>
+<div class="stats-grid">
+  <a class="stat-card" href="/later"><span>稍后阅读</span><strong>{{ later }}</strong><small>由你选择，不自动填充</small></a>
+  <a class="stat-card" href="/sources"><span>关注信源</span><strong>{{ sources_count }}</strong><small>持续发现值得读的内容</small></a>
+  <a class="stat-card" href="/wiki"><span>知识页面</span><strong>{{ pages }}</strong><small>登记阅读后增量整理</small></a>
+</div>
+<div class="panel-header"><h2>接下来想读</h2><a class="fb ghost small" href="/later">查看阅读列表 →</a></div>
+<div class="compact-list">
+{% for row in rows %}<article class="list-row" data-item-id="{{ row.id }}">
+  <div class="row-main"><h3><a href="/item/{{ row.id }}">{{ row.title }}</a></h3><p class="meta">等待你的一次阅读或讨论</p></div>
+  <div class="row-actions"><a class="fb small" href="/item/{{ row.id }}#register-read">登记阅读</a></div>
+</article>{% else %}<div class="empty"><h3>阅读列表还是空的</h3><p>从关注的信源挑选文章，或添加链接、论文、PDF 和文本。</p><a class="fb" href="/sources">浏览信源</a></div>{% endfor %}
+</div>
+<p class="meta section-note">所有已保存内容都在<a href="/materials">材料存档 · {{ count }} 份</a>中。阅读和讨论可以留在外部，回来登记即可。</p>
 {% endblock %}

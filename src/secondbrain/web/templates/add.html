@@ -1,13 +1,22 @@
 {% extends "base.html" %}
 {% block title %}导入材料 · Second Brain{% endblock %}
 {% block content %}
-<h1>添加材料</h1>
-<p class="meta">文章、论文、网页、PDF 和文本共用一个材料入口。默认加入你自己的稍后阅读清单；已在外部读过的内容可以直接登记并整理。持续更新的主页可去<a href="/sources">信源</a>关注。</p>
-
-<h2>URL / PDF / 文本</h2>
-
-<form hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" hx-encoding="multipart/form-data" enctype="multipart/form-data" class="add-form">
-  <div class="field">
+<header class="page-header">
+  <div><p class="eyebrow">材料入口</p><h1>添加材料</h1><p class="meta">从链接、论文、文件或文本开始，默认加入稍后阅读。已读内容可以直接登记学习记录。</p></div>
+  <div class="page-actions"><a class="fb" href="/sources">关注持续更新的主页</a></div>
+</header>
+<div data-intake>
+<div class="subnav intake-tabs" role="tablist" aria-label="材料类型" hidden>
+  <button id="intake-tab-link" class="fb" type="button" role="tab" data-intake-type="link" aria-controls="intake-manual">链接</button>
+  <button id="intake-tab-paper" class="fb" type="button" role="tab" data-intake-type="paper" aria-controls="paper-name">论文</button>
+  <button id="intake-tab-file" class="fb" type="button" role="tab" data-intake-type="file" aria-controls="intake-manual">文件</button>
+  <button id="intake-tab-text" class="fb" type="button" role="tab" data-intake-type="text" aria-controls="intake-manual">文本</button>
+</div>
+<section id="intake-manual" class="panel form-panel" data-intake-panel="link file text">
+<h2 data-intake-heading>链接、PDF 或文本</h2>
+<p class="help">链接可批量添加；文件和文本可独立保存，也可用于补充单个链接的正文。</p>
+<form action="/add" method="post" hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" hx-encoding="multipart/form-data" enctype="multipart/form-data" class="add-form" data-intake-form>
+  <div class="field" data-intake-field="link">
     <label for="add-urls">链接</label>
     <textarea id="add-urls" name="urls" rows="4" placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234"></textarea>
     <p class="help">每行一个，可批量。arXiv 链接取 HTML 或 PDF 正文；含 DOI 的链接（doi.org、ACM DL 等）先查 Semantic Scholar，取不到全文时只导入标题与摘要。</p>
@@ -24,7 +33,7 @@
     <label class="choice"><input type="radio" name="state" value="unread"> 仅保存到材料存档，不加入清单</label>
   </fieldset>
 
-  <fieldset class="field when-read">
+  <fieldset class="field when-read" data-intake-read>
     <legend>外部学习记录（登记已读时使用；仅单份材料）</legend>
     <label for="add-learning-notes">可粘贴 ChatGPT 讨论结论或自己的笔记</label>
     <textarea id="add-learning-notes" name="learning_notes" rows="5"></textarea>
@@ -32,24 +41,30 @@
     <input id="add-discussion" type="url" name="discussion_url">
   </fieldset>
 
-  <fieldset class="field">
-    <legend>独立材料或单个链接的补充正文（二选一）</legend>
-    <label for="add-text">粘贴正文</label>
-    <textarea id="add-text" name="text" rows="8"></textarea>
-    <label for="add-pdf">或上传 PDF</label>
-    <input id="add-pdf" type="file" name="pdf" accept="application/pdf,.pdf">
-    <p class="help">不填 URL 也可独立导入。PDF ≤30MB，保留原文件；只有摘要的内容会明确标注，不作为全文。</p>
-  </fieldset>
+  <details class="field" open data-intake-content>
+    <summary data-intake-content-label>独立材料或单个链接的补充正文（二选一）</summary>
+    <div class="field" data-intake-field="link text">
+      <label for="add-text">粘贴正文</label>
+      <textarea id="add-text" name="text" rows="8"></textarea>
+    </div>
+    <div class="field" data-intake-field="link file">
+      <label for="add-pdf">上传 PDF</label>
+      <input id="add-pdf" type="file" name="pdf" accept="application/pdf,.pdf">
+      <p class="help">PDF ≤30MB，保留原文件；只有摘要的内容会明确标注，不作为全文。</p>
+    </div>
+  </details>
 
-  <label class="choice"><input type="checkbox" name="reference_only" value="1"> 仅保存网页引用，不抓取正文（适合网站或无法公开访问的讨论；整理时需提供学习笔记）</label>
+  <label class="choice" data-intake-field="link"><input type="checkbox" name="reference_only" value="1"> 仅保存网页引用，不抓取正文（适合网站或无法公开访问的讨论；整理时需提供学习笔记）</label>
   <div class="field">
     <button type="submit" class="fb primary">添加</button>
     <p class="help">加入清单本身不调用 LLM。登记已读才增量整理；正文与学习记录都没变化时复用已有结果。失败保留材料和已读记录。</p>
   </div>
 </form>
+</section>
 {% with kind="manual_add", message=None %}{% include "_task.html" %}{% endwith %}
-<section id="paper-name">
+<section id="paper-name" class="panel form-panel" data-intake-panel="paper">
 <h2>按论文名导入</h2>
+<p class="help">已有 arXiv 或 DOI 链接？也可以在“链接”中直接添加。</p>
 <form action="/papers/add" method="post" class="add-form">
   <div class="field"><label for="paper-query">论文名</label><input id="paper-query" name="query" type="text" required maxlength="1000" placeholder="Attention Is All You Need"></div>
   <p class="help">后台检索公开元数据与正文；同名或版本不明确时先选择，不会猜测导入。找不到全文会明确标记仅摘要。</p>
@@ -57,4 +72,6 @@
   <button type="submit" class="fb primary">检索并导入论文</button>
 </form>
 </section>
+</div>
+<script src="/static/intake.js" defer></script>
 {% endblock %}

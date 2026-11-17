@@ -1,15 +1,17 @@
-{% if error %}<p class="refresh">{{ error }}</p>{% endif %}
+{% if error %}<p class="refresh" role="alert">{{ error }}</p>{% endif %}
 {% if result %}
-<h3>{{ result.title or result.homepage }}</h3>
-<p><a href="{{ result.homepage }}" target="_blank" rel="noopener">打开主页</a> · 获取方式：{{ result.method }}</p>
+<section class="source-preview">
+<h3 class="break-anywhere">{{ result.title or result.homepage }}</h3>
+<p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · 获取方式：{{ result.method }}</p>
 {% for warning in result.warnings %}<p class="refresh">{{ warning }}</p>{% endfor %}
 {% if result.source %}
 {% if result.method == "bookmark" %}<p>可保存为手动浏览的信源；目前不能自动列举内容，不会伪造更新或自动加入阅读列表。</p>{% endif %}
-<form method="post" action="/sources/home/follow" class="source-form">
+<form method="post" action="/sources/home/follow" class="source-form form-panel">
 <input type="hidden" name="url" value="{{ result.homepage }}">
 <label>关注标识 <input name="source_id" value="{{ result.source.id }}" required pattern="[a-z0-9][a-z0-9-]*"></label>
 <button class="fb primary" type="submit">确认关注此主页</button>
 </form>
 {% with source=result.source, entries=result.entries, total=result.entries|length, channel=result.homepage, error=None %}{% include "_peek.html" %}{% endwith %}
 {% endif %}
+</section>
 {% endif %}

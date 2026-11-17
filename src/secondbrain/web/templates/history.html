@@ -1,9 +1,14 @@
 {% extends "base.html" %}
 {% block title %}历史 · Second Brain{% endblock %}
 {% block content %}
-<h1>历史</h1>
+<header class="page-header">
+  <div><p class="eyebrow">辅助记录</p><h1>推荐历史</h1><p class="meta">按日期查看以往的分级结果；这里不是你的阅读清单。</p></div>
+  <div class="page-actions"><a class="fb" href="/recommendations">查看推荐结果</a></div>
+</header>
+<section class="panel">
 {% include "_filters.html" %}
 {% if days %}
+<div class="table-scroll" role="region" aria-label="每日推荐统计" tabindex="0">
 <table class="days">
   <tr><th>日期</th><th>必读</th><th>温故</th><th>意外</th><th>值得读</th><th>顺延</th><th>速览</th><th>合计</th></tr>
   {% for d in days %}
@@ -14,7 +19,9 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 {% else %}
 <p class="empty">还没有 digest，先运行 <code>uv run sb run</code>。</p>
 {% endif %}
+</section>
 {% endblock %}

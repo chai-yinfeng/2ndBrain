@@ -1,24 +1,29 @@
 {% extends "base.html" %}
 {% block title %}画像 · Second Brain{% endblock %}
 {% block content %}
-<h1>画像 profile.md</h1>
-<p class="meta">{{ path }}</p>
-{% if saved %}<p class="saved">已保存；旧版本备份为 {{ saved }}</p>{% endif %}
-{% for w in profile.warnings %}<p class="refresh">⚠ {{ w }}</p>{% endfor %}
+<header class="page-header">
+  <div><p class="eyebrow">学习偏好</p><h1>个人画像</h1><p class="meta">查看领域掌握度，维护用于个性化过滤的 profile.md。</p></div>
+  <div class="page-actions"><a class="fb" href="/ops">设置与管理</a></div>
+</header>
+<p class="meta break-anywhere">{{ path }}</p>
+{% if saved %}<p class="saved" role="status">已保存；旧版本备份为 {{ saved }}</p>{% endif %}
+{% for w in profile.warnings %}<p class="refresh" role="alert">{{ w }}</p>{% endfor %}
 
 {% if profile.domains %}
-<section class="entry">
+<section class="panel">
   <h2>领域掌握度（解析结果）</h2>
+  <div class="table-scroll" role="region" aria-label="领域掌握度" tabindex="0">
   <table class="scores">
     <tr><th>领域</th><th>掌握度</th><th>优先级</th></tr>
     {% for d in profile.domains %}
     <tr><td>{{ d.domain }}</td><td>{{ d.mastery or ("未识别：" ~ d.raw_mastery) }}</td><td>{{ d.priority }}</td></tr>
     {% endfor %}
   </table>
+  </div>
 </section>
 {% endif %}
 
-<section class="entry">
+<section class="panel">
   <h2>根据反馈生成修改提案</h2>
   <p class="meta">读取近期文章反馈（不感兴趣 / 太浅 / 有收获 / 太难 / 没价值），由 strong 模型提出修改；每条都带反馈证据，代码按规则校验（升级需要"太浅"，降级需要"太难"，每次一级）。应用前会自动备份。</p>
   <button type="button" class="fb" hx-post="/profile/propose" hx-target="#proposal" hx-swap="innerHTML"
@@ -28,11 +33,11 @@
   <div id="proposal"></div>
 </section>
 
-<section class="entry">
-  <h2>编辑</h2>
-  <form method="post" action="/profile">
-    <textarea name="text" rows="28" class="editor">{{ text }}</textarea>
-    <p><button type="submit" class="fb">保存（自动备份旧版本）</button></p>
+<section class="panel form-panel">
+  <h2>编辑画像</h2>
+  <form method="post" action="/profile" class="add-form">
+    <div class="field"><label for="profile-text">profile.md 内容</label><textarea id="profile-text" name="text" rows="28" class="editor">{{ text }}</textarea></div>
+    <p><button type="submit" class="fb primary">保存（自动备份旧版本）</button></p>
   </form>
 </section>
 {% endblock %}

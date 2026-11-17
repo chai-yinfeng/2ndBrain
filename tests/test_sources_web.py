@@ -66,6 +66,11 @@ def test_unconfigured_sources_are_reference_only(client, env):
     assert 'href="/sources"' in html
 
 
+def test_configured_sources_show_real_config_location(client, env):
+    html = client.get("/sources").text
+    assert str(personal(env)) in html
+
+
 def test_preview_does_not_write(client, env):
     before = personal(env).read_bytes()
     form = {"id": "my-blog", "type": "rss", "url": FEED, "trust": "4", "tags": "a, b，c"}
@@ -91,7 +96,7 @@ def test_preview_sitemap_and_validation(client):
     assert "试抓成功：解析到 4 条" in html and "URL slug" in html
     assert "2026-11-02-hicache" in html
     bad = client.post("/sources/preview", data={"id": "Bad ID", "type": "rss", "url": "x"}).text
-    assert "✗" in bad and "id" in bad
+    assert "id" in bad
     dup = client.post("/sources/preview", data={"id": "vllm-blog", "type": "rss", "url": FEED})
     assert "信源 id 已存在：vllm-blog" in dup.text
     missing = client.post("/sources/preview", data={"id": "x", "type": "rss", "url": FEED + "x"})
@@ -139,5 +144,4 @@ def test_last_fetch_is_recorded_and_shown(client, env, make_client):
     assert overview["vllm-blog"]["items"] == overview["vllm-blog"]["last_fetch_added"] > 0
     assert overview["pytorch-blog"]["last_fetch_status"] == "failed"
     html = client.get("/sources").text
-    row = html.split('data-source="pytorch-blog"', 1)[1].split("</tr>", 1)[0]
-    assert "✗" in row and "HTTP 404" in row
+    assert "HTTP 404" in html

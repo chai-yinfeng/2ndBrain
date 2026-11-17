@@ -1,8 +1,11 @@
 {% extends "base.html" %}
 {% block title %}论文导入 · Second Brain{% endblock %}
 {% block content %}
-<h1>论文导入</h1>
-<p class="meta">检索、消歧与下载在后台执行。可刷新本页查看同一任务；整理不改变阅读状态。</p>
+<header class="page-header">
+  <div><p class="eyebrow">添加材料</p><h1>论文导入</h1><p class="meta">检索、消歧与下载在后台执行。可刷新本页查看同一任务；整理不改变阅读状态。</p></div>
+  <div class="page-actions"><a class="fb" href="/add#paper-name">导入另一篇论文</a></div>
+</header>
+<section class="panel">
 {% include "_task.html" %}
-<p><a href="/add#paper-name">导入另一篇论文</a></p>
+</section>
 {% endblock %}

@@ -1,49 +1,41 @@
 {% extends "base.html" %}
 {% block title %}设置与管理 · Second Brain{% endblock %}
 {% block content %}
-<h1>设置与管理</h1>
-<p><a href="/profile">学习偏好</a> · <a href="/sources">信源</a> · <a href="/materials">材料存档</a> · <a href="/recommendations">旧推荐结果</a> · <a href="/history">推荐历史</a></p>
+<header class="page-header">
+  <div><p class="eyebrow">工作区</p><h1>设置与管理</h1><p class="meta">配置服务、查看用量和运行任务。每项修改由你主动确认。</p></div>
+  <div class="page-actions"><a class="fb" href="/profile">学习偏好</a></div>
+</header>
+<nav class="subnav" aria-label="设置分区"><a href="#settings">配置</a><a href="#usage">用量</a><a href="#run">运行</a><a href="#assistance">辅助入口</a></nav>
 
-<section class="entry">
-  <h2>立即运行</h2>
-  <p class="meta">后台执行与 <code>sb run</code> 相同的流程：抓取全部信源 → L0 → L1 → L2 → 分级，写入今天的 digest。通常 2–5 分钟；费用取决于新条目数，单次 L2 预估超过 run.max_cost_usd=${{ max_cost }} 时不调用 L2。CLI、定时任务与这里共用一把锁，同一时间只跑一个。</p>
-  <p class="{{ 'refresh' if peak else 'meta' }}" data-peak="{{ 'true' if peak else 'false' }}">
-    {% if peak %}当前是 DeepSeek 高峰时段：按全价计费（非高峰为 ×{{ multiplier }}）。{% else %}当前不是 DeepSeek 高峰时段：费用 ×{{ multiplier }}。{% endif %}
-  </p>
-  {% if running and not (run_task and run_task.running) %}<p class="refresh">已有 sb run 在运行（CLI 或定时任务）。</p>{% endif %}
-  <form hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML" class="start-form">
-    <button type="submit" class="fb">立即运行</button>
-    <label class="meta"><input type="checkbox" name="all_time" value="1"> 不限时间窗（只去重；每个信源仍只取最新 fetch_limit 条）</label>
-  </form>
-  {% with kind="run", task=run_task, message=None %}{% include "_task.html" %}{% endwith %}
-</section>
 
-<section class="entry" id="settings">
-  <h2>设置</h2>
-  <h3>API key</h3>
+<section class="panel form-panel" id="settings">
+  <h2>服务配置</h2>
+  <details><summary>LLM API key</summary>
   <p>{{ setting.key }}：{% if setting.key_source %}<b>已设置</b>（来源：{{ setting.key_source }}）{% else %}<b>未设置</b>{% endif %}{% if setting.backend == "fake" %} · 当前后端 fake 不需要 key{% endif %}</p>
   {% if setting.shell_override %}<p class="refresh">环境变量优先：该 key 来自启动服务时的环境变量，.env 的修改需要重启服务或 unset 后才生效。</p>{% endif %}
   <form hx-post="/ops/settings/key" hx-target="#key-result" class="start-form" autocomplete="off">
-    <input type="password" name="value" placeholder="粘贴新的 {{ setting.key }}" autocomplete="new-password">
+    <input type="password" name="value" aria-label="新的 {{ setting.key }}" placeholder="粘贴新的 {{ setting.key }}" autocomplete="new-password">
     <button type="submit" class="fb">保存到 .env</button>
   </form>
   <p class="meta">写入 {{ setting.env_file }}：只替换这一行，保留其他行与注释，原子写入并设为仅本人可读（600），立即生效；页面与日志都不会显示 key。留空提交不做修改。</p>
   {% if setting.key_in_dotenv %}<button type="button" class="fb" hx-post="/ops/settings/key/clear" hx-target="#key-result" hx-confirm="从 .env 删除 {{ setting.key }} 这一行？">清除</button>{% endif %}
   <div id="key-result"></div>
+  </details>
 
-  <h3>Semantic Scholar API key（可选）</h3>
+  <details><summary>Semantic Scholar API key（可选）</summary>
   <p>S2_API_KEY：{% if setting.s2.source %}<b>已设置</b>（来源：{{ setting.s2.source }}）{% else %}<b>未设置</b>{% endif %}</p>
   {% if setting.s2.source == "环境变量" %}<p class="refresh">环境变量优先：该 key 来自启动服务时的环境变量，.env 的修改需要重启服务或 unset 后才生效。</p>{% endif %}
   <form hx-post="/ops/settings/key" hx-target="#s2-key-result" class="start-form" autocomplete="off">
     <input type="hidden" name="name" value="S2_API_KEY">
-    <input type="password" name="value" placeholder="粘贴 S2_API_KEY" autocomplete="new-password">
+    <input type="password" name="value" aria-label="新的 S2_API_KEY" placeholder="粘贴 S2_API_KEY" autocomplete="new-password">
     <button type="submit" class="fb">保存到 .env</button>
   </form>
   <p class="meta">手动添加 DOI 链接时查询 Semantic Scholar 用；不填也能用，只是更容易被限流（429）。写入规则同上，不回显。</p>
   {% if setting.s2.in_dotenv %}<button type="button" class="fb" hx-post="/ops/settings/key/clear" hx-vals='{"name": "S2_API_KEY"}' hx-target="#s2-key-result" hx-confirm="从 .env 删除 S2_API_KEY 这一行？">清除</button>{% endif %}
   <div id="s2-key-result"></div>
+  </details>
 
-  <h3>测试连接</h3>
+  <h3>连接状态</h3>
   <button type="button" class="fb" hx-post="/ops/settings/ping" hx-target="#ping-result" hx-indicator="#ping-loading">测试连接</button>
   <span class="meta">用当前后端与 cheap 模型发一个极小请求（max_tokens=1，不到 $0.0001），记入用量（阶段 PING）；只显示成功与否、模型与耗时。</span>
   <span id="ping-loading" class="htmx-indicator meta">测试中…</span>
@@ -61,9 +53,38 @@
   <p class="meta">cheap 用于 L1 粗筛与分块提要，strong 用于 L2、深度速读、补前置、wiki ingest、profile 提案；选项来自价格表。只把与 settings.example.yaml 不同的键写入 config/settings.yaml，保存后下一次请求 / 运行立即生效（有运行在进行时对下次运行生效）。</p>
   <div id="models-result"></div>
 </section>
+<section class="panel" id="usage">
+  <h2>LLM 用量</h2>
+  {% for label, rows, cost in (("今天", today_rows, today_cost), ("近 7 天", week_rows, week_cost)) %}
+  <h3>{{ label }} <small class="meta">估算 ${{ "%.4f" | format(cost) }}</small></h3>
+  {% if rows %}
+  <div class="table-scroll" role="region" aria-label="{{ label }} LLM 用量" tabindex="0">
+  <table class="scores">
+    <tr><th>阶段</th><th>模型</th><th>调用</th><th>prompt</th><th>cache hit</th><th>completion</th><th>费用</th></tr>
+    {% for r in rows %}
+    <tr><td>{{ r.stage }}</td><td>{{ r.model }}</td><td>{{ r.calls }}</td><td>{{ r.prompt_tokens }}</td><td>{{ r.cache_hit_tokens }}</td><td>{{ r.completion_tokens }}</td><td>${{ "%.4f" | format(r.cost_usd) }}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}<p class="empty">（没有 LLM 调用记录）</p>{% endif %}
+  {% endfor %}
+</section>
+<section class="panel form-panel" id="run">
+  <h2>立即运行</h2>
+  <p class="meta">后台执行与 <code>sb run</code> 相同的流程：抓取全部信源 → L0 → L1 → L2 → 分级，写入今天的 digest。通常 2–5 分钟；费用取决于新条目数，单次 L2 预估超过 run.max_cost_usd=${{ max_cost }} 时不调用 L2。CLI、定时任务与这里共用一把锁，同一时间只跑一个。</p>
+  <p class="{{ 'refresh' if peak else 'meta' }}" data-peak="{{ 'true' if peak else 'false' }}">
+    {% if peak %}当前是 DeepSeek 高峰时段：按全价计费（非高峰为 ×{{ multiplier }}）。{% else %}当前不是 DeepSeek 高峰时段：费用 ×{{ multiplier }}。{% endif %}
+  </p>
+  {% if running and not (run_task and run_task.running) %}<p class="refresh">已有 sb run 在运行（CLI 或定时任务）。</p>{% endif %}
+  <form hx-post="/tasks/run" hx-target="#task-run" hx-swap="outerHTML" class="start-form">
+    <button type="submit" class="fb primary">立即运行</button>
+    <label class="meta"><input type="checkbox" name="all_time" value="1"> 不限时间窗（只去重；每个信源仍只取最新 fetch_limit 条）</label>
+  </form>
+  {% with kind="run", task=run_task, message=None %}{% include "_task.html" %}{% endwith %}
+</section>
 
-<section class="entry" id="schedule" data-mode="{{ 'auto' if sched.installed else 'manual' }}">
-  <h2>运行方式</h2>
+<section class="panel form-panel" id="schedule" data-mode="{{ 'auto' if sched.installed else 'manual' }}">
+  <h2>定时运行</h2>
   {% if sched.installed %}
     <p>当前：<b>每天 {{ sched.at.strftime("%H:%M") if sched.at else "（时间无法解析）" }} 自动运行</b> · LaunchAgent {{ "已加载" if sched.loaded else "未加载" }}</p>
     <button type="button" class="fb" hx-post="/ops/schedule/uninstall" hx-target="#schedule-result" hx-confirm="改为手动：卸载每日自动运行（launchctl unload，并删除 plist）？">改为手动</button>
@@ -79,29 +100,15 @@
   <div id="schedule-result"></div>
 </section>
 
-<section class="entry">
-  <h2>LLM 用量</h2>
-  {% for label, rows, cost in (("今天", today_rows, today_cost), ("近 7 天", week_rows, week_cost)) %}
-  <h3>{{ label }} <small class="meta">估算 ${{ "%.4f" | format(cost) }}</small></h3>
-  {% if rows %}
-  <table class="scores">
-    <tr><th>阶段</th><th>模型</th><th>调用</th><th>prompt</th><th>cache hit</th><th>completion</th><th>费用</th></tr>
-    {% for r in rows %}
-    <tr><td>{{ r.stage }}</td><td>{{ r.model }}</td><td>{{ r.calls }}</td><td>{{ r.prompt_tokens }}</td><td>{{ r.cache_hit_tokens }}</td><td>{{ r.completion_tokens }}</td><td>${{ "%.4f" | format(r.cost_usd) }}</td></tr>
-    {% endfor %}
-  </table>
-  {% else %}<p class="empty">（没有 LLM 调用记录）</p>{% endif %}
-  {% endfor %}
+
+<section class="panel" id="assistance">
+  <h2>辅助入口</h2>
+  <div class="compact-list">
+    <div class="list-row"><div class="row-main"><h3><a href="/sources">信源配置</a></h3><p class="meta">手动关注、停用与删除信源；trust 手动设置。反馈影响 AI 判断，不调整信源（ADR 0018）。</p></div></div>
+    <div class="list-row"><div class="row-main"><h3><a href="/profile">学习偏好与画像</a></h3><p class="meta">根据近期反馈生成修改提案（strong 模型，约几美分），确认后才写入并自动备份。</p></div></div>
+    <div class="list-row"><div class="row-main"><h3>材料与推荐记录</h3><p class="meta"><a href="/materials">材料存档</a> · <a href="/recommendations">旧推荐结果</a> · <a href="/history">推荐历史</a></p></div></div>
+  </div>
+  {% if sources_error %}<p class="refresh" role="alert">{{ sources_error }}</p>{% endif %}
 </section>
 
-<section class="entry">
-  <h2>信源</h2>
-  <p class="meta">信源由你手动维护：在 <a href="/sources">信源</a> 页添加 / 停用 / 删除，trust 手动设置。反馈只影响 AI 判断（画像、few-shot、画像修改提案），不再用于调整信源（ADR 0018）。</p>
-  {% if sources_error %}<p class="refresh">✗ {{ sources_error }}</p>{% endif %}
-</section>
-
-<section class="entry">
-  <h2>画像调整建议</h2>
-  <p class="meta">在 <a href="/profile">画像</a> 页根据近期反馈生成 profile.md 修改提案（strong 模型，约几美分），确认后才写入并自动备份。</p>
-</section>
 {% endblock %}
