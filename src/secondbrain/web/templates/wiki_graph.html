@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}知识图谱 · Wiki{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/wiki_graph.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">{% endblock %}
 {% block content %}
 <header class="page-header">
   <div><p class="eyebrow">KNOWLEDGE WORKSPACE</p><h1>知识图谱 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">从一个概念出发，沿页面链接探索。连线不代表因果、引用或前置关系。</p></div>
@@ -43,7 +43,7 @@
     </aside>
   </div>
 </section>
-<script src="/static/cytoscape.min.js"></script>
-<script src="/static/wiki_graph.js" defer></script>
+<script src="{{ static_asset('cytoscape.min.js') }}"></script>
+<script src="{{ static_asset('wiki_graph.js') }}" defer></script>
 {% endif %}
 {% endblock %}

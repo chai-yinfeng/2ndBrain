@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ page.title }} · Wiki{% endblock %}
 {% block head %}
-<link rel="stylesheet" href="/static/wiki_graph.css">
-<link rel="stylesheet" href="/static/katex/katex.min.css">
-<script src="/static/katex/katex.min.js" defer></script>
-<script src="/static/wiki_math.js" defer></script>
+<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">
+<link rel="stylesheet" href="{{ static_asset('katex/katex.min.css') }}">
+<script src="{{ static_asset('katex/katex.min.js') }}" defer></script>
+<script src="{{ static_asset('wiki_math.js') }}" defer></script>
 {% endblock %}
 {% block content %}
 <article class="detail wiki-article" data-wiki-page="{{ page.slug }}">

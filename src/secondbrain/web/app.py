@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -14,6 +15,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
@@ -27,6 +29,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 from pydantic import ValidationError
 
 from secondbrain import __version__, config, db, ops, schedule, sources_file
@@ -73,6 +76,22 @@ PAGE_LANES = (
 )
 LANE_TITLES = dict(PAGE_LANES) | {"fyi": "速览", "archived": "归档"}
 
+
+@lru_cache(maxsize=64)
+def _asset_digest(path: Path, _stamp: tuple[int, int, int]) -> str:
+    """文件元数据作为缓存失效键，避免每次渲染重复读取静态资源。"""
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()[:16]
+
+
+@pass_context
+def _static_asset(context, name: str) -> str:
+    path = STATIC_DIR / name
+    stat = path.stat()
+    digest = _asset_digest(path, (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+    return str(context["request"].url_for("static", path=name).include_query_params(v=digest))
+
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.globals.update(
     feedback_kinds=db.FEEDBACK_KINDS,
@@ -81,6 +100,7 @@ templates.env.globals.update(
     grade_hints=GRADE_HINTS,
     lane_titles=LANE_TITLES,
     version=__version__,
+    static_asset=_static_asset,
 )
 
 
@@ -438,7 +458,12 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         )
         if problem:
             return PlainTextResponse(f"403 Forbidden：{problem}", status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        elif response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     tasks = TaskRegistry()

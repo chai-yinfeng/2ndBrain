@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}知识库 · Second Brain{% endblock %}
-{% block head %}<link rel="stylesheet" href="/static/wiki_graph.css">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">{% endblock %}
 {% block content %}
 <header class="page-header"><div><p class="eyebrow">KNOWLEDGE WORKSPACE</p><h1>知识库 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">登记阅读后由 AI 增量生成概念与关联。机器草稿默认不在这里展示；历史页面保留但不冒充新登记记录。</p></div><div class="page-actions"><a class="fb" href="/materials?reading=read">已登记材料</a><a class="fb primary" href="/wiki/graph">探索知识图谱</a></div></header>
 <nav class="subnav" aria-label="知识库视图"><a href="/wiki" aria-current="page">知识页面</a><a href="/wiki/graph">知识图谱</a><a href="/later">阅读列表</a></nav>

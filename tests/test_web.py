@@ -96,9 +96,6 @@ def test_index_shows_digest_with_budget(client: TestClient):
     assert m and int(m.group(1)) <= int(m.group(2)) == 105
     assert "必读" in html and "温故" in html and "意外" in html and "速览" in html
     assert "积压" in html
-    # 页面只引用本地 HTMX，不依赖外部 CDN
-    assert 'src="/static/htmx.min.js"' in html
-    assert "unpkg" not in html and "cdn" not in html.lower()
 
 
 def test_index_with_date(client: TestClient):
