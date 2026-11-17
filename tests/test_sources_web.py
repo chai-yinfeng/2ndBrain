@@ -1,6 +1,7 @@
 """M7：Web /sources 信源管理（ADR 0013）——列表、试抓、保存、启停、删除确认、最近抓取记录。"""
 
 import shutil
+import socket
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     shutil.copy(conf / "sources.example.yaml", conf / "sources.yaml")
     monkeypatch.setenv("SB_DATA_DIR", str(data))
     monkeypatch.setattr(config, "CONFIG_DIR", conf)
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, port, *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
 
     def offline_client(fs):
         routes = {

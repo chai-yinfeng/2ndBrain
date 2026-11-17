@@ -24,6 +24,13 @@
     }
   });
   document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("[data-disclosure]").forEach(button => {
+      const details = document.getElementById(button.dataset.disclosure);
+      const sync = () => button.setAttribute("aria-expanded", String(details.open));
+      button.addEventListener("click", () => { details.open = !details.open; sync(); });
+      details.addEventListener("toggle", sync);
+      sync();
+    });
     const select = document.getElementById("theme-select");
     select.disabled = false;
     select.value = preference;

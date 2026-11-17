@@ -215,3 +215,12 @@ class PrereqExplanation(BaseModel):
 
 class PrereqExplanations(BaseModel):
     items: list[PrereqExplanation] = Field(default_factory=list)
+
+
+class SourceProfile(BaseModel):
+    """基于有限内容样本的领域 / 内容性质建议；与获取方式、人工 tags 分开。"""
+
+    domains: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(max_length=6)
+    content_kinds: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(max_length=4)
+    summary: str = Field(min_length=1, max_length=600)
+    confidence: Literal["low", "medium", "high"]

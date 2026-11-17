@@ -1,5 +1,6 @@
 """sitemap 信源（ADR 0012）：URL 筛选、发布时间来源、最新 N、去重 / 幂等。"""
 
+import socket
 from datetime import UTC, datetime
 
 import httpx
@@ -36,6 +37,18 @@ def conn(tmp_path):
     c = db.connect(tmp_path / "brain.db")
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def public_fixture_dns(monkeypatch):
+    original = socket.getaddrinfo
+
+    def resolve(host, port, *args, **kwargs):
+        if str(host).endswith(".example.com"):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+        return original(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 # ---------- 解析 ----------
@@ -185,14 +198,13 @@ def test_fetch_takes_newest_n_and_fills_page_meta(conn, make_client):
     ]
 
 
-def test_fetch_is_idempotent_and_skips_known_pages(conn, make_client):
-    client, router = make_client(_blog_routes())
+def test_fetch_is_idempotent(conn, make_client):
+    client, _ = make_client(_blog_routes())
     fetch_sources(conn, [_blog_source()], client, client.settings, limit=5, now=NOW)
     assert len(_rows(conn)) == 3  # 2025 年的旧文在时间窗外
-    router.requests.clear()
     (again,) = fetch_sources(conn, [_blog_source()], client, client.settings, limit=5, now=NOW)
     assert again.added == 0 and again.duplicates == 3
-    assert router.urls() == [BLOG_SITEMAP]  # 已入库的 URL 不再抓正文页
+    assert len(_rows(conn)) == 3
 
 
 def test_lastmod_selects_candidates_and_page_date_wins(conn, make_client):

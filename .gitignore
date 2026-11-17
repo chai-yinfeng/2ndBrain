@@ -8,3 +8,4 @@ __pycache__/
 .DS_Store
 config/sources.yaml
 config/settings.yaml
+config/sources.lock

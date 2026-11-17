@@ -1,10 +1,10 @@
 {# POST /sources/<id>/peek 返回的片段：最新约 10 条标题与日期 #}
 {% if error %}<p class="refresh" role="alert">{{ error }}</p>{% else %}
 <div class="source-preview">
-<p class="meta">{{ source.id }}：解析到 {{ total }} 条，最新 {{ entries | length }} 条{% if source.type == "sitemap" %}（sitemap 显示 URL slug）{% endif %}{% if channel %} · <a href="{{ channel }}" target="_blank" rel="noopener noreferrer" title="{{ channel }}">打开主页</a>{% endif %}</p>
-<ul class="peek compact-list">{% for e in entries %}{% if e.url.startswith("https://") or e.url.startswith("http://") %}<li class="list-row">
+<p class="meta">{{ source.name or source.id }}：{% if manual %}手动浏览入口{% else %}解析到 {{ total }} 条{% if total %}，展示 {{ entries|length }} 条{% endif %}{% endif %}{% if source.type == "sitemap" %}（sitemap 显示 URL slug）{% endif %}{% if channel %} · <a href="{{ channel }}" target="_blank" rel="noopener noreferrer">打开主页</a>{% endif %}</p>
+{% if entries %}<ul class="peek compact-list">{% for e in entries %}{% if e.url.startswith("https://") or e.url.startswith("http://") %}<li class="list-row">
   <div class="row-main"><a href="{{ e.url }}" target="_blank" rel="noopener noreferrer">{{ e.title }}</a><p class="meta">{{ e.published_at.strftime("%Y-%m-%d") if e.published_at else "日期未知" }}</p></div>
-  <form class="row-actions" hx-post="/reading/import" hx-target="#task-manual_add" hx-swap="outerHTML"><input type="hidden" name="url" value="{{ e.url }}"><input type="hidden" name="origin_source_id" value="{{ source.id }}"><button class="fb" type="submit" aria-label="将 {{ e.title }} 加入阅读列表">加入阅读列表</button></form>
-</li>{% endif %}{% else %}<li class="empty">没有条目，可直接浏览主页挑选。</li>{% endfor %}</ul>
+  <form class="row-actions" hx-post="/reading/import" hx-target="#task-manual_add" hx-swap="outerHTML"><input type="hidden" name="url" value="{{ e.url }}"><input type="hidden" name="origin_source_id" value="{{ source.id }}"><button class="fb small" type="submit" aria-label="将 {{ e.title }} 加入阅读列表">加入阅读列表</button></form>
+</li>{% endif %}{% endfor %}</ul>{% else %}<p class="help">{{ '请在原站挑选文章后添加材料。' if manual else '采集方式有效，本次没有候选条目；这不表示识别失败。' }}</p>{% endif %}
 </div>
 {% endif %}

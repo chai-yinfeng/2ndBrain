@@ -29,6 +29,12 @@ uv run pytest -q
 uv run sb serve                                      # 本地 Web：http://127.0.0.1:8000/
 uv run sb sources follow https://example.com/         # 只识别主页并预览，不保存
 uv run sb sources follow https://example.com/ --apply # 明确关注，不自动导入文章
+uv run sb sources repair                            # 检查全部关注，默认不写配置、不调用模型
+uv run sb sources repair <source_id> --apply          # 原位修复采集配置，保留关注身份与人工字段
+uv run sb sources edit <source_id> --set 'name=我的博客' # 改显示名称；id=新标识会同步迁移引用
+uv run sb sources analyze <source_id>                # 显式分析内容领域/性质，可能调用 cheap 模型
+uv run sb sources catalog remove <catalog_id>        # 仅从参考目录移除，不取消关注
+uv run sb sources catalog clear                     # 清空参考目录；restore 恢复
 uv run sb add https://example.com/post                # 获取正文并加入个人稍后清单
 uv run sb add https://example.com/ --reference        # 仅保存网站引用，不请求页面
 uv run sb add --pdf paper.pdf --title "论文标题"       # 本地 PDF，同样进入稍后清单
@@ -64,13 +70,15 @@ uv run sb usage --since 7d                            # 模型用量和估算费
 Web 上的其他页面：
 
 - `/`：信源、阅读列表、知识库三个主入口；`/materials` 是材料存档，不等同于稍后清单。
-- `/sources`：添加博客/账号主页，先识别 RSS/HTML 列表/sitemap 并预览，确认后才关注；无法可靠提取时保存为手动浏览的主页，不假装存在 RSS。不执行站点 JavaScript、不绕过登录。预览文章后可逐篇加入清单，保留所选信源来源；关注本身不导入、不启动推荐。
-- 信源页的参考目录默认折叠，可展开、筛选和清除筛选；只有明确选择的条目会写入 `config/sources.yaml`，原有正式配置、注释和格式保留。
+- `/sources`：主页识别、目录预览和 CLI 统一复用已有适配器，优先已关注配置、完整参考规则，再做通用发现；HF Papers 用专用 API，DeepMind 用已知 RSS。网络失败、合法空结果和手动浏览明确区分，失败不覆盖已关注配置。sitemap index 有界展开；不执行站点脚本或绕过登录。预览选文才加入阅读列表，关注本身不导入、不启动推荐。
+- 来源行只显示名称/状态与操作，点击“设置”展开配置、领域和统计。显示名称可编辑；ID 改名会原位迁移材料来源及历史引用。参考目录支持筛选、单项移除、清空和恢复；只影响候选显示，不删除关注/材料，也不移除底层适配规则。原有配置顺序、未修改字段和注释保留。
 - `/later`：自己维护的稍后清单；可打开原站、移出清单，或进入详情补充学习记录后登记阅读。
 - `/add`：通用添加材料。URL 可获取正文或仅保存引用；也支持 PDF、文本和论文名。论文候选不明确时只询问身份/版本。
 - 条目详情页：个人学习笔记、讨论引用、登记阅读、复用/强制整理、来源及完整性；机器分析与推荐反馈折叠为辅助功能。
 - `/wiki`：正式知识库、已登记但整理失败的待处理材料、草稿入口；`/wiki/graph` 可直接在网页浏览图谱，无需启动 Obsidian。页面支持固定/禁止关联并保存原因，后续 AI 整理遵守人工约束，不覆盖个人笔记。
 - `/ops`：设置与管理，包含用量、运行方式、API key 状态/配置、模型及画像入口；`/recommendations` 与 `/history` 保留为辅助推荐与历史。
+
+来源的 `rss / hf_papers / sitemap` 是获取方式，不是内容领域。来源页免费显示匹配的参考标签和已有文章主题，并注明依据；“分析领域与性质”才显式采样最多10条标题/摘要并调用 cheap 模型，显示领域、内容性质、置信度与样本链接。建议独立保存，不覆盖手动标签，不读取全文、不导入材料；同输入复用缓存，强制重做才忽略缓存。失败保留旧结果，用量和错误记为 `SOURCE`，沿用现有预估费用上限。有限样本分类不等于理解整个网站。
 
 ### 界面与图谱
 

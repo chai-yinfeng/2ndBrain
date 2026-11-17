@@ -1,0 +1,10 @@
+{% if analysis %}{% set profile = analysis.profile %}
+<section class="source-analysis" aria-label="来源领域建议">
+  <h3>内容领域与性质 <span class="tag">AI 建议</span></h3>
+  <p>{% for domain in profile.domains %}<span class="tag">{{ domain }}</span>{% else %}<span class="meta">领域证据不足</span>{% endfor %}{% for kind in profile.content_kinds %}<span class="tag">{{ kind }}</span>{% endfor %}</p>
+  <p>{{ profile.summary }}</p>
+  <p class="meta">置信度：{{ {'low':'低','medium':'中','high':'高'}.get(profile.confidence, profile.confidence) }} · {{ analysis.analyzed_at }} · {{ analysis.model }}</p>
+  <details><summary>样本与判断依据（不是全文理解）</summary><p class="help">{{ profile.basis }}</p><ul>{% for evidence in profile.evidence %}<li><a href="{{ evidence.url }}" target="_blank" rel="noopener noreferrer">{{ evidence.title or evidence.url }}</a></li>{% endfor %}</ul></details>
+  <p class="help">这些建议独立保存，不覆盖手动标签，也不改变推荐、阅读或知识库状态。</p>
+</section>
+{% endif %}

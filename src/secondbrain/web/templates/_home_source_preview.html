@@ -2,16 +2,17 @@
 {% if result %}
 <section class="source-preview">
 <h3 class="break-anywhere">{{ result.title or result.homepage }}</h3>
-<p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · 获取方式：{{ result.method }}</p>
-{% for warning in result.warnings %}<p class="refresh">{{ warning }}</p>{% endfor %}
-{% if result.source %}
-{% if result.method == "bookmark" %}<p>可保存为手动浏览的信源；目前不能自动列举内容，不会伪造更新或自动加入阅读列表。</p>{% endif %}
-<form method="post" action="/sources/home/follow" class="source-form form-panel">
-<input type="hidden" name="url" value="{{ result.homepage }}">
-<label>关注标识 <input name="source_id" value="{{ result.source.id }}" required pattern="[a-z0-9][a-z0-9-]*"></label>
-<button class="fb primary" type="submit">确认关注此主页</button>
+<p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · 获取方式：{{ result.method }}{% if result.matched_from == 'followed' %} · 已关注：{{ result.matched_source_id }}（不会重复添加）{% elif result.matched_from == 'catalog' %} · 复用已知适配{% endif %}</p>
+{% for warning in result.warnings|unique %}<p class="refresh">{{ warning }}</p>{% endfor %}
+{% if result.source and result.status|default('ready') not in ['failed','rejected'] %}
+{% if result.method == "bookmark" %}<p class="help">只能保存为手动浏览入口，目前不能自动列举内容。</p>{% endif %}
+<form method="post" action="/sources/home/follow" class="source-home-confirm">
+  <input type="hidden" name="url" value="{{ result.homepage }}">
+  <label>显示名称<input name="name" maxlength="200" value="{{ result.source.name or result.title }}" required{% if result.matched_from == 'followed' and result.source.name %} readonly{% endif %}></label>
+  <label>关注标识<input name="source_id" value="{{ result.source.id }}" required pattern="[a-z0-9][a-z0-9-]*"{% if result.matched_from == 'followed' %} readonly{% endif %}></label>
+  <button class="fb primary" type="submit">{{ '更新已有来源的采集配置' if result.matched_from == 'followed' else '确认关注此来源' }}</button>
 </form>
-{% with source=result.source, entries=result.entries, total=result.entries|length, channel=result.homepage, error=None %}{% include "_peek.html" %}{% endwith %}
-{% endif %}
+{% with source=result.source, entries=result.entries, total=result.entries|length, channel=result.homepage, error=None, manual=result.method == 'bookmark' %}{% include "_peek.html" %}{% endwith %}
+{% elif result.source %}<p class="help">抓取未通过，未保存或覆盖任何配置。已有来源可在设置中检查和修复。</p>{% endif %}
 </section>
 {% endif %}

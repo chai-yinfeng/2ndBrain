@@ -1,7 +1,7 @@
-"""只读的信源主页预览：发现 feed、文章列表或可手动浏览的主页。
+"""统一的信源适配与主页发现。
 
-不保存配置、不导入材料。调用者须展示 warnings / entries，明确确认后才保存 source。
-网络读取使用现有 HttpClient 的 transport、超时和限速，但逐跳检查重定向并限流读取。
+预览不保存配置或导入材料；follow_source 仅在明确确认后新增或更新配置。
+网络读取复用现有 transport、超时和限速，逐跳检查公网并有界读取响应。
 """
 
 from __future__ import annotations
@@ -11,15 +11,16 @@ import ipaddress
 import re
 import socket
 from html.parser import HTMLParser
-from typing import TypedDict
-from urllib.parse import unquote, urldefrag, urljoin, urlsplit, urlunsplit
+from typing import Literal, TypedDict, cast
+from urllib.parse import parse_qsl, unquote, urldefrag, urlencode, urljoin, urlsplit, urlunsplit
 
 import feedparser
 import httpx
 
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
 from secondbrain.net import FetchError, HttpClient
-from secondbrain.sources import html_index, rss, sitemap
+from secondbrain.sources import FETCHERS, html_index, rss, sitemap
+from secondbrain.sources.homepage import source_homepage
 
 MAX_BYTES = 1_000_000
 MAX_LINKS = 500
@@ -44,6 +45,9 @@ class DiscoveryResult(TypedDict):
     source: SourceConfig | None
     entries: list[RawEntry]
     warnings: list[str]
+    status: Literal["ready", "empty", "failed", "manual", "rejected"]
+    matched_source_id: str | None
+    matched_from: Literal["followed", "catalog", "generic"]
 
 
 class _UnsafeURL(FetchError):
@@ -103,8 +107,16 @@ class _Reader:
         self.client = client
         self.remaining = MAX_REQUESTS
         self.max_bytes = min(MAX_BYTES, settings.content_max_chars * 4)
+        self.warnings: list[str] = []
+        self.title = ""
+        self.title_mode: str | None = None
 
-    def get(self, url: str, *, origin: tuple[str, str] | None = None) -> httpx.Response:
+    def get(
+        self, url: str, *, origin: tuple[str, str] | None = None,
+        params: dict[str, str | None] | None = None,
+    ) -> httpx.Response:
+        if params:
+            url = str(httpx.URL(url).copy_merge_params(params))
         for hop in range(MAX_REDIRECTS + 1):
             url = _public_url(url, resolve=True)
             if origin is not None and _origin(url) != origin:
@@ -139,10 +151,20 @@ class _Reader:
                         key: value for key, value in response.headers.items()
                         if key not in {"content-encoding", "content-length"}
                     }
-                    return httpx.Response(
+                    buffered = httpx.Response(
                         response.status_code, headers=headers, content=b"".join(chunks),
                         request=response.request,
                     )
+                    if self.title_mode == "feed":
+                        feed = feedparser.parse(buffered.content)
+                        if not feed.version:
+                            raise FetchError("采集地址未返回有效 RSS/Atom")
+                        self.title = str(feed.feed.get("title") or "")
+                    elif self.title_mode == "html":
+                        page = _Page(str(buffered.url))
+                        page.feed(buffered.text)
+                        self.title = " ".join(page.title.split())
+                    return buffered
             except httpx.HTTPError as exc:
                 raise FetchError("主页网络请求失败") from exc
         raise FetchError("主页重定向次数过多")
@@ -204,6 +226,11 @@ def _article_family(url: str, homepage: str) -> str | None:
         return None
     if any(not re.fullmatch(_SLUG, s) for s in segments):
         return None
+    scope = urlsplit(homepage).path.rstrip("/") + "/"
+    if scope != "/" and parts.path.startswith(scope) and len(segments) == len(
+        scope.strip("/").split("/")
+    ) + 1:
+        return scope
     if len(segments) == 2 and segments[0].lower() in _ARTICLE_SECTIONS:
         return f"/{segments[0]}/"
     if len(segments) == 4 and re.fullmatch(r"20\d{2}/\d{2}/\d{2}", "/".join(segments[:3])):
@@ -217,9 +244,22 @@ def _pattern(urls: list[str], homepage: str, warnings: list[str]) -> str | None:
         family = _article_family(url, homepage)
         if family:
             families.setdefault(family, set()).add(url)
+    parts = urlsplit(homepage)
+    scope = parts.path.rstrip("/") + "/"
+    scoped = {key: links for key, links in families.items() if key == scope}
+    if scoped:
+        families = scoped
+    elif scope != "/":
+        if families:
+            warnings.append("候选文章不在当前主页路径范围内，未自动扩大订阅范围。")
+        return None
     if len(families) != 1:
         if families:
-            warnings.append("发现多个文章路径，无法可靠确定订阅范围；请手动浏览或明确配置范围。")
+            warnings.append(
+                "发现多个文章路径，无法可靠确定订阅范围："
+                + "、".join(sorted(families))
+                + "；请明确配置范围。"
+            )
         return None
     family, links = next(iter(families.items()))
     if len(links) < 2:
@@ -262,7 +302,210 @@ def _feed(data: bytes) -> bool:
     return bool(feedparser.parse(data).version)
 
 
-def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings) -> DiscoveryResult:
+_ADAPTER_FIELDS = (
+    "type", "url", "query", "homepage", "needs_scraper", "url_pattern", "max_links", "use_lastmod",
+)
+
+
+def _normalized_location(url: str) -> str | None:
+    try:
+        parts = urlsplit(_public_url(url))
+    except _UnsafeURL:
+        return None
+    # 不猜 www / HTTP 别名，也不丢 query；别名只能由显式配置或已检查的跳转证明。
+    path = re.sub(
+        r"%([0-9a-fA-F]{2})",
+        lambda match: (
+            chr(int(match[1], 16))
+            if chr(int(match[1], 16)) in
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+            else match[0].upper()
+        ),
+        parts.path,
+    ).rstrip("/") or "/"
+    query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)))
+    return urlunsplit((parts.scheme, parts.netloc, path, query, ""))
+
+
+def _locations(source: SourceConfig | str) -> set[str]:
+    if isinstance(source, str):
+        urls = [source]
+    else:
+        # RSS / sitemap 的域名根只是展示兜底，不是栏目身份。
+        homepage = source.homepage
+        if not homepage and source.type in {"html_index", "hf_papers", "youtube"}:
+            homepage = source_homepage(source)
+        if not homepage and source.type == "arxiv":
+            query = source.query or ""
+            homepage = (
+                source_homepage(source) if re.fullmatch(r"cat:[\w.-]+", query)
+                else "https://arxiv.org/search/?" + urlencode(
+                    {"query": query, "searchtype": "all"}
+                )
+            )
+        urls = [url for url in (source.url, homepage) if url]
+    return {normalized for url in urls if (normalized := _normalized_location(url))}
+
+
+def source_matches(left: SourceConfig | str, right: SourceConfig | str) -> bool:
+    """按明确主页或采集地址匹配，保留栏目路径和查询条件；不以裸域名合并。"""
+    if isinstance(left, SourceConfig) and isinstance(right, SourceConfig):
+        if left.type == right.type == "arxiv" and left.query != right.query:
+            return False
+        if (
+            left.type in {"sitemap", "html_index"} and right.type in {"sitemap", "html_index"}
+            and left.url_pattern != right.url_pattern
+        ):
+            return False
+    return bool(_locations(left) & _locations(right))
+
+
+def _with_adapter(existing: SourceConfig, adapter: SourceConfig) -> SourceConfig:
+    return SourceConfig.model_validate({
+        **existing.model_dump(),
+        **{key: getattr(adapter, key) for key in _ADAPTER_FIELDS},
+    })
+
+
+def _known_source(
+    url: str,
+) -> tuple[SourceConfig | None, list[SourceConfig]] | None:
+    from secondbrain import config
+
+    followed = [source for source in config.load_sources() if source_matches(source, url)]
+    current = next(
+        (source for source in followed if not source.needs_scraper),
+        followed[0] if followed else None,
+    )
+    # 直接读完整 example；参考目录的 UI 隐藏状态不参与适配识别。
+    catalog_path = config.config_dir() / "sources.example.yaml"
+    if not catalog_path.is_file():
+        catalog_path = config.CONFIG_DIR / "sources.example.yaml"
+    catalog = config.load_sources(catalog_path) if catalog_path.is_file() else []
+    adapters = [
+        source for source in catalog if not source.needs_scraper and (
+            source_matches(source, url)
+            or any(source_matches(source, existing) for existing in followed)
+        )
+    ]
+    if not adapters and (current is None or current.needs_scraper):
+        return None
+    return current, adapters
+
+
+def _preview_source(
+    source: SourceConfig, reader: _Reader, fetch_settings: FetchSettings,
+) -> DiscoveryResult:
+    homepage = source_homepage(source) or source.url or ""
+    result: DiscoveryResult = {
+        "homepage": homepage, "title": source.name or source.id, "method": source.type,
+        "source": source, "entries": [], "warnings": [], "status": "failed",
+        "matched_source_id": source.id, "matched_from": "generic",
+    }
+    try:
+        if homepage:
+            _public_url(homepage)
+        if source.url:
+            _public_url(source.url)
+        if source.needs_scraper:
+            result.update(method="bookmark", status="manual")
+            result["warnings"].append("此来源需要手动浏览，尚未配置可用采集适配。")
+            return result
+        fetcher = FETCHERS.get(source.type)
+        if fetcher is None:
+            raise FetchError("该来源没有已注册的采集适配器")
+        reader.title = ""
+        reader.title_mode = (
+            "feed" if source.type in {"rss", "youtube", "arxiv"}
+            else "html" if source.type == "html_index" else None
+        )
+        entries = fetcher(source, cast(HttpClient, reader), fetch_settings)
+        if reader.title and not source.name:
+            source = source.model_copy(update={"name": reader.title[:200]})
+            result.update(source=source, title=source.name or source.id)
+        result["entries"] = _safe_entries(entries, source.url or homepage)
+        result["status"] = "ready" if result["entries"] else "empty"
+        if not result["entries"]:
+            result["warnings"].append("采集适配成功，但本次没有候选条目。")
+    except _UnsafeURL as exc:
+        result["status"] = "rejected"
+        result["warnings"].append(str(exc))
+    except (FetchError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        result["warnings"].append(str(exc))
+    result["warnings"].extend(reader.warnings)
+    reader.warnings.clear()
+    return result
+
+
+def preview_source(
+    source: SourceConfig, client: HttpClient, fetch_settings: FetchSettings,
+) -> DiscoveryResult:
+    """使用已注册的真实适配器，只读预览；已知失败保留配置，不降级 bookmark。"""
+    if source.needs_scraper:
+        result = discover_source(source.homepage or source.url or "", client, fetch_settings)
+        if result["source"] is not None:
+            updated = _with_adapter(source, result["source"])
+            if not updated.name and result["source"].name:
+                updated = updated.model_copy(update={"name": result["source"].name})
+            result.update(source=updated, matched_source_id=source.id)
+        return result
+    return _preview_source(source, _Reader(client, fetch_settings), fetch_settings)
+
+
+def _known_preview(
+    url: str, reader: _Reader, fetch_settings: FetchSettings,
+) -> DiscoveryResult | None:
+    known = _known_source(url)
+    if known is None:
+        return None
+    current, adapters = known
+    result: DiscoveryResult | None = None
+    if current is not None and not current.needs_scraper:
+        result = _preview_source(current, reader, fetch_settings)
+        result["matched_from"] = "followed"
+        if result["status"] in {"ready", "empty"}:
+            return result
+    diagnostics: list[str] = []
+    for adapter in adapters:
+        if current is not None and not current.needs_scraper and all(
+            getattr(current, key) == getattr(adapter, key)
+            for key in _ADAPTER_FIELDS if key != "homepage"
+        ):
+            continue
+        preview = _preview_source(adapter, reader, fetch_settings)
+        if preview["status"] in {"ready", "empty"}:
+            if current is not None:
+                repaired = _with_adapter(current, preview["source"] or adapter)
+                if not repaired.name and preview["source"] is not None:
+                    repaired = repaired.model_copy(update={"name": preview["source"].name})
+                preview.update(
+                    source=repaired, title=repaired.name or preview["title"],
+                    matched_source_id=current.id, matched_from="followed",
+                )
+            else:
+                preview["matched_from"] = "catalog"
+            previous = result["warnings"] if result is not None else []
+            preview["warnings"] = [*previous, *diagnostics, *preview["warnings"]]
+            return preview
+        if result is None and current is None:
+            result = preview
+            result["matched_from"] = "catalog"
+        else:
+            diagnostics.extend(
+                f"参考目录适配 {adapter.id}（{adapter.type}）：{warning}"
+                for warning in preview["warnings"]
+            )
+    if result is None:
+        assert current is not None
+        result = _preview_source(current, reader, fetch_settings)
+        result.update(status="failed", matched_from="followed")
+    result["warnings"].extend(diagnostics)
+    return result
+
+
+def _discover_source(
+    url: str, client: HttpClient, fetch_settings: FetchSettings,
+) -> DiscoveryResult:
     """预览 URL；method 为 rss / html_index / sitemap / bookmark / rejected。
 
     bookmark 也有可持久化 SourceConfig：needs_scraper=True，现有采集流程跳过它，主页
@@ -271,7 +514,8 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
     """
     result: DiscoveryResult = {
         "homepage": "", "title": "", "method": "rejected", "source": None,
-        "entries": [], "warnings": [],
+        "entries": [], "warnings": [], "status": "rejected",
+        "matched_source_id": None, "matched_from": "generic",
     }
     warnings = result["warnings"]
     try:
@@ -282,6 +526,9 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
     result["homepage"] = homepage
     result["title"] = urlsplit(homepage).hostname or homepage
     reader = _Reader(client, fetch_settings)
+    known = _known_preview(homepage, reader, fetch_settings)
+    if known is not None:
+        return known
     try:
         response = reader.get(homepage)
     except _UnsafeURL as exc:
@@ -289,13 +536,40 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
         return result
     except FetchError as exc:
         warnings.append(str(exc))
+        result["status"] = "failed"
     else:
         homepage = str(response.url)
         result["homepage"] = homepage
+        known = _known_preview(homepage, reader, fetch_settings)
+        if known is not None:
+            return known
         if _feed(response.content):
+            entries = _safe_entries(rss.parse_feed(response.content), homepage)
+            title = str(feedparser.parse(response.content).feed.get("title") or result["title"])
             result.update(method="rss", source=_source(homepage, "rss", homepage),
-                          entries=_safe_entries(rss.parse_feed(response.content), homepage))
+                          entries=entries, title=title, status="ready" if entries else "empty")
             return result
+        if re.search(r"<(?:[\w.-]+:)?(?:urlset|sitemapindex)\b", response.text[:8192]):
+            try:
+                candidates = sitemap.collect_sitemap(
+                    reader, homepage, initial_response=response, max_entries=MAX_LINKS
+                )
+                warnings.extend(reader.warnings)
+                reader.warnings.clear()
+                pattern = _pattern(
+                    [entry.url for entry in candidates], urljoin(homepage, "/"), warnings
+                )
+                if pattern:
+                    entries = _safe_entries(
+                        [entry for entry in candidates if re.search(pattern, entry.url)], homepage
+                    )
+                    result.update(
+                        method="sitemap", source=_source(homepage, "sitemap", homepage, pattern),
+                        entries=entries, status="ready" if entries else "empty",
+                    )
+                    return result
+            except FetchError as exc:
+                warnings.append(str(exc))
         content_type = response.headers.get("content-type", "").lower()
         html_text = bool(re.search(
             r"<(?:!doctype\s+html|html\b|head\b|title\b|a\b|link\b)",
@@ -325,7 +599,7 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
                         result.update(
                             method="rss",
                             source=_source(homepage, "rss", str(feed_response.url)),
-                            entries=entries,
+                            entries=entries, status="ready" if entries else "empty",
                         )
                         return result
                     except FetchError as exc:
@@ -336,7 +610,7 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
                     result.update(
                         method="html_index",
                         source=_source(homepage, "html_index", homepage, pattern),
-                        entries=entries,
+                        entries=entries, status="ready" if entries else "empty",
                     )
                     warnings.append("按明确文章路径推断列表范围；保存前请核对候选，未抓取文章正文。")
                     return result
@@ -345,22 +619,24 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
                 )
                 for sitemap_url in sitemap_urls[:2]:
                     try:
-                        sitemap_response = reader.get(sitemap_url, origin=_origin(homepage))
-                        candidates = sitemap.parse_sitemap(sitemap_response.content)
-                        if len(candidates) > MAX_LINKS:
-                            warnings.append(f"sitemap 仅检查前 {MAX_LINKS} 个链接。")
+                        candidates = sitemap.collect_sitemap(
+                            reader, sitemap_url, max_entries=MAX_LINKS, origin=_origin(homepage)
+                        )
+                        warnings.extend(reader.warnings)
+                        reader.warnings.clear()
                         pattern = _pattern(
                             [e.url for e in candidates[:MAX_LINKS]], homepage, warnings
                         )
                         if not pattern:
                             continue
                         entries = _safe_entries(
-                            sitemap.parse_sitemap(sitemap_response.content, pattern), homepage
+                            [entry for entry in candidates if re.search(pattern, entry.url)],
+                            homepage,
                         )
                         result.update(
                             method="sitemap",
-                            source=_source(homepage, "sitemap", str(sitemap_response.url), pattern),
-                            entries=entries,
+                            source=_source(homepage, "sitemap", sitemap_url, pattern),
+                            entries=entries, status="ready" if entries else "empty",
                         )
                         warnings.append(
                             "sitemap 仅提供候选 URL；未抓取正文，日期可能未知，请核对订阅范围。"
@@ -369,13 +645,36 @@ def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings)
                     except FetchError as exc:
                         warnings.append(str(exc))
     result.update(
-        method="bookmark",
+        method="bookmark", status="failed" if result["status"] == "failed" else "manual",
         source=_source(result["homepage"], "bookmark", result["homepage"]),
     )
     warnings.append(
         "仅支持保存主页并手动浏览：未可靠发现公开文章列表；不登录、不执行脚本；"
         "不会自动导入或加入稍后阅读。"
     )
+    return result
+
+
+def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings) -> DiscoveryResult:
+    """依次复用已关注、完整参考目录和通用发现；只返回候选，不写配置。"""
+    from secondbrain import config
+
+    result = _discover_source(url, client, fetch_settings)
+    source = result["source"]
+    if source is None:
+        return result
+    if result["matched_from"] == "generic":
+        existing = next(
+            (item for item in config.load_sources() if source_matches(item, source)
+             or source_matches(item, url)),
+            None,
+        )
+        if existing is not None:
+            source = _with_adapter(existing, source)
+            result.update(matched_source_id=existing.id, matched_from="followed")
+    if result["status"] in {"ready", "empty", "manual"} and not source.name and result["title"]:
+        source = source.model_copy(update={"name": result["title"][:200]})
+    result["source"] = source
     return result
 
 
@@ -389,12 +688,9 @@ def follow_source(
     fetch_settings: FetchSettings,
     *,
     source_id: str | None = None,
+    name: str | None = None,
 ) -> FollowResult:
-    """显式确认入口：重新发现后保存信源配置，绝不导入候选或加入阅读清单。
-
-    拒绝的 URL 返回 saved_id=None；非法 / 重复 id 或配置写入失败抛 ValueError /
-    ConfigError。重复调用不会覆盖现有信源。
-    """
+    """确认后新增或修复同一来源；人工字段和既有 ID 保持不变，不导入候选。"""
     from secondbrain import config, ops, sources_file
 
     result: FollowResult = {
@@ -402,19 +698,50 @@ def follow_source(
         "saved_id": None,
     }
     source = result["source"]
-    if source is None:
+    if source is None or result["status"] in {"rejected", "failed"}:
         return result
     if source_id is not None:
-        source = SourceConfig.model_validate({**source.model_dump(), "id": source_id})
-        result["source"] = source
-    block = sources_file.dump_entry(source)
+        SourceConfig.model_validate({**source.model_dump(), "id": source_id})
+    proposed_name = name.strip() if name is not None else None
+    if proposed_name == "":
+        raise ValueError("显示名称不能为空")
+    if proposed_name is not None:
+        SourceConfig.model_validate({**source.model_dump(), "name": proposed_name})
+    if not source.name:
+        source = SourceConfig.model_validate({
+            **source.model_dump(),
+            "name": proposed_name or result["title"] or source.id,
+        })
 
-    def append(text: str) -> str:
+    def save(text: str) -> str:
+        nonlocal source
         existing = config.parse_sources_text(text)
-        if any(s.id == source.id for s in existing):
+        matched = next((item for item in existing if source_matches(item, source)), None)
+        if matched is not None:
+            if source_id is not None and source_id != matched.id:
+                raise ValueError("该来源已关注；修改 ID 请使用正式编辑接口，不会复制来源")
+            updated = (
+                matched if source.needs_scraper and not matched.needs_scraper
+                else _with_adapter(matched, source)
+            )
+            if not matched.name:
+                updated = updated.model_copy(update={"name": proposed_name or source.name})
+            source = updated
+            changes = {
+                key: getattr(updated, key) for key in _ADAPTER_FIELDS
+                if getattr(updated, key) != getattr(matched, key)
+            }
+            if not matched.name and updated.name:
+                changes["name"] = updated.name
+            return sources_file.update_entry(text, matched.id, changes)
+        if source_id is not None:
+            source = SourceConfig.model_validate({**source.model_dump(), "id": source_id})
+        if proposed_name is not None:
+            source = source.model_copy(update={"name": proposed_name})
+        if any(item.id == source.id for item in existing):
             raise ValueError(f"信源 id 已存在：{source.id}")
-        return sources_file.append_entry(text, block)
+        return sources_file.append_entry(text, sources_file.dump_entry(source))
 
-    ops.edit_sources(append)
-    result["saved_id"] = source.id
+    ops.edit_sources(save)
+    result.update(source=source, saved_id=source.id)
     return result

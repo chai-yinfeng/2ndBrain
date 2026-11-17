@@ -131,6 +131,7 @@ def paper_choose(
 def source_follow(
     url: str, apply: bool = typer.Option(False, "--apply", help="确认关注；默认只识别预览"),
     source_id: str | None = typer.Option(None, "--id"),
+    name: str | None = typer.Option(None, "--name", help="来源显示名称"),
 ) -> None:
     """输入普通主页，发现 RSS/HTML 列表；不可枚举时明确保存为手动浏览入口。"""
     from secondbrain.net import FetchError
@@ -140,7 +141,7 @@ def source_follow(
     try:
         with HttpClient(settings) as client:
             result = (
-                follow_source(url, client, settings, source_id=source_id)
+                follow_source(url, client, settings, source_id=source_id, name=name)
                 if apply else discover_source(url, client, settings)
             )
     except (ValueError, FetchError, config.ConfigError) as exc:
@@ -150,12 +151,117 @@ def source_follow(
         typer.echo(f"! {warning}")
     for entry in result["entries"]:
         typer.echo(f"- {entry.title} · {entry.url}")
-    if result["source"] is None:
+    if result["source"] is None or result["status"] in ("failed", "rejected"):
         raise typer.Exit(code=1)
     typer.echo(
         f"已关注：{result['saved_id']}" if apply
         else "仅预览；加 --apply 才保存，不自动加入阅读材料"
     )
+
+
+@sources_app.command("edit")
+def source_edit(
+    source_id: str,
+    fields: Annotated[list[str] | None, typer.Option(
+        "--set", help='字段=值，可重复；列表/布尔值用 JSON，如 tags=["AI","systems"]',
+    )] = None,
+) -> None:
+    """原位编辑来源；改 ID 同步迁移历史引用，不删除材料。"""
+    from secondbrain.source_management import update_source
+
+    changes = {}
+    for field in fields or []:
+        key, separator, value = field.partition("=")
+        if not separator or not key.strip():
+            raise typer.BadParameter("--set 需要 字段=值")
+        try:
+            changes[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            changes[key.strip()] = value
+    if not changes:
+        raise typer.BadParameter("至少提供一个 --set 字段=值")
+    try:
+        source = update_source(source_id, changes)
+    except (ValueError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已更新：{source.name or source.id} · {source.id}")
+
+
+@sources_app.command("repair")
+def source_repair(
+    source_id: str | None = typer.Argument(None, help="省略则检查所有关注来源"),
+    apply: bool = typer.Option(False, "--apply", help="仅修复已验证的采集字段，保留关注与人工配置"),
+) -> None:
+    """复用已有适配重新识别；默认只预览，不调用模型。"""
+    from secondbrain.source_management import repair_source
+
+    ids = [source_id] if source_id else [s.id for s in _load_sources_or_exit()]
+    failed = False
+    for source in ids:
+        try:
+            result = repair_source(source, typer.echo, apply=apply)
+        except (ValueError, config.ConfigError) as exc:
+            typer.echo(f"{source}：{exc}")
+            failed = True
+            continue
+        typer.echo(
+            f"{source} · {result['status']} · "
+            f"{'已更新' if result['applied'] else '未改配置'} · "
+            f"字段：{', '.join(result['changes']) or '无需更改'}"
+        )
+        for warning in result["warnings"]:
+            typer.echo(f"! {warning}")
+        failed |= result["status"] in ("failed", "rejected")
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@sources_app.command("analyze")
+def source_analyze(
+    source_id: str, force: bool = typer.Option(False, "--force", help="不复用同输入的已有分类"),
+) -> None:
+    """显式分析来源领域和内容性质；可能调用 cheap 模型，不覆盖人工标签。"""
+    from secondbrain.source_analysis import analyze_source
+
+    try:
+        result = analyze_source(source_id, typer.echo, force=force)
+    except (LLMError, ValueError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    profile = result["profile"]
+    typer.echo(f"领域：{', '.join(profile['domains']) or '证据不足'}")
+    typer.echo(f"性质：{', '.join(profile['content_kinds']) or '证据不足'}")
+    typer.echo(profile["summary"])
+    typer.echo(f"{'复用' if result['cached'] else '新分析'} · 估算费用 ${result['cost']:.4f}")
+    for evidence in profile["evidence"]:
+        typer.echo(f"- {evidence['title']} · {evidence['url']}")
+
+
+@sources_app.command("catalog")
+def source_catalog(
+    action: str = typer.Argument("list", help="list / remove / clear / restore"),
+    source_id: str | None = typer.Argument(None),
+) -> None:
+    """维护临时参考目录的显示，不删除已关注来源或底层识别规则。"""
+    from secondbrain import ops
+    from secondbrain.source_management import clear_catalog, hide_catalog, restore_catalog
+
+    try:
+        if action == "list":
+            for source in ops.catalog_entries():
+                typer.echo(f"{source.id} · {source.name or source.id} · {source.type}")
+        elif action == "remove" and source_id:
+            hide_catalog(source_id)
+            typer.echo("已从参考目录移除；已关注来源不变")
+        elif action == "clear":
+            clear_catalog()
+            typer.echo("已清空参考目录；已关注来源不变")
+        elif action == "restore":
+            restore_catalog()
+            typer.echo("已恢复参考目录")
+        else:
+            raise ValueError("使用 list / remove ID / clear / restore")
+    except (ValueError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @reading_app.command("list")
@@ -302,11 +408,14 @@ def _truncate(text: str, width: int) -> str:
 @sources_app.command("list")
 def sources_list() -> None:
     """列出配置中的信源。"""
+    from secondbrain.source_analysis import source_contexts
+
     path, is_example = config.sources_path()
     sources = _load_sources_or_exit()
     label = "尚未建立关注列表，示例仅供参考" if is_example else f"正式：{path.name}"
     typer.echo(f"{len(sources)} 个已关注信源（{label}）")
     width = max(len(s.id) for s in sources) if sources else 0
+    contexts = source_contexts() if sources else {}
     for s in sources:
         status = "停用" if not s.enabled else "手动浏览主页" if s.needs_scraper else "启用"
         location = s.query if s.type == "arxiv" else s.url
@@ -315,6 +424,13 @@ def sources_list() -> None:
             f"{s.role:<9}  trust={s.trust}  "
             f"{status:<20}  {_truncate(location or '', 70)}"
         )
+        if s.name or s.tags:
+            typer.echo(f"  {s.name or s.id} · 标签：{', '.join(s.tags) or '未设置'}")
+        hints = contexts.get(s.id, {})
+        if hints.get("existing_topics"):
+            typer.echo("  历史文章主题：" + "、".join(hints["existing_topics"]))
+        elif hints.get("catalog_tags"):
+            typer.echo("  参考目录标签：" + "、".join(hints["catalog_tags"]))
 
 
 @app.command()

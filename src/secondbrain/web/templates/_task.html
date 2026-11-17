@@ -34,6 +34,16 @@
       {% if task.result.ingest %}<p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>{% endif %}
     {% elif kind.startswith("summary-") %}
       <p class="meta">{% if task.result.cached %}已有结果{% else %}估算费用 ${{ "%.4f" | format(task.result.cost) }}{% endif %} · <a href="/item/{{ task.result.item_id }}#summary">查看深度速读</a></p>
+    {% elif kind.startswith("source-profile-") %}
+      {% with analysis=task.result %}{% include "_source_analysis.html" %}{% endwith %}
+      <p class="meta">{{ '复用已有分析，无模型调用' if task.result.cached else '本次分析' }} · 估算费用 ${{ "%.4f"|format(task.result.cost) }}</p>
+    {% elif kind.startswith("source-repair-") or kind == "sources-repair" %}
+      <ul class="source-repair-results">{% for result in task.result.results %}
+        <li><strong>{{ result.source_id }}</strong> · {{ {'ready':'可采集','empty':'适配有效，暂无条目','failed':'获取失败','manual':'需手动浏览','rejected':'地址被拒绝'}.get(result.status, result.status) }} · {{ '已更新配置' if result.applied else '未改配置' }}
+          {% if result.changes %}<p class="meta">字段：{{ result.changes.keys()|join('、') }}</p>{% endif %}
+          {% for warning in result.warnings|unique %}<p class="refresh">{{ warning }}</p>{% endfor %}
+        </li>{% endfor %}</ul>
+      <a class="fb small" href="/sources">刷新来源列表</a>
     {% endif %}
   {% endif %}
   {% endif %}

@@ -50,7 +50,6 @@ from secondbrain.profile.feedback import recent_feedback
 from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
-from secondbrain.sources import FETCHERS
 from secondbrain.sources.homepage import safe_url, source_homepage
 from secondbrain.web import filters
 from secondbrain.web.render import render_markdown
@@ -357,7 +356,9 @@ class CostHints:
 
 
 PREVIEW_ENTRIES = 10
-SOURCE_FIELDS = ("id", "type", "url", "query", "trust", "role", "tags", "max_age_days")
+SOURCE_FIELDS = (
+    "id", "name", "type", "url", "homepage", "query", "trust", "role", "tags", "max_age_days",
+)
 
 
 def _http_client(fs: FetchSettings) -> HttpClient:
@@ -386,6 +387,8 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
             data["url_pattern"] = form["url_pattern"].strip()
     if data.get("type") == "sitemap":
         data["use_lastmod"] = bool(form.get("use_lastmod"))
+    if data.get("type") == "html_index" and form.get("max_links"):
+        data["max_links"] = int(form["max_links"])
     try:
         return SourceConfig.model_validate(data)
     except ValidationError as exc:
@@ -396,7 +399,7 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
 
 
 def _editable_sources() -> tuple[Path, list[SourceConfig]]:
-    """config/sources.yaml（不存在时先从 example 复制）及其中的信源。"""
+    """个人来源文件及当前关注；缺失时只初始化空列表。"""
     path, _ = ops.ensure_sources_file()
     return path, config.load_sources(path)
 
@@ -1145,6 +1148,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             kind in TASKS or kind == "manual_add"
             or re.fullmatch(r"(summary|wiki|read)-\d+", kind)
             or (re.fullmatch(r"paper-[0-9a-f]{32}", kind) and tasks.get(kind) is not None)
+            or (
+                re.fullmatch(r"source-(profile|repair)-[a-z0-9][a-z0-9-]*", kind)
+                or kind == "sources-repair"
+            ) and tasks.get(kind) is not None
         )
         if not known:
             raise HTTPException(404, "未知的任务")
@@ -1333,49 +1340,46 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/sources", response_class=HTMLResponse)
     def sources_page(request: Request, saved: str | None = None) -> HTMLResponse:
+        from secondbrain.source_analysis import source_analyses, source_contexts
+
         path, is_example = config.sources_path()
         try:
-            sources, error = ([] if is_example else config.load_sources(path)), None
+            sources, error = config.load_sources(), None
         except config.ConfigError as exc:
             sources, error = [], str(exc)
-        pers = _settings().personalize
         catalog = ops.catalog_entries()
         catalog_q = request.query_params.get("catalog_q", "").strip()
         if catalog_q:
             catalog = [
                 s for s in catalog
                 if catalog_q.casefold() in " ".join(
-                    [s.id, s.url or "", s.homepage or "", *s.tags]
+                    [s.id, s.name or "", s.url or "", s.homepage or "", *s.tags]
                 ).casefold()
             ]
+        pers = _settings().personalize
         with _conn() as conn:
             overview = db.source_overview(conn)
             yields = source_yields(conn, sources, datetime.now(UTC), pers)
             dist = feedback_distribution(conn)
         return templates.TemplateResponse(
-            request,
-            "sources.html",
+            request, "sources.html",
             {
-                "sources": sources,
-                "overview": overview,
-                "yields": yields,
-                "dist": dist,
-                "dist_kinds": DISTRIBUTION_KINDS,
-                "catalog": catalog,
+                "sources": sources, "overview": overview, "yields": yields, "dist": dist,
+                "dist_kinds": DISTRIBUTION_KINDS, "catalog": catalog,
                 "catalog_homepages": {s.id: source_homepage(s) for s in catalog},
                 "homepages": {
                     s.id: source_homepage(
                         s, overview[s.id]["homepage"] if s.id in overview else None
-                    )
-                    for s in sources
+                    ) for s in sources
                 },
-                "pers": pers,
-                "path": path,
-                "is_example": is_example,
-                "error": error,
-                "saved": saved,
-                "types": SourceConfig.model_fields["type"].annotation.__args__,
-                "catalog_q": catalog_q,
+                "pers": pers, "path": path, "is_example": is_example, "error": error,
+                "saved": saved, "types": SourceConfig.model_fields["type"].annotation.__args__,
+                "catalog_q": catalog_q, "analyses": source_analyses(),
+                "source_contexts": source_contexts(),
+                "source_tasks": {s.id: tasks.get(f"source-profile-{s.id}") for s in sources},
+                "repair_tasks": {s.id: tasks.get(f"source-repair-{s.id}") for s in sources},
+                "bulk_repair_task": tasks.get("sources-repair"),
+                "source_cost_limit": _settings().run.max_cost_usd,
             },
         )
 
@@ -1390,25 +1394,28 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             return templates.TemplateResponse(
                 request, "_home_source_preview.html", {"result": result, "error": None}
             )
-        except (ValueError, FetchError) as exc:
+        except (ValueError, FetchError, config.ConfigError) as exc:
             return templates.TemplateResponse(
                 request, "_home_source_preview.html", {"result": None, "error": str(exc)}
             )
 
     @app.post("/sources/home/follow")
     def source_home_follow(
-        request: Request, url: str = Form(...), source_id: str = Form("")
+        request: Request, url: str = Form(...), source_id: str = Form(""),
+        name: str = Form(""),
     ):
         from secondbrain.source_discovery import follow_source
 
         try:
             fs = _fetch_settings()
             with _http_client(fs) as client:
-                result = follow_source(url, client, fs, source_id=source_id or None)
+                result = follow_source(
+                    url, client, fs, source_id=source_id or None, name=name.strip() or None
+                )
             if not result.get("saved_id"):
                 return templates.TemplateResponse(
                     request, "_home_source_preview.html",
-                    {"result": result, "error": "主页未保存；请检查发现结果"}, status_code=400,
+                    {"result": result, "error": "未保存；请检查发现结果"}, status_code=400,
                 )
         except (ValueError, FetchError, config.ConfigError) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -1416,110 +1423,203 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.post("/sources/preview", response_class=HTMLResponse)
     async def sources_preview(request: Request) -> HTMLResponse:
-        """试抓：只拉取并解析信源（不抓正文、不写库），列出前几条标题与日期。"""
+        from secondbrain.source_discovery import preview_source
+
         form = {k: str(v) for k, v in (await request.form()).items()}
         context: dict = {"form": form, "error": None, "entries": [], "source": None}
         try:
             source = _source_from_form(form)
-        except ValueError as exc:
-            context["error"] = str(exc)
-            return templates.TemplateResponse(request, "_source_preview.html", context)
-        try:
-            existing = {s.id for s in config.load_sources()}
-        except config.ConfigError:
-            existing = set()
-        if source.id in existing:
-            context["error"] = f"信源 id 已存在：{source.id}"
-            return templates.TemplateResponse(request, "_source_preview.html", context)
-        fs = _fetch_settings()
-        try:
+            if any(s.id == source.id for s in config.load_sources()):
+                raise ValueError(f"信源 id 已存在：{source.id}")
+            fs = _fetch_settings()
             with _http_client(fs) as client:
-                entries = FETCHERS[source.type](source, client, fs)
-        except FetchError as exc:
+                result = preview_source(source, client, fs)
+            if result["status"] in ("failed", "rejected", "manual"):
+                raise FetchError("；".join(result["warnings"]) or "无法自动列举此来源")
+        except (ValueError, FetchError, config.ConfigError) as exc:
             context["error"] = f"试抓失败：{exc}"
             return templates.TemplateResponse(request, "_source_preview.html", context)
-        entries.sort(key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+        entries = result["entries"]
         context.update(source=source, entries=entries[:PREVIEW_ENTRIES], total=len(entries))
         return templates.TemplateResponse(request, "_source_preview.html", context)
 
     @app.post("/sources/add")
     async def sources_add(request: Request) -> RedirectResponse:
+        from secondbrain.source_discovery import source_matches
+
         form = {k: str(v) for k, v in (await request.form()).items()}
         try:
             source = _source_from_form(form)
             _, sources = _editable_sources()
-            if any(s.id == source.id for s in sources):
-                raise ValueError(f"信源 id 已存在：{source.id}")
-            block = sources_file.dump_entry(source)
-            ops.edit_sources(lambda text: sources_file.append_entry(text, block))
+            if any(s.id == source.id or source_matches(s, source) for s in sources):
+                raise ValueError("此来源已关注，请编辑现有来源，不要重复添加")
+            ops.edit_sources(lambda text: sources_file.append_entry(
+                text, sources_file.dump_entry(source)
+            ))
         except (ValueError, config.ConfigError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
 
+    @app.post("/sources/{source_id}/edit")
+    async def sources_edit(request: Request, source_id: str) -> RedirectResponse:
+        from secondbrain.source_management import update_source
+
+        for kind in (f"source-profile-{source_id}", f"source-repair-{source_id}", "sources-repair"):
+            if tasks.get(kind) is not None and tasks.get(kind).running:
+                raise HTTPException(409, "来源任务运行中，请完成后再编辑")
+        form = await request.form()
+        changes = {key: str(form.get(key, "")).strip() or None
+                   for key in ("name", "url", "homepage", "query")}
+        changes.update(
+            id=str(form.get("id", source_id)).strip(),
+            type=str(form.get("type", "")),
+            tags=[s.strip() for s in re.split(r"[,，]", str(form.get("tags", ""))) if s.strip()],
+            enabled="enabled" in form, needs_scraper="needs_scraper" in form,
+            role=str(form.get("role", "core")),
+        )
+        try:
+            changes["trust"] = int(str(form.get("trust", "3")))
+            changes["max_age_days"] = int(str(form.get("max_age_days", "7")))
+            changes["url_pattern"] = (
+                str(form.get("url_pattern", "")).strip() or None
+                if changes["type"] in ("sitemap", "html_index") else None
+            )
+            changes["max_links"] = (
+                int(str(form["max_links"]))
+                if changes["type"] == "html_index" and form.get("max_links") else None
+            )
+            changes["use_lastmod"] = changes["type"] == "sitemap" and "use_lastmod" in form
+            source = update_source(source_id, changes)
+        except (ValueError, config.ConfigError, sqlite3.Error) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
+
+    def repair_sources_task(request: Request, ids: list[str], apply: bool, kind: str):
+        from secondbrain.source_management import repair_source
+
+        def run(task: Task) -> dict:
+            results = []
+            for source_id in ids:
+                try:
+                    results.append(repair_source(source_id, task.log, apply=apply))
+                except (ValueError, FetchError, config.ConfigError) as exc:
+                    task.log(f"{source_id}：{exc}")
+                    results.append({"source_id": source_id, "status": "failed",
+                                    "applied": False, "changes": {}, "warnings": [str(exc)]})
+            return {"results": results, "apply": apply}
+
+        try:
+            tasks.start(kind, "修复来源（保留关注）" if apply else "检查来源（只预览）", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
+    @app.post("/sources/repair", response_class=HTMLResponse)
+    def sources_repair_all(request: Request, apply: bool = Form(False)):
+        return repair_sources_task(
+            request, [s.id for s in config.load_sources()], apply, "sources-repair"
+        )
+
+    @app.post("/sources/{source_id}/repair", response_class=HTMLResponse)
+    def sources_repair(request: Request, source_id: str, apply: bool = Form(False)):
+        if not any(s.id == source_id for s in config.load_sources()):
+            raise HTTPException(404, "信源不存在")
+        return repair_sources_task(request, [source_id], apply, f"source-repair-{source_id}")
+
+    @app.post("/sources/{source_id}/analyze", response_class=HTMLResponse)
+    def sources_analyze(request: Request, source_id: str, force: bool = Form(False)):
+        from secondbrain.source_analysis import analyze_source
+
+        if not any(s.id == source_id for s in config.load_sources()):
+            raise HTTPException(404, "信源不存在")
+        kind = f"source-profile-{source_id}"
+
+        def run(task: Task) -> dict:
+            return analyze_source(source_id, task.log, force=force)
+
+        try:
+            tasks.start(kind, "分析来源领域（cheap 模型）", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
     @app.post("/sources/{source_id}/toggle")
     def sources_toggle(source_id: str) -> RedirectResponse:
-        _, sources = _editable_sources()
-        target = next((s for s in sources if s.id == source_id), None)
+        from secondbrain.source_management import update_source
+
+        target = next((s for s in config.load_sources() if s.id == source_id), None)
         if target is None:
             raise HTTPException(404, "信源不存在")
-        ops.edit_sources(lambda text: sources_file.set_enabled(text, source_id, not target.enabled))
+        update_source(source_id, {"enabled": not target.enabled})
         return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
 
     @app.post("/sources/catalog/{source_id}/add")
     def sources_catalog_add(source_id: str) -> RedirectResponse:
-        """把信源目录（sources.example.yaml）中的这一条原样追加到 config/sources.yaml。"""
+        from secondbrain.source_discovery import source_matches
+
         example = (config.config_dir() / "sources.example.yaml").read_text(encoding="utf-8")
-        block = sources_file.entry_text(example, source_id)
-        if block is None:
+        source = next((s for s in config.parse_sources_text(example) if s.id == source_id), None)
+        if source is None:
             raise HTTPException(404, "目录中没有该信源")
-        _, sources = _editable_sources()
-        if any(s.id == source_id for s in sources):
-            raise HTTPException(400, f"信源 id 已存在：{source_id}")
+        if any(s.id == source_id or source_matches(s, source) for s in config.load_sources()):
+            raise HTTPException(400, "此来源已经关注，请编辑或修复现有条目")
         try:
+            block = sources_file.entry_text(example, source_id)
             ops.edit_sources(lambda text: sources_file.append_entry(text, block))
         except config.ConfigError as exc:
             raise HTTPException(400, str(exc)) from exc
         return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
 
+    @app.post("/sources/catalog/{source_id}/hide")
+    def sources_catalog_hide(source_id: str) -> RedirectResponse:
+        from secondbrain.source_management import hide_catalog
+
+        try:
+            hide_catalog(source_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse("/sources#catalog", status_code=303)
+
+    @app.post("/sources/catalog/clear")
+    def sources_catalog_clear() -> RedirectResponse:
+        from secondbrain.source_management import clear_catalog
+
+        clear_catalog()
+        return RedirectResponse("/sources#catalog", status_code=303)
+
+    @app.post("/sources/catalog/restore")
+    def sources_catalog_restore() -> RedirectResponse:
+        from secondbrain.source_management import restore_catalog
+
+        restore_catalog()
+        return RedirectResponse("/sources#catalog", status_code=303)
+
     @app.post("/sources/{source_id}/peek", response_class=HTMLResponse)
     def sources_peek(request: Request, source_id: str) -> HTMLResponse:
-        """预览已配置或目录中的信源：只拉取并解析最新约 10 条，不写库、不调用 LLM。"""
-        candidates = {s.id: s for s in ops.catalog_entries()}
-        try:
-            candidates |= {s.id: s for s in config.load_sources()}
-        except config.ConfigError:
-            pass
+        from secondbrain.source_discovery import preview_source
+
+        example = config.config_dir() / "sources.example.yaml"
+        candidates = {s.id: s for s in config.load_sources(example)} if example.exists() else {}
+        candidates |= {s.id: s for s in config.load_sources()}
         source = candidates.get(source_id)
         if source is None:
             raise HTTPException(404, "信源不存在")
-        context: dict = {"source": source, "entries": [], "error": None, "total": 0}
-        if source.needs_scraper:
-            context["error"] = "该信源标记为 needs_scraper：没有可用的 feed，无法预览"
-        else:
-            fs = _fetch_settings()
-            try:
-                with _http_client(fs) as client:
-                    entries = FETCHERS[source.type](source, client, fs)
-            except FetchError as exc:
-                context["error"] = f"抓取失败：{exc}"
-            else:
-                entries.sort(
-                    key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True
-                )
-                context.update(entries=entries[:PREVIEW_ENTRIES], total=len(entries))
-                channel = safe_url(getattr(entries, "homepage", None))
-                if channel:  # 顺手记录 channel <link>（只更新已有的 sources 行，不写 items）
-                    context["channel"] = channel
-                    with _conn() as conn:
-                        db.record_homepage(conn, source.id, channel)
-                        conn.commit()
+        fs = _fetch_settings()
+        with _http_client(fs) as client:
+            result = preview_source(source, client, fs)
+        context = {
+            "source": source, "entries": result["entries"][:PREVIEW_ENTRIES],
+            "total": len(result["entries"]), "channel": result["homepage"],
+            "error": "；".join(result["warnings"])
+            if result["status"] in ("failed", "rejected") else None,
+            "manual": result["status"] == "manual",
+        }
         return templates.TemplateResponse(request, "_peek.html", context)
 
     @app.post("/sources/{source_id}/delete", response_class=HTMLResponse)
     def sources_delete(
         request: Request, source_id: str, confirm: str | None = Form(None)
     ) -> HTMLResponse:
-        """二次确认：没带 confirm=yes 时只显示确认页；已入库的条目保留。"""
         path, sources = _editable_sources()
         if not any(s.id == source_id for s in sources):
             raise HTTPException(404, "信源不存在")

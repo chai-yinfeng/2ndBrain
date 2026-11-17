@@ -18,6 +18,7 @@ class SourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    name: str | None = Field(default=None, max_length=200)
     type: SourceType
     url: str | None = None
     query: str | None = None
@@ -35,6 +36,8 @@ class SourceConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_location(self) -> SourceConfig:
+        if self.name is not None:
+            self.name = self.name.strip() or None
         if self.type == "arxiv" and not self.query:
             raise ValueError("arxiv 信源需要 query")
         if self.type != "arxiv" and not self.url:

@@ -292,6 +292,19 @@ MIGRATIONS: list[str] = [
     WHERE f.kind = 'later'
       AND f.id = (SELECT MAX(latest.id) FROM feedback latest WHERE latest.item_id = f.item_id);
     """,
+    # v13：来源语义分析与参考目录的个人显示状态，不改已关注来源或材料。
+    """
+    CREATE TABLE source_analyses (
+        source_id TEXT PRIMARY KEY REFERENCES sources(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        input_hash TEXT NOT NULL,
+        data TEXT NOT NULL,
+        model TEXT NOT NULL,
+        ts TEXT NOT NULL
+    );
+    CREATE TABLE source_catalog_hidden (
+        source_id TEXT PRIMARY KEY
+    );
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。

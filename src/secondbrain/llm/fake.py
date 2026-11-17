@@ -21,6 +21,7 @@ from secondbrain.llm.schemas import (
     LintFindings,
     PrereqExplanations,
     ProfileProposal,
+    SourceProfile,
     WikiPlan,
 )
 
@@ -151,6 +152,8 @@ class FakeBackend:
             obj = _chunk_notes(payload)
         elif schema is ProfileProposal:
             obj = _profile_proposal(payload)
+        elif schema is SourceProfile:
+            obj = _source_profile(payload)
         elif schema is WikiPlan:
             obj = _wiki_plan(payload)
         elif schema is LintFindings:
@@ -357,4 +360,37 @@ def _wiki_plan(payload: dict) -> dict:
         "summary": f"（fake）整理材料及 {len(concepts)} 个关联概念",
         "creates": creates,
         "updates": updates,
+    }
+
+
+def _source_profile(payload: dict) -> dict:
+    """仅从实际样本确定性提取领域，不把人工标签或采集协议当成新结论。"""
+    samples = payload["samples"]
+    text = " ".join(
+        f"{sample['title']} {sample['summary']} {' '.join(sample['topics'])}"
+        for sample in samples
+    ).casefold()
+    patterns = (
+        ("人工智能", (
+            "artificial intelligence", "machine learning", "llm", "transformer", "人工智能",
+        )),
+        ("计算机系统", ("database", "distributed", "kernel", "systems", "数据库")),
+        ("数学", ("mathematics", "theorem", "algebra", "数学")),
+        ("生物医学", ("biology", "medicine", "genome", "生物", "医学")),
+    )
+    domains = [domain for domain, words in patterns if any(word in text for word in words)]
+    kinds = []
+    if any(word in text for word in ("paper", "arxiv", "论文")):
+        kinds.append("论文聚合")
+    if any(word in text for word in ("tutorial", "course", "课程", "教程")):
+        kinds.append("课程")
+    if any(word in text for word in ("blog", "engineering", "技术")):
+        kinds.append("技术博客")
+    if any(word in text for word in ("news", "新闻")):
+        kinds.append("新闻")
+    return {
+        "domains": domains[:6],
+        "content_kinds": kinds[:4],
+        "summary": f"（fake）根据 {len(samples)} 条内容样本：{samples[0]['title'][:120]}",
+        "confidence": "medium" if domains and len(samples) >= 3 else "low",
     }
