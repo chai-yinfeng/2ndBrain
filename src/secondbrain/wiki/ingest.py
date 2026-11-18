@@ -151,6 +151,7 @@ def ingest_messages(
     wiki: Wiki, payload: dict, related: list[Page], s: FilterSettings
 ) -> list[dict]:
     system = (PROMPTS_DIR / "wiki_ingest.md").read_text(encoding="utf-8")
+    related = [page for page in related if page.is_visible]
     index = wiki.index_path.read_text(encoding="utf-8")[: s.wiki.index_max_chars]
     pages = [
         {
@@ -158,13 +159,17 @@ def ingest_messages(
             "type": p.type,
             "title": p.title,
             "aliases": p.aliases,
+            "material_sync_status": p.material_sync_status,
+            "source_warning": (
+                "来源已变化，机器内容待复核" if p.material_sync_status == "review" else None
+            ),
             "excerpt": p.body[: s.wiki.related_page_chars],
         }
         for p in related
     ]
     relevant = list(related)
     material = wiki.pages.get(payload["material_slug"])
-    if material is not None:
+    if material is not None and material.is_visible:
         relevant.append(material)
     guidance = []
     remaining = 6000
@@ -449,7 +454,8 @@ def pending_items(conn: sqlite3.Connection) -> list[int]:
     )
     return [
         row["id"] for row in rows
-        if row["id"] not in done or row["processing_status"] == "pending"
+        if not db.is_trashed(conn, row["id"])
+        and (row["id"] not in done or row["processing_status"] == "pending")
     ]
 
 
@@ -473,6 +479,8 @@ def ingest_item(
     result.calls 仅供展示已成功调用，不应与 callback 重复记账；result.usage 仅最终调用。
     超分块上限或提要长度上限明确失败，绝不截尾，也不把分块提要冒充全文。
     """
+    if db.is_trashed(conn, row["id"]):
+        raise WikiError("材料已在回收站，请先恢复再整理")
     learning_notes = _user_notes(wiki, row["id"], user_notes)
     payload = item_payload(row, None, s, user_notes=learning_notes)
     provenance = [dict(origin) for origin in db.material_origins(conn, row["id"])]
@@ -548,6 +556,11 @@ def ingest_item(
         payload["text"] = notes_text(notes)
         messages = ingest_messages(wiki, payload, related, s)
     plan, usage = complete(messages, WikiPlan, "strong", "WIKI")
+    if db.is_trashed(conn, row["id"]):
+        error = LLMError("整理期间材料已回收，未写入知识页；请恢复后重新整理")
+        error.stage = "WIKI"
+        error.accounted = on_usage is not None
+        raise error
     wiki.write_raw(row["id"], row["title"], row["url"] or "", content)
     result = apply_plan(
         wiki, plan, row, profile, today, s.wiki.first_review_days,

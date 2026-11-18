@@ -7,7 +7,7 @@
   <div class="page-actions"><form method="post" action="/wiki/reindex"><button class="fb" type="submit">从 Markdown 重新索引</button></form></div>
 </header>
 <nav class="subnav" aria-label="知识库视图"><a href="/wiki">知识页面</a><a href="/wiki/graph{% if include_drafts %}?drafts=1{% endif %}" aria-current="page">关系图谱</a></nav>
-{% if include_drafts %}<p class="refresh wiki-notice">当前包含机器草稿，不等于已登记阅读的知识库。<a href="/wiki/graph">返回正式知识库图谱</a></p>{% endif %}
+{% if include_drafts %}<p class="refresh wiki-notice">当前为高级视图，可显示机器草稿、来源已回收及待复核的机器内容。<a href="/wiki/graph">返回正式知识库图谱</a></p>{% endif %}
 {% if not count %}
 <p class="empty panel" id="graph-empty">知识网络为空。<a href="/add">导入材料</a>后可在材料详情页整理入 wiki，无需先运行推荐或提交反馈。</p>
 {% else %}

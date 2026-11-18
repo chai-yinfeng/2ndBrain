@@ -13,9 +13,11 @@
     {% if item.duration_seconds %}· 时长 {{ (item.duration_seconds / 60) | round | int }} 分钟{% endif %}
     {% if item.extract_method == "no_transcript" %}· <span class="tag">无字幕</span>{% endif %}
     {% if item.is_backfill %}· <span class="tag">经典回补</span>{% endif %}
-    {% if item.read_at %}· <span class="tag">已读 {{ item.read_at }}</span>{% endif %}
+    · <span class="tag reading-state" data-reading-state="{{ item.reading_state }}">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(item.reading_state, item.reading_state) }}</span>{% if item.read_at %} · {{ item.read_at }}{% endif %}
     {% if incomplete %}· <span class="tag warn" data-incomplete>正文不完整</span>{% endif %}
   </p>
+  {% if lifecycle.trashed %}<section class="panel"><h2>材料已在回收区</h2><p>原件、阅读记录和笔记仍保留。恢复后可继续阅读、补全文或整理；知识变更需单独预览同步。</p><form method="post" action="/materials/manage"><input type="hidden" name="item_ids" value="{{ item.id }}"><button class="fb" name="action" value="restore">恢复到默认列表</button></form>{% if notes %}<details><summary>保留的个人笔记</summary><pre class="original-content">{{ notes }}</pre></details>{% endif %}</section>{% elif lifecycle.hidden %}<p class="meta">此材料已从默认列表隐藏；阅读与知识内容保持不变。</p>{% endif %}
+  {% if not lifecycle.trashed %}
   <section id="register-read" class="panel form-panel">
     <div class="page-header"><div><h2>外部阅读与学习记录</h2><p class="help">记录你在原网站或 ChatGPT 中学到的内容；个人笔记由你维护，AI 不覆盖。</p></div></div>
     <p>登记状态：<strong data-reading-state="{{ item.reading_state }}">{{ {"unread":"未登记阅读","reading":"阅读中","read":"已登记阅读"}.get(item.reading_state, item.reading_state) }}</strong> · 知识整理：{{ item.processing_status }} · 正文：{{ item.content_completeness }}</p>
@@ -35,16 +37,17 @@
     {% if material_page %}<p><a href="/wiki/page/{{ material_page.slug }}">打开整理页{% if material_page.knowledge_status == "draft" %}（机器草稿）{% endif %}</a>{% if material_page.knowledge_status != "draft" %} · <a href="/wiki/graph?focus={{ material_page.slug }}">在知识库图谱中定位</a>{% endif %}</p>{% endif %}
     <details><summary>高级：只生成未读材料的机器草稿</summary><p class="meta">草稿不进入正式知识库，不代表你已读。</p><button class="fb" hx-post="/item/{{ item.id }}/wiki" hx-target="#task-wiki-{{ item.id }}" hx-swap="outerHTML">整理机器草稿</button>{% with kind="wiki-" ~ item.id, task=wiki_task, message=None %}{% include "_task.html" %}{% endwith %}</details>
   </section>
+  {% endif %}
   <details class="panel" id="original">
     <summary>原文与导入来源</summary>
-    <p class="toolbar">{% if item.url.startswith("http") %}<a class="fb" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">打开原文链接</a><button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML">重新抓取</button><span id="refetch-result" data-refetch></span>{% endif %}</p>
+    <p class="toolbar">{% if item.url.startswith("http") %}<a class="fb" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">打开原文链接</a>{% if not lifecycle.trashed %}<button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML">重新抓取</button><span id="refetch-result" data-refetch></span>{% endif %}{% endif %}</p>
     <ul class="origin-list">{% for origin in origins %}<li>{{ origin.kind }} · <span class="break-anywhere">{{ origin.locator }}</span>{% if origin.source_id %} · 信源 {{ origin.source_id }}{% endif %}{% if origin.original_path %} · <a href="/vault/{{ origin.original_path }}">原文件</a>{% endif %}
       {% if origin.metadata and origin.metadata.get('acquisition') %}{% with acquisition=origin.metadata.acquisition %}{% include "_acquisition.html" %}{% endwith %}
       {% elif origin.metadata %}<p class="meta">请求版本：{{ origin.metadata.get("requested_version") or "未指定" }} · 实际取得版本：{{ origin.metadata.get("actual_version") or "未知" }}{% if origin.actual_source_url %} · <a href="{{ origin.actual_source_url }}" target="_blank" rel="noopener">实际获取地址</a>{% endif %}</p>{% endif %}
     </li>{% endfor %}</ul>
     <details><summary>阅读原文（{{ item.content_len }} 字符；{{ item.extract_method }}）</summary><pre class="original-content">{{ item.original_text or item.content }}</pre></details>
   </details>
-  {% if incomplete %}
+  {% if incomplete and not lifecycle.trashed %}
   <section id="complete" class="panel form-panel">
     <h2>补全正文</h2>
     <p class="meta">这一条目前只有摘要或很短的正文（{{ item.content_len }} 字符，提取方式 {{ item.extract_method }}）。粘贴全文或上传 PDF（≤ 30MB）后会替换正文，之后的深度速读、补前置、编入 wiki 都基于完整正文。</p>
@@ -56,6 +59,7 @@
   </section>
   {% endif %}
 
+  {% if not lifecycle.trashed %}
   <details class="panel">
     <summary>辅助分析与历史反馈（不影响阅读登记）</summary>
   {% if not l2 %}
@@ -137,5 +141,6 @@
     {% else %}<p class="empty">还没有反馈。</p>{% endif %}
   </section>
   </details>
+  {% endif %}
 </article>
 {% endblock %}

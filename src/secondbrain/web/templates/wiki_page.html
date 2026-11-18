@@ -9,7 +9,8 @@
 {% block content %}
 <article class="detail wiki-article" data-wiki-page="{{ page.slug }}">
   <nav class="wiki-breadcrumb" aria-label="面包屑"><a href="/wiki">知识库</a><span aria-hidden="true">/</span><span>{{ page.type }}</span><span aria-hidden="true">/</span><span>{{ page.title }}</span></nav>
-  <header class="page-header"><div><p class="eyebrow">{{ page.type }} / KNOWLEDGE PAGE</p><h1>{{ page.title }}</h1><p class="meta">{{ {"recorded":"已登记阅读后的知识","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}</p></div><div class="page-actions"><a class="fb" href="/wiki/graph?focus={{ page.slug|urlencode }}{% if page.knowledge_status == 'draft' %}&amp;drafts=1{% endif %}">在知识网络中定位</a><a class="fb" href="/wiki/graph{% if page.knowledge_status == 'draft' %}?drafts=1{% endif %}">全局概览</a></div></header>
+  <header class="page-header"><div><p class="eyebrow">{{ page.type }} / KNOWLEDGE PAGE</p><h1>{{ page.title }}</h1><p class="meta">{{ {"recorded":"来源材料已登记阅读，不代表掌握","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}</p></div><div class="page-actions"><a class="fb" href="/wiki/graph?focus={{ page.slug|urlencode }}{% if not page.is_visible %}&amp;drafts=1{% endif %}">在知识网络中定位</a><a class="fb" href="/wiki/graph{% if not page.is_visible %}?drafts=1{% endif %}">全局概览</a></div></header>
+  {% if page.material_sync_status %}<p class="refresh panel" role="status">{{ {'withdrawn':'来源材料已回收，此自动材料页已从正式目录撤下；正文和个人内容仍保留。','unsupported':'没有有效来源，此机器内容保留待复核，不进入正式知识网络。','review':'部分来源已回收；共享知识保留，内容需要复核。'}.get(page.material_sync_status) }} <a href="/wiki/sync">查看知识变更</a></p>{% endif %}
   <div class="wiki-page-layout">
     <div class="wiki-reading-column">
       <section class="wiki-body panel wiki-prose">{{ body_html | safe }}</section>
@@ -36,7 +37,7 @@
     <aside class="wiki-page-sidebar">
       <section class="panel"><h2>页面信息</h2><dl class="wiki-facts"><dt>稳定路径</dt><dd class="wiki-stable-path">{{ page.slug }}</dd><dt>类型</dt><dd>{{ page.type }}</dd><dt>别名</dt><dd>{{ page.aliases|join("、") or "暂无别名" }}</dd>{% if page.meta.mastery %}<dt>掌握度</dt><dd>{{ page.meta.mastery }}</dd>{% endif %}</dl></section>
       <section class="panel"><h2>来源材料</h2>{% if page.meta.sources %}<div class="wiki-source-links">{% for sid in page.meta.sources %}<a class="fb" href="/item/{{ sid }}">材料 #{{ sid }}</a>{% endfor %}</div>{% else %}<p class="empty">未记录来源材料。</p>{% endif %}</section>
-      {% if page.type == "concept" and page.knowledge_status != "draft" %}<section class="panel wiki-review"><h2>复习这个概念</h2>{% if due %}<p class="help">下次复习 {{ due }} · 间隔 {{ page.meta.interval_days }} 天 · ease {{ page.meta.ease }}</p>{% endif %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}</section>{% endif %}
+      {% if page.type == "concept" and page.is_visible %}<section class="panel wiki-review"><h2>复习这个概念</h2>{% if due %}<p class="help">下次复习 {{ due }} · 间隔 {{ page.meta.interval_days }} 天 · ease {{ page.meta.ease }}</p>{% endif %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}</section>{% endif %}
     </aside>
   </div>
 </article>

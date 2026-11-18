@@ -31,7 +31,8 @@ def known_knowledge(
     for p in pages:
         summary = (p.meta.get("summary") or "").replace("\n", " ")
         mastery = p.meta.get("mastery") or "—"
-        line = f"- {p.title}（{p.type}；掌握度：{mastery}）— {summary}"
+        warning = "；来源已变化，待复核" if p.material_sync_status == "review" else ""
+        line = f"- {p.title}（{p.type}；掌握度：{mastery}{warning}）— {summary}"
         if total + len(line) > max_chars:
             break
         lines.append(line)
@@ -58,6 +59,6 @@ def wiki_refresh_link(wiki: Wiki | None, prerequisite: str) -> tuple[Page | None
     if wiki is None:
         return None, False
     page = wiki.find(prerequisite)
-    if page is None or page.type != "concept" or page.knowledge_status == "draft":
+    if page is None or page.type != "concept" or not page.is_visible:
         return None, False
     return page, page.meta.get("mastery") != SOLID

@@ -17,7 +17,7 @@ def link_index(wiki: Wiki, *, include_drafts: bool = False) -> dict[str, dict]:
     """统一消歧、草稿过滤与人工禁止；隐藏页不被误报为缺页。"""
     visible = {
         slug: page for slug, page in wiki.pages.items()
-        if include_drafts or page.knowledge_status != "draft"
+        if include_drafts or page.is_visible
     }
     index = {
         slug: {"outgoing": [], "backlinks": [], "missing": [], "ambiguous": []}
@@ -74,6 +74,7 @@ def build_graph(wiki: Wiki, today: date, *, include_drafts: bool = False) -> dic
                 "sources": page.meta.get("sources") or [],
                 "material_id": page.meta.get("material_id"),
                 "knowledge_status": page.knowledge_status,
+                "material_sync_status": page.material_sync_status,
                 "mastery": page.meta.get("mastery"),
                 "due": bool(due and due <= today),
                 "degree": degree[slug],

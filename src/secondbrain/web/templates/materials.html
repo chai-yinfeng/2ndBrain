@@ -1,22 +1,40 @@
 {% extends "base.html" %}
 {% block title %}材料存档 · Second Brain{% endblock %}
 {% block content %}
-<div class="page-header"><div><p class="eyebrow">资料</p><h1>材料存档</h1><p class="meta">所有已保存的材料，不等同于稍后清单。需要阅读时，再加入列表。</p></div><div class="page-actions"><a class="fb" href="/later">阅读列表</a><a class="fb primary" href="/add">添加材料</a></div></div>
-<form method="get" action="/materials" class="toolbar">
-  <label>查找材料 <input name="q" value="{{ query }}" type="search"></label>
-  <label>阅读状态 <select name="reading"><option value="">全部</option>{% for key, label in [("unread","未读"),("reading","阅读中"),("read","已读")] %}<option value="{{ key }}"{% if reading == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
-  <button class="fb" type="submit">筛选</button>
+<header class="page-header">
+  <div><p class="eyebrow">资料</p><h1>材料存档</h1><p class="meta">隐藏只整理列表；回收可恢复。知识内容先保留，手动同步前查看影响范围。</p></div>
+  <div class="page-actions"><a class="fb" href="/wiki/sync">预览知识变更</a><a class="fb" href="/later">阅读列表</a><a class="fb primary" href="/add">添加材料</a></div>
+</header>
+{% if notice %}<p class="saved" role="status">{{ notice }}</p>{% endif %}
+<form method="get" action="/materials" class="toolbar material-filters">
+  <label>查找材料<input name="q" value="{{ query }}" type="search"></label>
+  <label>阅读状态<select name="reading"><option value="">全部</option>{% for key, label in [("unread","未读"),("reading","阅读中"),("read","已读")] %}<option value="{{ key }}"{% if reading == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>正文<select name="completeness"><option value="">全部</option>{% for key, label in [("full","全文"),("partial","不完整"),("abstract","仅摘要"),("missing","无正文/仅引用")] %}<option value="{{ key }}"{% if completeness == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <label>整理状态<select name="processing"><option value="">全部</option><option value="pending"{% if processing == 'pending' %} selected{% endif %}>未整理/待整理</option><option value="processed"{% if processing == 'processed' %} selected{% endif %}>已整理</option></select></label>
+  <label>显示范围<select name="view">{% for key, label in [("active","默认列表"),("hidden","已隐藏"),("trash","回收区"),("all","全部材料")] %}<option value="{{ key }}"{% if view == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+  <button class="fb" type="submit">筛选</button><a class="fb ghost" href="/materials">清除筛选</a>
 </form>
-<div class="compact-list">
+<div class="toolbar material-management">
+  <form id="material-actions" method="post" action="/materials/manage" class="page-actions">
+    {% for name, value in [('q',query),('reading',reading),('processing',processing),('completeness',completeness),('view',view)] %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    {% if view != 'trash' %}{% if view != 'hidden' %}<button class="fb small" name="action" value="hide">隐藏选中</button>{% endif %}{% if view in ['hidden','all'] %}<button class="fb small" name="action" value="unhide">取消隐藏</button>{% endif %}<button class="fb small" name="action" value="trash">移入回收区</button>{% endif %}
+    {% if view in ['trash','all'] %}<button class="fb small" name="action" value="restore">恢复到默认列表</button>{% endif %}
+  </form>
+  <form method="post" action="/materials/hide-read"><button class="fb small" type="submit">隐藏全部已读…</button></form>
+  <label class="choice"><input type="checkbox" data-select-materials disabled>全选本页</label><span class="meta" id="material-selection" role="status" aria-live="polite">选择材料后批量处理</span>
+</div>
+<div class="compact-list material-list">
 {% for row in rows %}
 <article class="list-row" data-item-id="{{ row.id }}">
+  <label class="material-select"><input type="checkbox" name="item_ids" value="{{ row.id }}" form="material-actions" aria-label="选择 {{ row.title }}"></label>
   <div class="row-main">
-    <h2><a href="/item/{{ row.id }}">{{ row.title }}</a><span class="tag">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }}</span></h2>
-    <p class="meta">{{ row.author or "作者未知" }} · {{ row.processing_status }} · {{ row.content_completeness }}</p>
+    <h2><a href="/item/{{ row.id }}">{{ row.title }}</a><span class="tag reading-state" data-reading-state="{{ row.reading_state }}">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }}</span>{% if row.is_trashed %}<span class="tag warn">已回收</span>{% elif row.is_hidden %}<span class="tag">已隐藏</span>{% endif %}</h2>
+    <p class="meta">{{ row.author or "作者未知" }} · {{ {"pending":"未整理/待整理","processed":"已整理"}.get(row.processing_status, row.processing_status) }} · {{ {"full":"全文","partial":"正文不完整","abstract":"仅摘要","missing":"无正文/仅引用"}.get(row.content_completeness, row.content_completeness) }}</p>
   </div>
-  <div class="row-actions"><form method="post" action="/reading/{{ row.id }}/add"><button class="fb small" type="submit">加入阅读列表</button></form></div>
+  {% if not row.is_trashed %}<div class="row-actions"><form method="post" action="/reading/{{ row.id }}/add"><button class="fb small" type="submit">加入阅读列表</button></form></div>{% endif %}
 </article>
-{% else %}<p class="empty">没有符合条件的材料。可清除筛选，或直接导入材料，无需配置信源。</p>{% endfor %}
+{% else %}<p class="empty">没有符合条件的材料。隐藏或回收的内容可通过“显示范围”找回。</p>{% endfor %}
 </div>
-{% if next_offset is not none %}<p><a href="/materials?q={{ query|urlencode }}&reading={{ reading }}&offset={{ next_offset }}">下一页</a></p>{% endif %}
+{% if next_offset is not none %}<p><a href="{{ filter_url }}&amp;offset={{ next_offset }}">下一页</a></p>{% endif %}
+<script src="{{ static_asset('materials.js') }}" defer></script>
 {% endblock %}

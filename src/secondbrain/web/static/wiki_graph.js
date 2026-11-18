@@ -189,7 +189,8 @@
       $("node-title").textContent = node.label;
       $("node-kind").textContent = `${node.type} · ${node.id}`;
       $("node-aliases").textContent = node.aliases.length ? `别名：${node.aliases.join("、")}` : "暂无别名";
-      $("node-state").textContent = `${knowledgeStatus[node.knowledge_status] || "知识页"} · 掌握度 ${node.mastery || "未设置"}${node.due ? " · 已到期复习" : ""}`;
+      const syncStatus = {withdrawn: "来源材料已回收", unsupported: "无有效来源，待复核", review: "部分来源待复核"}[node.material_sync_status];
+      $("node-state").textContent = `${syncStatus ? syncStatus + " · " : ""}${knowledgeStatus[node.knowledge_status] || "知识页"} · 掌握度 ${node.mastery || "未设置"}${node.due ? " · 已到期复习" : ""}`;
       $("node-open").href = node.url;
       const sources = $("node-sources");
       sources.replaceChildren();

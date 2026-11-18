@@ -921,3 +921,25 @@
 **独立worktree说明**
 
 - `2ndbrain-material-network` 是按最初“先建独立worktree”要求创建的隔离分支目录；Git分支创建记录为 `2026-11-16T03:50:10-05:00`。它与主目录共享Git历史，main尚未整合该分支。当前服务仍从该worktree运行代码，个人记录已与它分离；应先整合并切换服务入口，再用git worktree remove清理，不能直接删除或用旧main运行新数据。本轮不merge、不push、不创建PR。
+
+## 可恢复材料管理、手动知识同步与历史批量清理（ADR 0027）
+
+- 用户选择 `review_then_sync`：隐藏已读只整理列表；误导入材料可恢复回收，知识先保留，手动预览后同步。schema v14追加 `material_lifecycle`，仅回收/恢复真实变化增加revision；原阅读状态、来源、清单意图、原件和笔记保留。回收项从清单/自动处理排除，显式模型处理和重复导入要求先恢复，不物理删除。
+- 材料存档新增正文完整度、整理状态、可见范围筛选及批量全选、隐藏/取消隐藏、回收/恢复；隐藏全部已读和回收显示确认范围。已读绿色、阅读中蓝色、未读黄色/琥珀色，同时保留文字和圆点。CLI `items manage`、`items hide-read`复用同一服务。
+- `/wiki/sync` 与 `sb wiki sync [--apply token]`先只读预览；token覆盖材料、笔记、生命周期及知识文件，变化后必须重新预览。已读正文/笔记更新使用真实增量整理服务和既有批量预算，不自动登记未读。回收/恢复只管理机器页 `material_sync` 元数据：材料页withdrawn，共享概念有剩余来源review、无有效来源unsupported；正式目录/图谱/复习/模型上下文排除withdrawn及unsupported，review保留提示；高级视图保留所有页面。正文、个人笔记、掌握度与人工关系不删除，恢复可同步重新显示。
+- 默认索引不再重复显示recorded的“已登记”，内部仍只表示来源登记过阅读、不代表概念掌握。legacy/来源待复核等例外保留；语义召回没有冒充增强，相关页检索仍主要是名称/别名字面匹配，模型看到索引/候选后能判断关系，但不能保证未知同义或跨域关联都被找到。PDF仍建议补原材料，未增加OCR/视觉解析。
+- 历史页增加一次收起全部已结束记录的确认操作，跨分页处理，运行中和待选择保留；不删材料/原件/用量，已关闭记录仍能查看。同步页区分当前预览与最近一次任务结果，日志可折叠。
+
+**验证**
+
+- `uv run pytest -q tests/test_material_lifecycle.py tests/test_wiki_sync.py tests/test_material_management_web.py tests/test_materials.py tests/test_material_web.py tests/test_material_wiki.py tests/test_reading_workflow.py tests/test_reading_semantics_web.py tests/test_network.py tests/test_network_web.py tests/test_knowledge_governance.py tests/test_wiki.py tests/test_ops.py tests/test_paper_surfaces.py tests/test_feedback.py` 首轮 **187 passed、1 failed**。失败是旧迁移用例写死schema12，移除实现版本断言，保留跨版本清单意图、原材料/反馈/来源/个人内容保持的验证；该项单独 **1 passed**。相关Ruff修正后通过，未跑全套。
+- 新回归涵盖旧库默认active、批量原子性、回收/恢复清单和身份、回收项模型前拒绝、过期预览、多来源及恢复重试、个人内容保持。补充模型整理期间新增有效来源的场景：共享概念仍保留review，变化的生命周期不错误确认。
+- 所有操作使用 `/tmp/secondbrain-manage.vdxM3x`、fake后端。实际浏览器验证三种状态颜色（亮/暗）、全选和隐藏全部已读、取消隐藏、回收确认、恢复、正文筛选。回收后同步前图谱仍保留；同步后单个材料页撤下、共享概念review；全部来源回收后正式图0节点，高级图4节点保留withdrawn/unsupported；恢复后正式图4节点。回收/恢复全程知识正文及notes字节摘要保持，未增加模型调用。再显式保存新笔记，预览显示模型费用提示，确认后实际调用既有fake增量整理服务并更新页面；CLI隐藏/取消隐藏及只读预览、token应用通过。
+- 390px页面宽390、材料行宽356、标题区298，无横向溢出、无应用脚本错误。浏览器批量清理保留待选择任务；运行中保护及重启持久性由消费者回归覆盖（浏览器的受控运行任务在清理前已自然结束，不将它宣称为运行中保护证明）。
+
+**部署与额外阻断修复**
+
+- 部署检查发现用户一项信源检查：HTTP内存状态已done（只读预览、未改配置），磁盘状态却仍running；服务日志明确 `TypeError: Object of type SourceConfig is not JSON serializable`。根因是信源检查任务返回的discovery含富类型对象。Web任务边界现在只保存检查摘要，丢弃无需持久化的完整discovery，不使用default=str隐藏错误。新增跨重启完成记录及批量清理回归，与来源工作流/重启不重试合计 **7 passed**；Ruff通过。旧未确认完整保存记录保留日志，按重启恢复状态提示，不伪造丢失的预览结果、不自动重跑。
+- 按服务实际状态确认无执行中任务后停服，完整备份到 `~/Library/Application Support/SecondBrain/migration-backups/before-material-management-20261118-133940`：92文件摘要一致，两份SQLite完整性正常。业务库13→14仅新增生命周期表，所有旧表记录逐项一致，生命周期行0；所有知识正文、raw和notes字节保持，只重新生成派生index以去掉冗余标签。
+- 新服务 **`sb-managed-personal-preview`** 继续8765及既有持久工作区，必要key仍只读注入进程，不改原.env、launchd或启动Obsidian。材料/回收区/知识页/同步预览/历史/高级图谱均HTTP200；默认9份材料、清单6条、生命周期0行、用量15条，与升级前一致。本轮没有自动隐藏、回收、清理用户历史或调用真实模型。
+- 验收服务/浏览器关闭后，隔离目录、脚本和临时截图已清理；持久数据与明确命名的升级前备份保留。M14原生验收缺口保持，仅本地提交，不merge/push/PR。

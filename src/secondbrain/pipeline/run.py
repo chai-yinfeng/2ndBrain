@@ -432,6 +432,8 @@ def deep_one(
     now: datetime,
 ) -> DeepOutcome:
     """按需精读单条（sb deep / Web "精读"按钮）。不改变条目在 digest 中的位置。"""
+    if db.is_trashed(conn, row["id"]):
+        return DeepOutcome(None, error=f"材料 #{row['id']} 已回收，请先恢复后再精读")
     if row["extract_method"] == NO_TRANSCRIPT:
         return DeepOutcome(None, error="该视频没有字幕，无法精读")
     report = RunReport()

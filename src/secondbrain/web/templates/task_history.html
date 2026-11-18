@@ -3,8 +3,9 @@
 {% block content %}
 <header class="page-header">
   <div><p class="eyebrow">后台工作</p><h1>任务记录</h1><p class="meta">进度、候选和结果持久保留。等待选择不代表已导入；重启中断不会自动重试。</p></div>
-  <div class="page-actions"><a class="fb" href="/add">添加材料</a><a class="fb" href="/task-history{% if not include_dismissed %}?closed=1{% endif %}">{{ '隐藏已关闭' if include_dismissed else '包括已关闭' }}</a></div>
+  <div class="page-actions"><a class="fb" href="/add">添加材料</a><a class="fb" href="/task-history{% if not include_dismissed %}?closed=1{% endif %}">{{ '隐藏已关闭' if include_dismissed else '包括已关闭' }}</a><form method="post" action="/task-history/clear"><button class="fb" type="submit">清理已结束历史…</button></form></div>
 </header>
+{% if cleared is not none %}<p class="saved" role="status">已收起 {{ cleared }} 条已结束记录；材料、用量和知识不受影响。“包括已关闭”可重新查看。</p>{% endif %}
 <section class="panel">
 {% for record in records %}
 <article class="task" data-task-record="{{ record.id }}">

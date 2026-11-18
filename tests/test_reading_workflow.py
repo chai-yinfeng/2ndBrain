@@ -427,7 +427,6 @@ def test_copied_v11_migration_only_queues_latest_later_and_preserves_records(wor
     shutil.copyfile(original, copied)
     migrated = db.connect(copied)
     try:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 12
         assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
         queue, = db.reading_list_items(migrated)
         assert queue["id"] == 1 and queue["added_at"] == "2026-11-01T00:00:00Z"

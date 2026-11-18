@@ -24,6 +24,8 @@
       {% for error in summary.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
       <p class="meta">本次估算费用 ${{ "%.4f"|format(summary.cost) }}</p>
       {% for slug in summary.created + summary.updated %}<a href="/wiki/page/{{ slug }}">{{ slug }}</a> {% endfor %}
+    {% elif kind == "wiki-sync" %}
+      {% with result=task.result %}{% include "_wiki_sync_result.html" %}{% endwith %}
     {% elif kind == "wiki_ingest" or kind.startswith("wiki-") %}
       <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>

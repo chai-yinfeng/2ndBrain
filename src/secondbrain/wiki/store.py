@@ -133,6 +133,20 @@ class Page:
         status = self.meta.get("knowledge_status")
         return status if status in ("draft", "recorded", "legacy") else "legacy"
 
+    @property
+    def material_sync_status(self) -> str | None:
+        marker = self.meta.get("material_sync")
+        status = marker.get("status") if isinstance(marker, dict) else None
+        return status if status in {"withdrawn", "unsupported", "review"} else None
+
+    @property
+    def is_visible(self) -> bool:
+        """正式知识视图；人工正文始终留在文件中，来源失效只影响机器页可见性。"""
+        return (
+            self.knowledge_status != "draft"
+            and self.material_sync_status not in {"withdrawn", "unsupported"}
+        )
+
     def names(self) -> list[str]:
         """用于名称查找；文件名与标题/别名均保留，不把中文转为空 slug。"""
         stem = self.path.stem if self.path else self.slug.rsplit("/", 1)[-1]
@@ -218,6 +232,21 @@ class Wiki:
             self.reload_pages()
         return path
 
+    def save_metadata(self, page: Page, *, expected_hash: str | None = None) -> None:
+        """只写 frontmatter，完整保留原文件正文；外部编辑后不覆盖旧预览。"""
+        if page.path is None or not self._is_page_path(page.path):
+            raise WikiError("元数据同步需要已存在的 wiki 页面")
+        original = page.path.read_bytes().decode("utf-8")
+        if expected_hash is not None:
+            import hashlib
+
+            if hashlib.sha256(original.encode("utf-8")).hexdigest() != expected_hash:
+                raise WikiError("wiki 页面已变化，请重新预览")
+        frontmatter = re.match(r"\A---\r?\n.*?\r?\n---(?=\r?\n|\Z)", original, re.S)
+        suffix = original[frontmatter.end():] if frontmatter else "\n\n" + original
+        front = yaml.safe_dump(page.meta, allow_unicode=True, sort_keys=False).strip()
+        page.path.write_bytes(f"---\n{front}\n---{suffix}".encode())
+
     def write_raw(self, item_id: int, title: str, url: str, content: str) -> Path:
         path = self.raw_path(item_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,16 +292,16 @@ class Wiki:
             lines += ["", f"## {heading}", ""]
             entries = sorted(
                 (p for p in self.pages.values()
-                 if p.type == page_type and p.knowledge_status != "draft"),
+                 if p.type == page_type and p.is_visible),
                 key=lambda p: p.slug,
             )
             for p in entries:
                 summary = (p.meta.get("summary") or "").replace("\n", " ").strip()
-                label = (
-                    "〔历史页：阅读状态未知〕"
-                    if p.knowledge_status == "legacy" else "〔已登记〕"
-                )
-                lines.append(f"- [[{p.slug}]] {label}" + (f" — {summary}" if summary else ""))
+                label = "〔历史页：阅读状态未知〕" if p.knowledge_status == "legacy" else ""
+                if p.material_sync_status == "review":
+                    label += "〔来源已变化：待复核〕"
+                suffix = f" {label}" if label else ""
+                lines.append(f"- [[{p.slug}]]{suffix}" + (f" — {summary}" if summary else ""))
             if not entries:
                 lines.append("（暂无）")
         self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -338,6 +367,8 @@ class Wiki:
         haystack = text.lower()
         hits = []
         for page in self.pages.values():
+            if not page.is_visible:
+                continue
             best = max((len(n) for n in page.names() if len(n) >= 3 and n in haystack), default=0)
             if best:
                 hits.append((best, page))
@@ -347,7 +378,7 @@ class Wiki:
     def concepts(self) -> list[Page]:
         return [
             p for p in self.pages.values()
-            if p.type == "concept" and p.knowledge_status != "draft"
+            if p.type == "concept" and p.is_visible
         ]
 
 

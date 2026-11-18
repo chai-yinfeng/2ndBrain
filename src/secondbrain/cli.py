@@ -500,6 +500,31 @@ def parse_since(value: str) -> timedelta:
     return timedelta(**{_SINCE_UNITS[m.group(2)]: int(m.group(1))})
 
 
+@items_app.command("manage")
+def items_manage(
+    action: str = typer.Argument(help="hide / unhide / trash / restore"),
+    item_ids: Annotated[list[int], typer.Argument(help="材料ID，可多个")] = ...,
+) -> None:
+    """批量隐藏、回收或恢复；原件与笔记保留，知识变更需单独同步。"""
+    from secondbrain import ops
+    from secondbrain.material_management import manage_materials
+
+    try:
+        result = manage_materials(item_ids, action=action)
+    except (ops.OpsError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已处理 {len(result['changed'])} 份，未变化 {len(result['unchanged'])} 份")
+
+
+@items_app.command("hide-read")
+def items_hide_read() -> None:
+    """隐藏全部已读材料；不改变阅读事实或知识内容，可在已隐藏视图恢复。"""
+    from secondbrain.material_management import hide_read
+
+    result = hide_read()
+    typer.echo(f"已隐藏 {len(result['changed'])} 份已读材料")
+
+
 @items_app.command("incomplete")
 def items_incomplete() -> None:
     """列出"正文不完整"的条目：只有摘要，或手动添加的论文类正文短于 1500 字符（ADR 0020）。"""
@@ -1147,6 +1172,43 @@ def _print_l2(l2: dict, url: str, key_point_link) -> None:
 
 def _open_wiki():
     return open_wiki(config.wiki_dir(), config.raw_dir())
+
+
+@wiki_app.command("sync")
+def wiki_sync(
+    apply: str | None = typer.Option(None, "--apply", help="确认应用预览token；省略则只读预览"),
+) -> None:
+    """预览并显式同步材料变更；回收/恢复不删除个人内容。"""
+    from secondbrain import ops
+    from secondbrain.wiki.store import WikiError
+    from secondbrain.wiki.sync import apply_sync, preview_sync
+
+    try:
+        if apply is not None:
+            result = apply_sync(apply, typer.echo)
+            typer.echo(
+                f"新建 {len(result['created'])} 页，更新 {len(result['updated'])} 页，"
+                f"撤下 {len(result['withdrawn'])} 页，待复核 {len(result['review'])} 页，"
+                f"恢复 {len(result['restored'])} 页；估算费用 ${result['cost']:.4f}"
+            )
+            for error in result["errors"]:
+                typer.echo(error, err=True)
+            if result["failures"]:
+                raise typer.Exit(code=1)
+            return
+        plan = preview_sync()
+        for change in plan["changes"]:
+            typer.echo(f"#{change['item_id']} {change['title']}：{change['reason']}")
+            for page in change["pages"]:
+                typer.echo(f"  {page['slug']} · {page['effect']}")
+        if not plan["changes"]:
+            typer.echo("没有待同步变更")
+        if any(change["needs_ingest"] for change in plan["changes"]):
+            typer.echo("确认后包含模型增量整理，仍受既有单次费用上限约束。")
+        typer.echo(f"预览token：{plan['token']}")
+        typer.echo(f"应用：sb wiki sync --apply {plan['token']}")
+    except (ops.OpsError, WikiError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @wiki_app.command("reindex")

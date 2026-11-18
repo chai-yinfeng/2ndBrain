@@ -1,0 +1,7 @@
+{% for key, label in [('created','新建页面'),('updated','更新页面'),('withdrawn','撤下的自动材料页'),('review','保留待复核页面'),('restored','恢复页面')] %}
+{% if result.get(key) %}<p>{{ label }}：{% for slug in result[key] %}<a href="/wiki/page/{{ slug|urlencode }}">{{ slug }}</a>{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
+{% endfor %}
+<p class="meta">本次估算费用 ${{ '%.4f'|format(result.cost) }}；未改变个人笔记、掌握度或人工关联。</p>
+{% if result.failures %}<p class="refresh">有 {{ result.failures }} 项未完成，保留待同步，可重新预览后重试。</p>{% endif %}
+{% for error in result.errors %}<p class="refresh break-anywhere">{{ error }}</p>{% endfor %}
+<a class="fb small" href="/wiki/sync">重新预览待同步变更</a>

@@ -47,6 +47,11 @@ class OpsError(Exception):
     """配置、后端或锁的问题；消息可直接展示给用户。"""
 
 
+def _require_active(conn, item_id: int) -> None:
+    if db.is_trashed(conn, item_id):
+        raise OpsError(f"材料 #{item_id} 已回收，请先恢复后再处理")
+
+
 class RunLocked(OpsError):
     """已有一次 sb run（CLI、定时任务或 Web）在运行。"""
 
@@ -240,6 +245,12 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                 echo(f"{FAIL} 条目不存在：{iid}")
                 summary.failures += 1
                 continue
+            if db.is_trashed(conn, iid):
+                message = f"材料 #{iid} 已回收，请先恢复后再整理"
+                echo(f"{FAIL} {message}")
+                summary.errors.append(message)
+                summary.failures += 1
+                continue
             notes = material_notes(iid)
             material = wiki.pages.get(f"material-{iid}")
             compiled = (
@@ -248,6 +259,7 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                 and material.meta.get("input_hash") == material_input_hash(row, notes)
             )
             if compiled and not force:
+                _require_active(conn, iid)
                 if row["reading_state"] == "read":
                     summary.updated += [
                         slug for slug in promote_material(wiki, iid)
@@ -376,6 +388,7 @@ def register_read(
     try:
         if not db.item_exists(conn, item_id):
             raise OpsError(f"材料不存在：{item_id}")
+        _require_active(conn, item_id)
         db.mark_read(conn, item_id, datetime.now(UTC))
         if discussion_url is not None:
             db.set_ai(
@@ -474,6 +487,7 @@ def deep_summary(item_id: int, echo: Echo, *, force: bool = False) -> SummaryOut
         row = db.item_detail(conn, item_id)
         if row is None:
             raise OpsError(f"条目不存在：{item_id}")
+        _require_active(conn, item_id)
         cached = db.get_ai(conn, item_id, "summary")
         if cached and not force:
             echo(f"#{item_id} 已有深度速读（{cached['_created_at']}），直接显示")
@@ -555,7 +569,9 @@ def find_explainers(conn, item_id: int, name: str, limit: int) -> list[dict]:
         return []
     marks = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, title, url FROM items WHERE id IN ({marks}) ORDER BY id DESC", ids
+        f"SELECT id, title, url FROM items i WHERE id IN ({marks})"
+        " AND NOT EXISTS (SELECT 1 FROM material_lifecycle m"
+        " WHERE m.item_id = i.id AND m.trashed = 1) ORDER BY id DESC", ids
     ).fetchall()
     found = []
     for r in rows:
@@ -578,6 +594,7 @@ def prerequisites(item_id: int, echo: Echo, *, force: bool = False) -> PrereqRep
         row = db.item_detail(conn, item_id)
         if row is None:
             raise OpsError(f"条目不存在：{item_id}")
+        _require_active(conn, item_id)
         wiki = open_wiki(config.wiki_dir(), config.raw_dir())
         entries = []
         for name, why in prereq_names(conn, item_id):
@@ -632,12 +649,13 @@ def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
 
     _, fs, _ = _settings()
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    existing = wiki.find(name)
-    if existing is not None:
-        return existing.slug, False
     conn = db.connect()
     try:
         row = db.item_detail(conn, item_id)
+        _require_active(conn, item_id)
+        existing = wiki.find(name)
+        if existing is not None:
+            return existing.slug, False
         cache = (db.get_ai(conn, item_id, "prereq") or {}).get("explanations", {})
     finally:
         conn.close()
@@ -1284,6 +1302,7 @@ REFETCH_NO_GAIN = "重新抓取未获得更完整正文"
 
 
 def _refetch(conn, item_id: int, url: str, client, fs) -> tuple[bool, str]:
+    _require_active(conn, item_id)
     if not url:
         return False, "本地材料没有可重新抓取的 URL；请上传 PDF 或粘贴正文"
     try:
@@ -1379,6 +1398,8 @@ def add_manual(
                     )
                 else:
                     existing = db.item_by_canonical(conn, manual_canonical(url))
+                    if existing:
+                        _require_active(conn, existing)
                     row = db.item_detail(conn, existing) if existing else None
                     must_fetch = (
                         row is None or fallback or refetch or existing in db.incomplete_ids(conn)
@@ -1501,6 +1522,7 @@ def refetch_item(item_id: int, client=None) -> str:
         row = db.item_detail(conn, item_id)
         if row is None:
             raise OpsError(f"条目不存在：{item_id}")
+        _require_active(conn, item_id)
         replaced, note = _refetch(conn, item_id, row["url"], client, fetch_fs)
         if not replaced:
             return note
@@ -1530,6 +1552,7 @@ def complete_item(item_id: int, *, text: str | None = None, pdf: bytes | None = 
         row = db.item_detail(conn, item_id)
         if row is None:
             raise OpsError(f"条目不存在：{item_id}")
+        _require_active(conn, item_id)
         fetched = ManualFetched(
             RawEntry(
                 url=row["url"], title=row["title"], author=row["author"],

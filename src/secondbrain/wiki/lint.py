@@ -98,10 +98,13 @@ def llm_contradictions(wiki: Wiki, backend: LLMBackend, max_chars: int = 12_000)
     """把各页摘要与开头交给 cheap 模型，找可能相互矛盾的说法。"""
     pages, total = [], 0
     for p in sorted(wiki.pages.values(), key=lambda p: p.slug):
+        if not p.is_visible:
+            continue
         excerpt = {
             "slug": p.slug,
             "title": p.title,
             "summary": p.meta.get("summary"),
+            "material_sync_status": p.material_sync_status,
             "text": p.body[:600],
         }
         total += len(json.dumps(excerpt, ensure_ascii=False))

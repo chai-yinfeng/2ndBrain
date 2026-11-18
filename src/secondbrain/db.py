@@ -305,6 +305,18 @@ MIGRATIONS: list[str] = [
         source_id TEXT PRIMARY KEY
     );
     """,
+    # v14：可恢复的材料生命周期；阅读、清单、来源与知识历史均保留。
+    """
+    CREATE TABLE material_lifecycle (
+        item_id INTEGER PRIMARY KEY REFERENCES items(id),
+        hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+        trashed INTEGER NOT NULL DEFAULT 0 CHECK (trashed IN (0, 1)),
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        synced_revision INTEGER NOT NULL DEFAULT 0
+            CHECK (synced_revision >= 0 AND synced_revision <= revision),
+        updated_at TEXT NOT NULL
+    );
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -570,6 +582,8 @@ def persist_material(
     item_id = next(iter(candidates), None)
     old = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if old is not None:
+        if is_trashed(conn, item_id):
+            raise ValueError(f"材料 #{item_id} 已回收，请先恢复后再导入或补全")
         for column, value in (("doi", item.doi), ("arxiv_id", item.arxiv_id)):
             if value and old[column] and value != old[column]:
                 raise ValueError(f"材料身份冲突：#{item_id} 的 {column} 不同")
@@ -686,6 +700,9 @@ def items_by_status(
         f"""
         SELECT {ITEM_COLUMNS} FROM items i JOIN sources s ON s.id = i.source_id
         WHERE i.status IN ({marks}){extra}
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
         """,
         statuses,
@@ -698,6 +715,9 @@ def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
         """
         SELECT COUNT(*) FROM digests d JOIN items i ON i.id = d.item_id
         WHERE d.date = ? AND i.is_backfill = 1 AND d.lane IN ('refresher', 'deferred')
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """,
         (day,),
     ).fetchone()[0]
@@ -747,6 +767,9 @@ def deferred_since(conn: sqlite3.Connection) -> dict[int, str]:
         SELECT d.item_id, COALESCE(d.deferred_from, d.date) AS since FROM digests d
         JOIN items i ON i.id = d.item_id
         WHERE i.status = 'deferred' AND d.lane = 'deferred'
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """
     ).fetchall()
     result: dict[int, str] = {}
@@ -763,8 +786,9 @@ def day_usage(
     counts: dict[str, int] = {}
     minutes = 0
     rows = conn.execute(
-        "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests"
-        " WHERE date = ?",
+        "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests d"
+        " WHERE date = ? AND NOT EXISTS ("
+        " SELECT 1 FROM material_lifecycle m WHERE m.item_id = d.item_id AND m.trashed = 1)",
         (day,),
     )
     for r in rows:
@@ -807,6 +831,9 @@ def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int
         LEFT JOIN ({LATEST_FEEDBACK}) lf ON lf.item_id = d.item_id
         WHERE d.lane = 'must_read' AND d.date < ? AND i.read_at IS NULL
           AND COALESCE(lf.kind, '') NOT IN ('later', 'dismiss')
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """,
         (before_day,),
     ).fetchall()
@@ -827,7 +854,9 @@ def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
                i.source_id, i.extract_method, i.is_backfill, length(i.content) AS content_len,
                s.type AS source_type
         FROM digests d JOIN items i ON i.id = d.item_id LEFT JOIN sources s ON s.id = i.source_id
-        WHERE d.date = ? ORDER BY d.lane, d.rank
+        WHERE d.date = ? AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        ) ORDER BY d.lane, d.rank
         """,
         (day,),
     ).fetchall()
@@ -852,6 +881,9 @@ def reading_list_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                   length(COALESCE(NULLIF(i.original_text, ''), i.content)) AS content_len,
                   i.reading_state, i.processing_status
            FROM reading_list r JOIN items i ON i.id = r.item_id
+           WHERE NOT EXISTS (
+               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+           )
            ORDER BY r.added_at DESC, i.id DESC"""
     ).fetchall()
 
@@ -860,6 +892,8 @@ def add_to_reading_list(
     conn: sqlite3.Connection, item_id: int, ts: datetime | None = None
 ) -> None:
     """幂等加入清单，不创建反馈、不改变阅读状态。"""
+    if is_trashed(conn, item_id):
+        raise ValueError(f"材料 #{item_id} 已回收，请先恢复")
     conn.execute(
         "INSERT OR IGNORE INTO reading_list (item_id, added_at) VALUES (?, ?)",
         (item_id, format_time(ts or datetime.now(UTC))),
@@ -944,7 +978,9 @@ def items_in_state(conn: sqlite3.Connection, kind: str) -> list[sqlite3.Row]:
         SELECT i.id, i.title, i.url, i.source_id, length(i.content) AS content_len,
                lf.ts AS state_ts
         FROM ({LATEST_FEEDBACK}) lf JOIN items i ON i.id = lf.item_id
-        WHERE lf.kind = ? ORDER BY lf.id DESC
+        WHERE lf.kind = ? AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        ) ORDER BY lf.id DESC
         """,
         (kind,),
     ).fetchall()
@@ -1009,7 +1045,9 @@ def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: 
 def gained_item_ids(conn: sqlite3.Connection) -> list[int]:
     """当前状态为"有收获"的条目，按标记时间先后。"""
     rows = conn.execute(
-        f"SELECT item_id FROM ({LATEST_FEEDBACK}) WHERE kind = 'gained' ORDER BY id"
+        f"SELECT item_id FROM ({LATEST_FEEDBACK}) f WHERE kind = 'gained'"
+        " AND NOT EXISTS (SELECT 1 FROM material_lifecycle m"
+        " WHERE m.item_id = f.item_id AND m.trashed = 1) ORDER BY id"
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -1189,12 +1227,69 @@ def incomplete_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         f"""
         SELECT i.id, i.title, i.url, i.source_id, i.extract_method,
                length(i.content) AS content_len, i.doi, i.arxiv_id
-        FROM items i WHERE {INCOMPLETE_SQL} ORDER BY i.id DESC
+        FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        ) ORDER BY i.id DESC
         """
     ).fetchall()
 
 
 def incomplete_ids(conn: sqlite3.Connection) -> set[int]:
-    return {r[0] for r in conn.execute(f"SELECT i.id FROM items i WHERE {INCOMPLETE_SQL}")}
+    return {
+        r[0] for r in conn.execute(
+            f"SELECT i.id FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS ("
+            "SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1)"
+        )
+    }
 
 
+def _has_lifecycle(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'material_lifecycle'"
+    ).fetchone() is not None
+
+
+def lifecycle_states(conn: sqlite3.Connection) -> dict[int, dict]:
+    """所有材料的生命周期快照；旧材料没有状态行时默认为 active / revision 0。"""
+    if not _has_lifecycle(conn):
+        return {
+            row[0]: {"hidden": False, "trashed": False, "revision": 0, "synced_revision": 0}
+            for row in conn.execute("SELECT id FROM items")
+        }
+    rows = conn.execute(
+        """SELECT i.id, COALESCE(m.hidden, 0) AS hidden, COALESCE(m.trashed, 0) AS trashed,
+                  COALESCE(m.revision, 0) AS revision,
+                  COALESCE(m.synced_revision, 0) AS synced_revision
+           FROM items i LEFT JOIN material_lifecycle m ON m.item_id = i.id"""
+    )
+    return {
+        row["id"]: {
+            "hidden": bool(row["hidden"]),
+            "trashed": bool(row["trashed"]),
+            "revision": row["revision"],
+            "synced_revision": row["synced_revision"],
+        }
+        for row in rows
+    }
+
+
+def is_trashed(conn: sqlite3.Connection, item_id: int) -> bool:
+    if not _has_lifecycle(conn):
+        return False
+    return conn.execute(
+        "SELECT 1 FROM material_lifecycle WHERE item_id = ? AND trashed = 1", (item_id,)
+    ).fetchone() is not None
+
+
+def acknowledge_lifecycle(conn: sqlite3.Connection, item_id: int, revision: int) -> bool:
+    """只确认同步所见的版本；不提交事务，不覆盖同步期间的新操作。"""
+    changed = conn.execute(
+        """UPDATE material_lifecycle SET synced_revision = ?
+           WHERE item_id = ? AND revision = ?""",
+        (revision, item_id, revision),
+    ).rowcount
+    if changed:
+        return True
+    return revision == 0 and item_exists(conn, item_id) and conn.execute(
+        "SELECT 1 FROM material_lifecycle WHERE item_id = ?", (item_id,)
+    ).fetchone() is None

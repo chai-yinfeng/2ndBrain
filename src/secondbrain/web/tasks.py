@@ -92,7 +92,10 @@ class TaskRegistry:
                 if task.running:
                     task.status = "interrupted"
                     task.finished = datetime.now(UTC)
-                    task.error = "服务重启，任务已中断；未自动重试，请检查已保存结果后重新提交。"
+                    task.error = (
+                        "服务重启，上次任务未确认完整保存；未自动重试，"
+                        "请检查已保存结果后再决定是否重新提交。"
+                    )
                     task.save()
                 self._remember(task)
 
@@ -138,6 +141,10 @@ class TaskRegistry:
             task.dismissed = True
             task.save()
         return True
+
+    def dismiss_finished(self) -> int:
+        """批量收起已结束记录；复用单条保护，运行中和待选择任务始终保留。"""
+        return sum(self.dismiss(task.id) for task in self.records())
 
     def recover_papers(self, path: Path) -> None:
         """只读旧论文会话与尝试；原表不写、不删，候选仍交给原选择入口。"""

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}清理任务历史 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="eyebrow">任务记录</p><h1>清理已结束历史</h1><p class="meta">会收起全部页面中已结束的记录，不只是当前页；记录仍保留，可通过“包括已关闭”查看。</p></div></header>
+<section class="panel"><p>将收起 <strong>{{ finished_count }}</strong> 条已结束记录。</p><p>保留 <strong>{{ retained_count }}</strong> 条运行中或等待选择的记录，不取消任务、不丢弃论文候选。</p><p class="help">不删除材料、原件、用量或知识页面，也不重新执行任何导入。</p></section>
+<form method="post" action="/task-history/clear" class="page-actions"><input type="hidden" name="confirm" value="yes"><button class="fb primary" type="submit"{% if not finished_count %} disabled{% endif %}>确认清理已结束历史</button><a class="fb" href="/task-history">取消</a></form>
+{% endblock %}
