@@ -96,6 +96,7 @@ def route_table(extra=None):
         "https://publisher.example.org/x.pdf": httpx.Response(403, text="no"),
         "https://export.arxiv.org/api/query": httpx.Response(200, text=ARXIV_WITH_DOI),
         f"https://arxiv.org/html/{ARXIV_ID}": httpx.Response(200, text=ARXIV_HTML),
+        f"https://arxiv.org/html/{ARXIV_ID}v1": httpx.Response(200, text=ARXIV_HTML),
     }
     routes.update(extra or {})
     return routes

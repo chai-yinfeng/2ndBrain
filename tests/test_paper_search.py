@@ -297,12 +297,9 @@ def test_redirect_and_citation_pdf_cannot_fetch_localhost(monkeypatch):
         seen.append(str(request.url))
         return httpx.Response(302, headers={"location": "http://127.0.0.1/private"})
     with client(handler) as http:
-        safe = papers._PublicClient(http)
-        try:
-            with pytest.raises(FetchError, match="不安全"):
-                safe.get(URL)
-        finally:
-            safe.restore()
+        safe = papers.PublicClient(http)
+        with pytest.raises(FetchError, match="不安全"):
+            safe.get(URL)
     assert seen == [URL]
     seen.clear()
     search(monkeypatch, [candidate(pdf_url=None)])
@@ -613,3 +610,38 @@ def test_short_name_and_metadata_hints_are_resolved_without_title_guessing(
             conn.close()
     else:
         assert result["material_id"] is None
+
+
+def test_paper_html_abstract_without_citation_is_not_full(monkeypatch):
+    search(monkeypatch, [candidate(pdf_url=None)])
+    body = "An abstract about bounded material search. " * 12
+    html = f"<html><head><title>{TITLE}</title></head><body><article>{body}</article></body></html>"
+    with client(lambda _: httpx.Response(200, text=html)) as http:
+        result = papers.import_by_name(TITLE, lambda _: None, client=http)
+    assert result["status"] == "abstract_only"
+    assert result["acquisition"]["status"] == "abstract"
+    assert result["acquisition"]["actual_url"] == URL
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, result["material_id"])
+        assert row["content_completeness"] == "abstract"
+    finally:
+        conn.close()
+
+
+def test_paper_fulltext_result_and_origin_share_acquisition(monkeypatch):
+    search(monkeypatch, [candidate()])
+    with client() as http:
+        result = papers.import_by_name(TITLE, lambda _: None, client=http)
+    acquisition = result["acquisition"]
+    assert acquisition["status"] == "full"
+    assert acquisition["actual_url"] == PDF
+    assert acquisition["version"] == "unknown"
+    conn = db.connect()
+    try:
+        origin = db.material_origins(conn, result["material_id"])[0]
+        provenance = json.loads(origin["metadata_json"])
+        assert provenance["acquisition"] == acquisition
+        assert provenance["actual_url"] == acquisition["actual_url"]
+    finally:
+        conn.close()

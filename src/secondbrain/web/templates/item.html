@@ -39,7 +39,8 @@
     <summary>原文与导入来源</summary>
     <p class="toolbar">{% if item.url.startswith("http") %}<a class="fb" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">打开原文链接</a><button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML">重新抓取</button><span id="refetch-result" data-refetch></span>{% endif %}</p>
     <ul class="origin-list">{% for origin in origins %}<li>{{ origin.kind }} · <span class="break-anywhere">{{ origin.locator }}</span>{% if origin.source_id %} · 信源 {{ origin.source_id }}{% endif %}{% if origin.original_path %} · <a href="/vault/{{ origin.original_path }}">原文件</a>{% endif %}
-      {% if origin.metadata %}<p class="meta">请求版本：{{ origin.metadata.get("requested_version") or "未指定" }} · 实际取得版本：{{ origin.metadata.get("actual_version") or "未知" }}{% if origin.actual_source_url %} · <a href="{{ origin.actual_source_url }}" target="_blank" rel="noopener">实际获取地址</a>{% endif %}</p>{% endif %}
+      {% if origin.metadata and origin.metadata.get('acquisition') %}{% with acquisition=origin.metadata.acquisition %}{% include "_acquisition.html" %}{% endwith %}
+      {% elif origin.metadata %}<p class="meta">请求版本：{{ origin.metadata.get("requested_version") or "未指定" }} · 实际取得版本：{{ origin.metadata.get("actual_version") or "未知" }}{% if origin.actual_source_url %} · <a href="{{ origin.actual_source_url }}" target="_blank" rel="noopener">实际获取地址</a>{% endif %}</p>{% endif %}
     </li>{% endfor %}</ul>
     <details><summary>阅读原文（{{ item.content_len }} 字符；{{ item.extract_method }}）</summary><pre class="original-content">{{ item.original_text or item.content }}</pre></details>
   </details>

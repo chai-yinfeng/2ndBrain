@@ -46,8 +46,27 @@ def main() -> None:
     """Second Brain 命令行工具。"""
 
 
+def _show_acquisition(acquisition: dict) -> None:
+    if not acquisition:
+        return
+    status = {
+        "full": "全文", "partial": "正文不完整", "abstract": "仅摘要", "missing": "未取得正文"
+    }.get(acquisition.get("status"), "未知")
+    typer.echo(
+        f"取得内容：{status} · 提取方式：{acquisition.get('method') or '无'}"
+        f" · 实际版本：{acquisition.get('version') or 'unknown'}"
+    )
+    typer.echo(f"实际内容来源：{acquisition.get('actual_url') or '无可核对的正文响应地址'}")
+    for attempt in acquisition.get("attempts") or []:
+        typer.echo(
+            f"  [{attempt.get('status', 'unknown')}] {attempt.get('url', '')}"
+            f" · {attempt.get('reason') or '未提供原因'}"
+        )
+
+
 def _paper_result(result: dict, ingest: bool, *, read: bool = False) -> None:
     typer.echo(f"{result['status']}：{result['message']}")
+    _show_acquisition(result.get("acquisition") or {})
     for error in result.get("errors", []):
         typer.echo(f"! {error}", err=True)
     for error in (result.get("ingest") or {}).get("errors", []):
@@ -1030,6 +1049,8 @@ def add(
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
     results = out["results"]
+    for result in results:
+        _show_acquisition(result.get("acquisition") or {})
     counts = {
         k: sum(r["status"].startswith(k) for r in results) for k in ("新增", "已存在", "失败")
     }

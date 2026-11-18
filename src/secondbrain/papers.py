@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import re
@@ -19,11 +18,12 @@ import feedparser
 import httpx
 
 from secondbrain import config, db, ops
-from secondbrain.ingest import FAILED_METHODS, ContentCapture, extract_content
+from secondbrain.ingest import ContentCapture
 from secondbrain.models import RawEntry
 from secondbrain.net import FetchError, HttpClient
+from secondbrain.public_fetch import PublicClient, diagnostic_url
+from secondbrain.public_fetch import public_url as _public_url
 from secondbrain.sources import arxiv, crossref, semantic_scholar
-from secondbrain.sources.homepage import safe_url
 
 LIMIT = 8
 MAX_CANDIDATES = 24
@@ -37,66 +37,6 @@ _DOI = re.compile(r"^10\.\d{4,9}/[^\s<>]+$", re.I)
 
 def _normal(value: str) -> str:
     return " ".join(re.findall(r"\w+", value.casefold(), re.UNICODE))
-
-
-def _public_url(value: str | None) -> str | None:
-    try:
-        url = safe_url(value)
-        if not url or any(ord(c) < 32 for c in url) or "\\" in url:
-            return None
-        parts = urlsplit(url)
-        host = (parts.hostname or "").lower().rstrip(".")
-        if parts.username or parts.password or not host or parts.port not in (None, 80, 443):
-            return None
-        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-            return None
-        try:
-            if not ipaddress.ip_address(host).is_global:
-                return None
-        except ValueError:
-            if "." not in host or host.replace(".", "").isdigit():
-                return None
-        return url
-    except (TypeError, ValueError):
-        return None
-
-
-class _PublicClient:
-    """验证每一次跳转；对共享 HttpClient 暂停自动重定向，结束后恢复。"""
-
-    def __init__(self, client):
-        self.client = client
-        self.responses: list[dict] = []
-        self.http = client._client if isinstance(client, HttpClient) else None
-        self.follow = self.http.follow_redirects if self.http is not None else None
-        if self.http is not None:
-            self.http.follow_redirects = False
-
-    def restore(self):
-        if self.http is not None:
-            self.http.follow_redirects = self.follow
-
-    def get(self, url, **kwargs):
-        for _ in range(6):
-            if not _public_url(url):
-                raise FetchError("拒绝不安全或非公开的论文地址")
-            response = self.client.get(url, **kwargs)
-            if not _public_url(str(response.url)):
-                raise FetchError("拒绝不安全的响应地址")
-            self.responses.append({"url": str(response.url), "status": response.status_code})
-            if response.status_code in (301, 302, 303, 307, 308):
-                location = response.headers.get("location")
-                if not location:
-                    raise FetchError("论文地址跳转缺少 Location")
-                url = urljoin(str(response.url), location)
-                kwargs.pop("params", None)
-                continue
-            if response.status_code >= 400:
-                raise FetchError(f"HTTP {response.status_code}：{response.url}")
-            if len(response.content) > (kwargs.get("max_bytes") or SEARCH_BYTES):
-                raise FetchError("论文响应超过大小上限")
-            return response
-        raise FetchError("论文地址跳转次数超过上限")
 
 
 def _candidate(*, title, provider, authors=None, year=None, venue="", doi=None,
@@ -404,11 +344,12 @@ def _search(query, client):
     return candidates, errors, successes
 
 
-def _result(session, status, message, *, selected=None, material_id=None, errors=None, ingest=None):
+def _result(session, status, message, *, selected=None, material_id=None, errors=None,
+            ingest=None, acquisition=None):
     return {"status": status, "search_id": session["id"], "query": session["query"],
             "candidates": session["candidates"], "selected": selected, "material_id": material_id,
             "message": message, "errors": errors if errors is not None else session["errors"],
-            "ingest": ingest}
+            "ingest": ingest, "acquisition": acquisition or {}}
 
 
 def _save_result(conn, result):
@@ -425,14 +366,10 @@ def _save_result(conn, result):
 def _check_identity(candidate, fetched):
     entry = fetched.entry
     doi, aid = db.discover_ids(fetched.content)
-    for label, expected, actual in (
-        ("DOI", candidate["doi"], entry.doi or doi),
-        ("arXiv", candidate["arxiv_id"], entry.arxiv_id or aid),
-    ):
-        expected = re.sub(r"v\d+$", "", expected or "", flags=re.I).casefold()
-        actual = re.sub(r"v\d+$", "", actual or "", flags=re.I).casefold()
-        if expected and actual and expected != actual:
-            raise ValueError(f"材料身份冲突：下载记录的 {label} 与所选候选不同")
+    ops._identity(entry, fetched.content, RawEntry(
+        url=candidate["url"], title=candidate["title"],
+        doi=candidate["doi"], arxiv_id=candidate["arxiv_id"],
+    ))
     if entry.title and _public_url(entry.title) is None:
         if _normal(entry.title) != _normal(candidate["title"]):
             raise ValueError("材料身份冲突：下载记录标题与所选候选不同")
@@ -441,7 +378,7 @@ def _check_identity(candidate, fetched):
     entry.arxiv_id = candidate["arxiv_id"] or entry.arxiv_id or aid
     entry.title = candidate["title"]
     entry.author = entry.author or ", ".join(candidate["authors"]) or None
-    entry.summary = entry.summary or candidate["abstract"] or None
+    entry.summary = max((entry.summary or "", candidate["abstract"]), key=len) or None
     if entry.published_at is None and candidate["year"]:
         entry.published_at = datetime(candidate["year"], 1, 1, tzinfo=UTC)
 
@@ -454,7 +391,6 @@ def _fetch_candidate(candidate, client, fs):
         ),
     )
     targets = []
-    # 保留显式 arXiv 版本，不把 v1 请求静默转成 latest。
     for record in records:
         if record.get("arxiv_id"):
             aid = record["arxiv_id"] + (
@@ -467,89 +403,90 @@ def _fetch_candidate(candidate, client, fs):
             if url and _public_url(url):
                 targets.append((url, record))
     seen, errors = set(), []
-    abstract_fallback = None
+    attempt_start = len(client.attempts)
+    response_start = len(client.responses)
+    best = None
+
+    def result(fetched, record):
+        acquisition = fetched.acquisition
+        acquisition["attempts"] = list(client.attempts[attempt_start:])
+        provenance = {
+            "requested_url": acquisition["requested_url"],
+            "actual_url": acquisition["actual_url"],
+            "requested_version": record.get("version", ""),
+            "actual_version": (
+                "metadata_only" if acquisition["status"] in ("abstract", "missing")
+                else acquisition["version"]
+            ),
+            "provider_version": record.get("version", ""),
+            "responses": list(client.responses[response_start:]),
+        }
+        if (acquisition["actual_url"] is None and candidate["abstract"]
+                and fetched.entry.summary == candidate["abstract"]):
+            provenance["abstract_source"] = "selected_candidate"
+        return fetched, provenance, errors
+
     for url, record in targets:
         if url in seen:
             continue
         seen.add(url)
         capture = ContentCapture(client)
-        start = len(client.responses)
         try:
-            if record.get("arxiv_id") and url.startswith("https://arxiv.org/abs/"):
-                aid = url.rsplit("/abs/", 1)[1]
-                entry = RawEntry(url=url, title=candidate["title"], arxiv_id=aid,
-                                 doi=candidate["doi"], summary=candidate["abstract"] or None)
-                try:
-                    response = capture.get(arxiv.API_URL, params={"id_list": aid},
-                                           max_bytes=SEARCH_BYTES)
-                    found = arxiv.parse_api_response(response.content)
-                    if found:
-                        entry = found[0]
-                        if entry.arxiv_id != record["arxiv_id"]:
-                            raise ValueError("材料身份冲突：arXiv API 返回了不同论文")
-                        _check_identity(candidate, ops.ManualFetched(entry, "", "none", url))
-                        entry.arxiv_id = aid
-                except FetchError as exc:
-                    errors.append(f"arXiv 元数据核对不可用：{exc}")
-                content, method = extract_content(entry, capture, fs)
-                if not content or method in FAILED_METHODS:
-                    raise ops.ManualFetchError("arXiv HTML 与 PDF 均未获取到正文")
-                fetched = ops.ManualFetched(entry, content, method, ops.manual_canonical(url))
-                fetched.pdf_data, fetched.raw_data = capture.pdf_data, capture.raw_data
-                fetched.truncated = method == "pdf" and capture.pdf_truncated
-                fetched.total_pages = capture.pdf_metadata.get("total_pages")
-                fetched.extracted_pages = capture.pdf_metadata.get("extracted_pages")
-            else:
-                fetched = ops._fetch_manual(url, capture, fs)
+            fetched = ops._fetch_manual(url, capture, fs)
             _check_identity(candidate, fetched)
-            responses = client.responses[start:]
-            actual_url = responses[-1]["url"] if responses else url
-            versions = [re.search(r"arxiv\.org/(?:pdf|html|abs)/[^?#]+?(v\d+)(?:\.pdf)?(?:[?#]|$)",
-                                  r["url"]) for r in responses]
-            actual_version = next((v.group(1) for v in reversed(versions) if v), "")
-            provenance = {"requested_url": url, "actual_url": actual_url,
-                          "requested_version": record.get("version", ""),
-                          "actual_version": actual_version or "unknown",
-                          "provider_version": record.get("version", ""),
-                          "responses": responses}
-            if fetched.method == "abstract_only":
-                provenance["actual_version"] = "metadata_only"
+            if fetched.method == "html" and fetched.completeness == "full":
+                # 普通页面没有声明论文身份时，也不能将出版社摘要当作全文。
+                fetched.completeness = (
+                    "abstract" if len(fetched.content) < max(2000, 2 * len(candidate["abstract"]))
+                    else "partial"
+                )
+                fetched.acquisition["status"] = fetched.completeness
+            if fetched.completeness in ("abstract", "missing"):
                 summary = max((candidate["abstract"], fetched.entry.summary or ""), key=len)
-                if summary and summary not in fetched.content:
+                if (summary and summary not in fetched.content
+                        and (fetched.method == "abstract_only"
+                             or fetched.completeness == "missing"
+                             or len(summary) > len(fetched.content))):
                     fetched.entry.summary = summary
                     fetched.content = f"{fetched.entry.title}\n\n{summary}"
                     fetched.note = "仅摘要"
-                    provenance["abstract_source"] = "selected_candidate"
-                if (abstract_fallback is None
-                        or len(fetched.content) > len(abstract_fallback[0].content)):
-                    abstract_fallback = fetched, provenance
+                    fetched.method = "abstract_only"
+                    fetched.completeness = "abstract"
+                    fetched.acquisition.update(actual_url=None, status="abstract",
+                                               method="abstract_only", version="unknown")
+            if fetched.completeness == "missing":
                 continue
-            if fetched.method == "html":
-                # 会议落地页不是全文；未得到 PDF 的 HTML 不冒充完整论文。
-                if len(fetched.content) < max(2000, 2 * len(candidate["abstract"])):
-                    continue
-                fetched.completeness = "partial"
-            return fetched, provenance, errors
-        except ValueError:
-            # 身份冲突不是获取失败，不得悄悄降级成所选候选的摘要。
+            if fetched.completeness == "full":
+                return result(fetched, record)
+            score = (fetched.completeness == "partial", len(fetched.content))
+            if best is None or score > best[0]:
+                best = score, fetched, record
+        except ValueError as exc:
+            exc.acquisition = ops._acquisition(candidate["url"], capture)
+            exc.acquisition["actual_url"] = None
+            exc.acquisition["attempts"] = list(client.attempts[attempt_start:])
             raise
         except (ops.ManualFetchError, FetchError, httpx.HTTPError) as exc:
-            errors.append(f"正文获取失败 {url}：{exc}")
-    if abstract_fallback is not None:
-        return abstract_fallback[0], abstract_fallback[1], errors
+            errors.append(f"正文获取失败 {diagnostic_url(url)}：{exc}")
+    if best is not None:
+        return result(best[1], best[2])
+    acquisition = {
+        "requested_url": candidate["url"], "actual_url": None, "status": "missing",
+        "method": "none", "version": "unknown",
+        "attempts": list(client.attempts[attempt_start:]),
+    }
     if not candidate["abstract"]:
-        raise ops.ManualFetchError("未找到可访问正文或摘要。" + "；".join(errors))
+        raise ops.ManualFetchError("未找到可访问正文或摘要。" + "；".join(errors), acquisition)
     entry = RawEntry(url=candidate["url"], title=candidate["title"],
                      doi=candidate["doi"], arxiv_id=candidate["arxiv_id"],
                      author=", ".join(candidate["authors"]) or None, summary=candidate["abstract"],
                      published_at=datetime(candidate["year"], 1, 1, tzinfo=UTC)
                      if candidate["year"] else None)
+    acquisition.update(status="abstract", method="abstract_only")
     fetched = ops.ManualFetched(entry, candidate["abstract"], "abstract_only",
-                               ops.manual_canonical(candidate["url"]), note="仅摘要")
-    return fetched, {
-        "requested_url": candidate["url"], "actual_url": None,
-        "requested_version": candidate["version"], "actual_version": "metadata_only",
-    }, errors
+                               ops.manual_canonical(candidate["url"]), note="仅摘要",
+                               completeness="abstract", acquisition=acquisition)
+    return result(fetched, candidate)
 
 
 def _import(session, candidate, conn, client, fs, echo, ingest):
@@ -558,18 +495,19 @@ def _import(session, candidate, conn, client, fs, echo, ingest):
         fetched, provenance, fetch_errors = _fetch_candidate(candidate, client, fs)
         errors.extend(fetch_errors)
         item = ops._material(fetched, fs, kind="paper_search")
-        item.provenance = {"search_id": session["id"], "query": session["query"],
-                           "candidate": candidate, **provenance}
+        item.provenance.update({"search_id": session["id"], "query": session["query"],
+                                "candidate": candidate, **provenance})
         material_id, created, improved = db.persist_material(conn, item, datetime.now(UTC))
         db.add_to_reading_list(conn, material_id)
         conn.commit()
     except (ValueError, ops.ManualFetchError, FetchError) as exc:
         conn.rollback()
         errors.append(str(exc))
-        result = _result(session, "failed", str(exc), selected=candidate, errors=errors)
+        result = _result(session, "failed", str(exc), selected=candidate, errors=errors,
+                         acquisition=getattr(exc, "acquisition", {}))
         echo(result["message"])
         return _save_result(conn, result)
-    abstract_only = fetched.method == "abstract_only"
+    abstract_only = fetched.completeness in ("abstract", "missing")
     message = f"{'已导入' if created else '已补全' if improved else '材料已存在'} #{material_id}"
     requested, actual = provenance["requested_version"], provenance["actual_version"]
     if requested and actual not in ("unknown", "metadata_only", requested):
@@ -589,7 +527,8 @@ def _import(session, candidate, conn, client, fs, echo, ingest):
             errors.append(str(exc))
             message += f"；知识整理失败：{exc}（材料已保留）"
     result = _result(session, "abstract_only" if abstract_only else "imported", message,
-                     selected=candidate, material_id=material_id, errors=errors, ingest=summary)
+                     selected=candidate, material_id=material_id, errors=errors, ingest=summary,
+                     acquisition=fetched.acquisition)
     echo(message)
     return _save_result(conn, result)
 
@@ -605,7 +544,7 @@ def import_by_name(query: str, echo, *, ingest=False, client=None) -> dict:
     _, _, fs = ops._settings()
     own = client is None
     raw = client if client is not None else HttpClient(fs)
-    public = _PublicClient(raw)
+    public = PublicClient(raw)
     conn = db.connect()
     try:
         candidates, errors, successes = _search(query, public)
@@ -637,7 +576,6 @@ def import_by_name(query: str, echo, *, ingest=False, client=None) -> dict:
         return _save_result(conn, result)
     finally:
         conn.close()
-        public.restore()
         if own:
             raw.close()
 
@@ -663,11 +601,9 @@ def choose_candidate(search_id: str, candidate_id: str, echo, *, ingest=False, c
         config.load_env()
         _, _, fs = ops._settings()
         raw = client if client is not None else HttpClient(fs)
-        public = _PublicClient(raw)
+        public = PublicClient(raw)
         return _import(session, candidate, conn, public, fs, echo, ingest)
     finally:
         conn.close()
-        if public is not None:
-            public.restore()
         if own and raw is not None:
             raw.close()

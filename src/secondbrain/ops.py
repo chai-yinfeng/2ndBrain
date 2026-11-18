@@ -775,7 +775,7 @@ MANUAL_STATES = ("unread", "reading", "read", "later")
 READ_FEEDBACK = ("gained", "too_easy", "too_hard", "worthless")
 _ARXIV_URL = re.compile(
     r"^https?://(?:www\.|export\.)?arxiv\.org/(?:abs|pdf|html)/"
-    r"([^\s?#]+?)(?:v\d+)?(?:\.pdf)?/?$", re.I,
+    r"([^\s?#]+?)(v\d+)?(?:\.pdf)?/?$", re.I,
 )
 
 
@@ -786,6 +786,7 @@ class AddResult:
     item_id: int | None = None
     title: str = ""
     message: str = ""
+    acquisition: dict = field(default_factory=dict)
 
 
 MAX_PDF_UPLOAD = 30 * 1024 * 1024
@@ -854,6 +855,10 @@ def validate_manual(
 class ManualFetchError(Exception):
     """手动添加时抓取失败；消息是给用户看的具体原因。"""
 
+    def __init__(self, message: str, acquisition: dict | None = None):
+        super().__init__(message)
+        self.acquisition = acquisition or {}
+
 
 @dataclass
 class ManualFetched:
@@ -868,12 +873,18 @@ class ManualFetched:
     total_pages: int | None = None
     extracted_pages: int | None = None
     completeness: str | None = None
+    acquisition: dict = field(default_factory=dict)
 
 
 _CHALLENGE = re.compile(
     r"just a moment\.\.\.|cf-chl|challenge-platform|attention required! \| cloudflare"
     r"|captcha-delivery|please verify you are a human",
     re.I,
+)
+_ACCESS_GATE = re.compile(
+    r'type\s*=\s*["\']password|sign in to (?:access|continue)|'
+    r'log in to (?:access|continue)|institutional login|access denied|'
+    r'purchase (?:this |the )?(?:article|paper)', re.I,
 )
 FALLBACK_HINT = "可粘贴正文或上传 PDF"
 MIN_ARTICLE_CHARS = 200  # 网页提取到的正文短于该值时视为不是文章页（导航页、登录页等）
@@ -897,12 +908,14 @@ def _url_ids(url: str) -> tuple[str | None, str | None]:
     from secondbrain.sources.semantic_scholar import doi_in_url
 
     m = _ARXIV_URL.search(url)
-    return (None, m.group(1)) if m else (doi_in_url(url), None)
+    return (None, m.group(1) + (m.group(2) or "")) if m else (doi_in_url(url), None)
 
 
 def _fetch_reason(exc: Exception) -> str:
     text = str(exc)
-    if "HTTP 403" in text or "HTTP 401" in text:
+    if "HTTP 401" in text:
+        return "HTTP 401：站点要求登录，未取得公开正文"
+    if "HTTP 403" in text:
         return "HTTP 403：站点拒绝机器访问（被拦截）"
     if "HTTP 404" in text:
         return "HTTP 404：页面不存在"
@@ -913,23 +926,78 @@ def _fetch_reason(exc: Exception) -> str:
     return f"抓取失败：{text}"
 
 
-def _pdf_text(client, url: str, fs) -> str:
-    """下载并提取 PDF 文本；失败（含 403）时返回空串。"""
-    from secondbrain.ingest import ContentCapture
+def _identity(entry, content: str, expected) -> None:
+    """明确冲突立即拒绝，不能把错误论文静默降级成所选论文的摘要。"""
+    doi, aid = db.discover_ids(content)
+    for label, wanted, actuals in (
+        ("DOI", expected.doi, (entry.doi, doi)),
+        ("arXiv", expected.arxiv_id, (entry.arxiv_id, aid)),
+    ):
+        wanted = re.sub(r"v\d+$", "", wanted or "", flags=re.I).casefold()
+        for actual in actuals:
+            actual = re.sub(r"v\d+$", "", actual or "", flags=re.I).casefold()
+            if wanted and actual and wanted != actual:
+                raise ValueError(f"材料身份冲突：下载记录的 {label} 与请求不同")
+
+
+def _acquisition(url: str, capture, method="none", status="missing") -> dict:
+    actual = capture.actual_url
+    version = re.search(r"arxiv\.org/(?:pdf|html|abs)/[^?#]+?(v\d+)(?:\.pdf)?(?:[?#]|$)",
+                        actual or "")
+    return {
+        "requested_url": url, "actual_url": actual, "status": status,
+        "method": method, "version": version.group(1) if version else "unknown",
+        "attempts": list(capture.client.attempts),
+    }
+
+
+def _captured(fetched: ManualFetched, capture, requested: str) -> ManualFetched:
+    fetched.pdf_data = capture.pdf_data if fetched.method in ("pdf", "manual_pdf") else None
+    fetched.raw_data = capture.raw_data
+    fetched.truncated = fetched.method == "pdf" and capture.pdf_truncated
+    fetched.total_pages = capture.pdf_metadata.get("total_pages") if fetched.pdf_data else None
+    fetched.extracted_pages = (
+        capture.pdf_metadata.get("extracted_pages") if fetched.pdf_data else None
+    )
+    fetched.completeness = fetched.completeness or capture.completeness or (
+        "missing" if not fetched.content.strip() else
+        "abstract" if fetched.method == "abstract_only" else
+        "partial" if fetched.truncated else "full"
+    )
+    if fetched.completeness == "abstract" and not fetched.note:
+        fetched.note = "仅摘要"
+    fetched.acquisition = _acquisition(
+        requested, capture, fetched.method, fetched.completeness
+    )
+    return fetched
+
+
+def _pdf_text(client, url: str, fs, *, expected=None) -> str:
+    """只接受真正 PDF；成功后才切换实际正文响应。"""
+    from secondbrain.net import FetchError
 
     try:
-        if not isinstance(client, ContentCapture):
-            client = ContentCapture(client)
         resp = client.get(url, max_bytes=fs.pdf_max_bytes)
-        return client.pdf_text(resp.content, fs.pdf_max_pages)
-    except Exception:  # 网络或损坏 PDF 均允许退回网页 / 摘要
+        if not resp.content.startswith(b"%PDF"):
+            raise ManualFetchError("公开 PDF 链接未返回 PDF（可能是登录页或验证页）")
+        text = client.pdf_text(resp.content, fs.pdf_max_pages)
+        if not text.strip():
+            raise ManualFetchError("PDF 中没有可提取正文")
+        if expected is not None:
+            _identity(expected, text, expected)
+        client.select(resp)
+        return text
+    except ValueError:
+        raise
+    except Exception as exc:
+        # HTTP 拒绝不重试该地址；其它候选仍可继续。
+        reason = _fetch_reason(exc) if isinstance(exc, FetchError) else str(exc)
+        client.client.note(url, "unavailable", reason)
         return ""
 
 
-def _fetch_page(url: str, client, fs):
-    """网页（或直链 PDF）：正文提取 + 页面元数据。页面有 citation_pdf_url 时优先用该 PDF 的
-    全文（取不到再用网页正文），citation_* meta 补充标题 / 作者 / 日期 / DOI。
-    失败时抛 ManualFetchError（具体原因）。"""
+def _fetch_page(url: str, client, fs, *, expected=None):
+    """通用公开页面与 citation_pdf_url，摘要页不冒充完整论文。"""
     from urllib.parse import urljoin
 
     from secondbrain.extract.html import citation_meta, extract_main_text
@@ -943,35 +1011,60 @@ def _fetch_page(url: str, client, fs):
     except FetchError as exc:
         raise ManualFetchError(_fetch_reason(exc)) from exc
     entry = RawEntry(url=url, title=url, page_meta=True)
-    if "pdf" in resp.headers.get("content-type", "") or resp.content.startswith(b"%PDF"):
+    if resp.content.startswith(b"%PDF"):
         try:
-            text, method = client.pdf_text(resp.content, fs.pdf_max_pages), "pdf"
-        except Exception as exc:  # pypdf 对损坏文件的各种异常
+            text = client.pdf_text(resp.content, fs.pdf_max_pages)
+        except Exception as exc:
             raise ManualFetchError(f"PDF 无法解析：{type(exc).__name__}") from exc
-    else:
-        html = resp.text
-        if _CHALLENGE.search(html[:20_000]):
-            raise ManualFetchError("被拦截：站点返回了机器人验证页（如 Cloudflare）")
-        text, method = extract_main_text(html, url=str(resp.url)) or "", "html"
-        sitemap.apply_page_meta(entry, html, str(resp.url))
-        meta = citation_meta(html)
-        if meta.get("title"):
-            entry.title = " ".join(meta["title"].split())
-        if meta.get("authors"):
-            entry.author = ", ".join(meta["authors"])
-        if meta.get("date"):
-            date = parse_iso_datetime(meta["date"].replace("/", "-"))
-            entry.published_at = date or entry.published_at
-        entry.doi, entry.arxiv_id = meta.get("doi"), meta.get("arxiv_id")
-        if meta.get("pdf_url"):
-            pdf = _pdf_text(client, urljoin(str(resp.url), meta["pdf_url"]), fs)
-            if len(pdf) > len(text):  # 论文全文通常远长于摘要页
-                text, method = pdf, "pdf"
-            if method != "pdf":
-                client.completeness = "partial"
-    if method == "html" and len(text.strip()) < MIN_ARTICLE_CHARS:
+        if not text.strip():
+            raise ManualFetchError("PDF 中没有可提取正文")
+        if expected is not None:
+            _identity(entry, text, expected)
+        client.select(resp)
+        return entry, text, "pdf"
+    if "pdf" in resp.headers.get("content-type", ""):
+        raise ManualFetchError("PDF 响应不是有效 PDF")
+    html = resp.text
+    if _CHALLENGE.search(html[:20_000]):
+        raise ManualFetchError("被拦截：站点返回了机器人验证页")
+    if _ACCESS_GATE.search(html[:20_000]):
+        raise ManualFetchError("站点返回登录、订阅或访问限制页面，未取得公开正文")
+    text = extract_main_text(html, url=str(resp.url)) or ""
+    sitemap.apply_page_meta(entry, html, str(resp.url))
+    meta = citation_meta(html)
+    if meta.get("title"):
+        entry.title = " ".join(meta["title"].split())
+    if meta.get("authors"):
+        entry.author = ", ".join(meta["authors"])
+    if meta.get("date"):
+        entry.published_at = (
+            parse_iso_datetime(meta["date"].replace("/", "-")) or entry.published_at
+        )
+    entry.doi, entry.arxiv_id = meta.get("doi"), meta.get("arxiv_id")
+    if expected is not None:
+        _identity(entry, "", expected)
+        if (meta.get("title") and expected.title and expected.title != expected.url
+                and re.findall(r"\w+", entry.title.casefold())
+                != re.findall(r"\w+", expected.title.casefold())):
+            raise ValueError("材料身份冲突：落地页标题与请求不同")
+    if meta.get("pdf_url"):
+        pdf_url = urljoin(str(resp.url), meta["pdf_url"])
+        pdf = _pdf_text(client, pdf_url, fs, expected=expected or entry)
+        if pdf:
+            client.raw_data = resp.content
+            return entry, pdf, "pdf"
+    if len(text.strip()) < MIN_ARTICLE_CHARS:
         raise ManualFetchError(f"不是文章页：提取到的正文太短（{len(text.strip())} 字符）")
-    return entry, text, method
+    paper = bool(entry.doi or entry.arxiv_id or meta.get("pdf_url")
+                 or (expected is not None and (expected.doi or expected.arxiv_id)))
+    completeness = "full"
+    if paper:
+        summary = (expected.summary or "") if expected is not None else ""
+        completeness = "abstract" if len(text) < max(2000, 2 * len(summary)) else "partial"
+    client.select(resp, raw_data=resp.content, completeness=completeness)
+    if expected is not None:
+        _identity(entry, text, expected)
+    return entry, text, "html"
 
 
 def _fetch_arxiv(arxiv_id: str, client, fs, fallback_title: str, *, metadata_only=False):
@@ -980,120 +1073,139 @@ def _fetch_arxiv(arxiv_id: str, client, fs, fallback_title: str, *, metadata_onl
     from secondbrain.net import FetchError
     from secondbrain.sources import arxiv
 
+    expected = RawEntry(url=arxiv.abs_url(arxiv_id), title=fallback_title, arxiv_id=arxiv_id)
     entry = None
     try:
         resp = client.get(arxiv.API_URL, params={"id_list": arxiv_id})
         found = arxiv.parse_api_response(resp.content)
-        entry = next((e for e in found if e.arxiv_id == arxiv_id), None)
+        if found:
+            expected_id = re.sub(r"v\d+$", "", arxiv_id, flags=re.I)
+            entry = next((item for item in found if item.arxiv_id == expected_id), None)
+            if entry is None:
+                raise ValueError("材料身份冲突：arXiv API 未返回所请求的论文")
+            _identity(entry, "", expected)
     except FetchError:
-        entry = None
-    entry = entry or RawEntry(url=arxiv.abs_url(arxiv_id), title=fallback_title, arxiv_id=arxiv_id)
+        pass
+    entry = entry or expected
+    # 保留用户明确指定的版本；API 记录通常省略版本。
+    entry.arxiv_id = arxiv_id
     if metadata_only:
         return entry, "", "none"
     content, method = extract_content(entry, client, fs)
     if method in FAILED_METHODS or not content:
+        if entry.summary:
+            if entry is not expected:
+                client.select(resp)
+            client.completeness = "abstract"
+            return entry, f"{entry.title}\n\n{entry.summary}", "abstract_only"
         raise ManualFetchError("arXiv 正文获取失败（HTML 与 PDF 都取不到）")
+    _identity(entry, content, expected)
     return entry, content, method
 
 
 def _fetch_doi(doi: str, url: str, client, fs, *, metadata_only=False) -> ManualFetched:
-    """DOI：先查 Semantic Scholar，失败（含 429）或没有摘要时再查 Crossref。
-    有 arXiv id 走 arXiv；有开放获取 PDF（S2 或 Crossref 的 PDF 链接）用 PDF；
-    否则只用标题 + 摘要（abstract_only）。"""
+    """摘要只是回退：继续尝试明确 PDF / arXiv 及原始与 DOI 公开落地页。"""
     from secondbrain.models import RawEntry
     from secondbrain.net import FetchError
     from secondbrain.sources import crossref
-    from secondbrain.sources.arxiv import abs_url
     from secondbrain.sources.semantic_scholar import lookup_doi
-    from secondbrain.urls import canonicalize_url
 
-    reasons = []
+    reasons, metadata = [], []
     s2 = cr = None
     try:
         s2 = lookup_doi(client, doi)
+        supplied = (s2.get("externalIds") or {}).get("DOI")
+        if supplied and supplied.casefold() != doi.casefold():
+            raise ValueError("材料身份冲突：Semantic Scholar 返回了不同 DOI")
+        metadata.append((s2.get("abstract") or "", client.last_response))
     except FetchError as exc:
         reasons.append(str(exc))
-    if s2 is None or not s2.get("abstract"):
-        try:
-            cr = crossref.lookup_doi(client, doi)
-        except FetchError as exc:
-            reasons.append(str(exc))
-    if s2 is None and cr is None:
-        raise ManualFetchError("；".join(reasons))
-    canonical = f"https://doi.org/{doi}"
-    arxiv_id = ((s2 or {}).get("externalIds") or {}).get("ArXiv")
-    if arxiv_id:
-        entry, content, method = _fetch_arxiv(
-            arxiv_id, client, fs, s2["title"], metadata_only=metadata_only
-        )
-        entry.doi = entry.doi or doi
-        return ManualFetched(entry, content, method, canonicalize_url(abs_url(arxiv_id)))
-    if s2:
-        authors = ", ".join(a.get("name", "") for a in s2.get("authors") or [] if a.get("name"))
-        year = s2.get("year")
-        published = datetime(int(year), 1, 1, tzinfo=UTC) if year else None
-        title = s2["title"]
-    else:
-        authors, published, title = "", None, cr["title"]
-    if cr:
-        authors = authors or ", ".join(cr["authors"])
-        published = cr["published"] or published
-    abstract = (s2 or {}).get("abstract") or (cr or {}).get("abstract") or ""
-    entry = RawEntry(
-        url=url,
-        title=title,
-        author=authors or None,
-        summary=abstract or None,
-        published_at=published,
-        doi=doi,
+    # 即便 S2 有摘要，也需要 Crossref 的已索引公开地址。
+    try:
+        cr = crossref.lookup_doi(client, doi)
+        message = client.last_response.json().get("message") or {}
+        supplied = message.get("DOI")
+        if supplied and supplied.casefold() != doi.casefold():
+            raise ValueError("材料身份冲突：Crossref 返回了不同 DOI")
+        if (s2 and re.findall(r"\w+", s2["title"].casefold())
+                != re.findall(r"\w+", cr["title"].casefold())):
+            raise ValueError("材料身份冲突：Crossref 与 Semantic Scholar 标题不同")
+        metadata.append((cr.get("abstract") or "", client.last_response))
+    except FetchError as exc:
+        reasons.append(str(exc))
+    title = (s2 or {}).get("title") or (cr or {}).get("title") or url
+    abstract, abstract_response = max(metadata, key=lambda pair: len(pair[0]), default=("", None))
+    authors = ", ".join(a["name"] for a in (s2 or {}).get("authors") or [] if a.get("name"))
+    authors = authors or ", ".join((cr or {}).get("authors") or [])
+    year = (s2 or {}).get("year")
+    published = (cr or {}).get("published") or (
+        datetime(int(year), 1, 1, tzinfo=UTC) if year else None
     )
-    pdf_urls = [((s2 or {}).get("openAccessPdf") or {}).get("url"), *(cr or {}).get("pdf_urls", [])]
-    for pdf_url in ([] if metadata_only else [u for u in pdf_urls if u]):
-        text = _pdf_text(client, pdf_url, fs)
-        if text:
-            return ManualFetched(entry, text, "pdf", canonical)
+    entry = RawEntry(url=url, title=title, author=authors or None, summary=abstract or None,
+                     published_at=published, doi=doi)
+    canonical = f"https://doi.org/{doi}"
+    if not metadata_only:
+        arxiv_id = ((s2 or {}).get("externalIds") or {}).get("ArXiv")
+        if arxiv_id:
+            try:
+                found, text, method = _fetch_arxiv(arxiv_id, client, fs, title)
+                _identity(found, text, entry)
+                if method != "abstract_only":
+                    found.doi = doi
+                    found.summary = max((found.summary or "", abstract), key=len) or None
+                    found.url = url
+                    return ManualFetched(found, text, method, manual_canonical(
+                        f"https://arxiv.org/abs/{arxiv_id}"
+                    ))
+            except ManualFetchError as exc:
+                reasons.append(str(exc))
+        pdf_urls = [((s2 or {}).get("openAccessPdf") or {}).get("url"),
+                    *(cr or {}).get("pdf_urls", [])]
+        for pdf_url in dict.fromkeys(u for u in pdf_urls if u):
+            text = _pdf_text(client, pdf_url, fs, expected=entry)
+            if text:
+                return ManualFetched(entry, text, "pdf", canonical)
+        partial = None
+        for landing in dict.fromkeys([url, canonical]):
+            try:
+                page, text, method = _fetch_page(landing, client, fs, expected=entry)
+                if entry.title == url:
+                    entry.title = page.title
+                entry.author = entry.author or page.author
+                entry.published_at = entry.published_at or page.published_at
+                fetched = _captured(ManualFetched(entry, text, method, canonical), client, url)
+                if fetched.completeness == "full":
+                    return fetched
+                if partial is None or len(text) > len(partial.content):
+                    partial = fetched
+            except ManualFetchError as exc:
+                reasons.append(str(exc))
+        if partial is not None and (
+            partial.completeness != "abstract" or len(partial.content) > len(abstract)
+        ):
+            return partial
+    if not s2 and not cr:
+        raise ManualFetchError("；".join(reasons) or "未取得论文元数据或公开正文")
+    if abstract_response is not None:
+        client.select(abstract_response, completeness="abstract" if abstract else "missing")
     content = title + ("\n\n" + abstract if abstract else "")
-    note = "仅摘要" if abstract else "仅标题，S2 / Crossref 都没有摘要"
-    return ManualFetched(entry, content, "abstract_only", canonical, note=note)
+    return ManualFetched(entry, content, "abstract_only", canonical,
+                         note="仅摘要" if abstract else "仅标题，S2 / Crossref 都没有摘要",
+                         completeness="abstract" if abstract else "missing")
 
 
 def _fetch_manual(
     url: str, client, fs, fallback: str | None = None, fallback_method: str = "manual_text"
 ) -> ManualFetched:
-    """抓取单个 URL（ADR 0018 / 0019 / 0020）：arXiv → API 元数据 + arxiv_html / pdf；含 DOI →
-    Semantic Scholar / Crossref（都失败时再试页面本身）；其他 → 网页正文（含 citation_pdf_url）。
-    显式正文 / PDF 优先使用，URL 提供元数据与来源。
-    都失败时抛 ManualFetchError（具体原因 + 兜底提示）。"""
+    """所有 URL 共用公开获取；显式正文 / PDF 只借助网络补元数据。"""
     from secondbrain.ingest import ContentCapture
     from secondbrain.models import RawEntry
 
     if not isinstance(client, ContentCapture):
         client = ContentCapture(client)
-
     canonical = manual_canonical(url)
     doi, arxiv_id = _url_ids(url)
     result, reasons = None, []
-    if not (arxiv_id or doi or fallback):
-        from secondbrain.extract.html import html_fragment_to_text
-        from secondbrain.net import FetchError
-        from secondbrain.sources.qwen import resolve_article
-
-        try:
-            qwen_entry = resolve_article(url, client.client, fs)
-        except FetchError as exc:
-            raise ManualFetchError(str(exc)) from exc
-        if qwen_entry is not None:
-            body = qwen_entry.feed_content
-            text = html_fragment_to_text(body) if body else qwen_entry.summary or ""
-            if not text.strip():
-                raise ManualFetchError("Qwen 公开接口未提供可用正文或摘要")
-            result = ManualFetched(
-                qwen_entry, text, "html" if body else "abstract_only", canonical,
-                note="Qwen 公开 Research 接口" if body else "Qwen 旧文章仅提供摘要",
-            )
-            if body:
-                client.raw_data = body.encode("utf-8")
-                client.completeness = "full"
     try:
         if arxiv_id:
             entry, content, method = _fetch_arxiv(
@@ -1102,32 +1214,33 @@ def _fetch_manual(
             result = ManualFetched(entry, content, method, canonical)
         elif doi:
             result = _fetch_doi(doi, url, client, fs, metadata_only=bool(fallback))
-    except ManualFetchError as exc:
-        reasons.append(str(exc))
-    if result is None and not arxiv_id and not fallback:
-        try:
-            # 页面自带的 citation_doi 只用于跨标识去重；规范 URL 仍按链接本身
+        elif not fallback:
             entry, content, method = _fetch_page(url, client, fs)
             result = ManualFetched(entry, content, method, canonical)
-        except ManualFetchError as exc:
-            reasons.append(("页面：" if doi else "") + str(exc))
+    except ValueError as exc:
+        exc.acquisition = _acquisition(url, client)
+        exc.acquisition["actual_url"] = None
+        raise
+    except ManualFetchError as exc:
+        client.client.note(url, "unavailable", str(exc))
+        reasons.append(str(exc))
     if fallback:
         entry = result.entry if result else RawEntry(url=url, title=url, doi=doi)
         if entry.title == url:
             first = next((ln.strip() for ln in fallback.splitlines() if ln.strip()), url)
             entry.title = first[:120]
         result = ManualFetched(entry, fallback, fallback_method, canonical)
+        client.actual_url, client.raw_data, client.completeness = None, None, "full"
     if result is None:
-        raise ManualFetchError("；".join(reasons) + f"。{FALLBACK_HINT}")
+        raise ManualFetchError("；".join(reasons) + f"。{FALLBACK_HINT}",
+                               _acquisition(url, client))
     result.entry.doi = (result.entry.doi or doi or "").lower() or None
     result.entry.arxiv_id = result.entry.arxiv_id or arxiv_id
-    result.pdf_data = client.pdf_data
-    result.truncated = result.method == "pdf" and client.pdf_truncated
-    result.raw_data = client.raw_data
-    result.total_pages = client.pdf_metadata.get("total_pages")
-    result.extracted_pages = client.pdf_metadata.get("extracted_pages")
-    result.completeness = client.completeness if result.method == "html" else None
-    return result
+    # _fetch_doi 可已保存较早的最佳页面，不能用后续失败请求覆盖其原件/来源。
+    if result.acquisition:
+        result.acquisition["attempts"] = list(client.client.attempts)
+        return result
+    return _captured(result, client, url)
 
 
 def _material(fetched: ManualFetched, fs, *, title: str | None = None, kind="url"):
@@ -1163,6 +1276,7 @@ def _material(fetched: ManualFetched, fs, *, title: str | None = None, kind="url
         raw_data=fetched.raw_data,
         total_pages=fetched.total_pages,
         extracted_pages=fetched.extracted_pages,
+        provenance={"acquisition": fetched.acquisition},
     )
 
 
@@ -1240,6 +1354,7 @@ def add_manual(
             label = url or ("本地 PDF" if pdf is not None else "文本")
             try:
                 refetch_note = ""
+                failed_acquisition = {}
                 if reference_only:
                     row, must_fetch = None, False
                     doi, arxiv_id = _url_ids(url)
@@ -1278,6 +1393,7 @@ def add_manual(
                             if row is None or fallback:
                                 raise
                             refetch_note = f"{REFETCH_NO_GAIN}：{exc}"
+                            failed_acquisition = exc.acquisition
                     if fetched is None:
                         fetched = ManualFetched(
                             RawEntry(
@@ -1288,6 +1404,16 @@ def add_manual(
                             truncated=bool(row["content_truncated"]),
                             completeness=row["content_completeness"],
                         )
+                if not fetched.acquisition:
+                    fetched.acquisition = {
+                        "requested_url": url, "actual_url": None,
+                        "status": fetched.completeness or (
+                            "missing" if not fetched.content.strip() else
+                            "abstract" if fetched.method == "abstract_only" else "full"
+                        ),
+                        "method": fetched.method, "version": "unknown",
+                        "attempts": failed_acquisition.get("attempts", []),
+                    }
                 if fallback:
                     fetched.content, fetched.method = fallback, fallback_method
                     fetched.pdf_data = pdf
@@ -1296,6 +1422,10 @@ def add_manual(
                     )
                     fetched.total_pages = pdf_metadata.get("total_pages")
                     fetched.extracted_pages = pdf_metadata.get("extracted_pages")
+                    fetched.completeness = "partial" if fetched.truncated else "full"
+                    fetched.acquisition.update(
+                        status=fetched.completeness, method=fallback_method, actual_url=None
+                    )
                 kind = (
                     "reference" if reference_only else "pdf" if pdf is not None
                     else "text" if fallback else "url"
@@ -1326,10 +1456,12 @@ def add_manual(
                 if feedback:
                     db.add_feedback(conn, item_id, feedback, None, datetime.now(UTC))
                 row = db.item_detail(conn, item_id)
-                result = AddResult(label, status, item_id, row["title"], message)
+                result = AddResult(label, status, item_id, row["title"], message,
+                                   fetched.acquisition)
             except Exception as exc:
                 conn.rollback()
-                result = AddResult(label, "失败", message=str(exc))
+                result = AddResult(label, "失败", message=str(exc),
+                                   acquisition=getattr(exc, "acquisition", {}))
             results.append(result)
             if result.item_id is None:
                 echo(f"✗ {label}：{result.message}")

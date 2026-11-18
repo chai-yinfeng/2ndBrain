@@ -34,7 +34,8 @@
       <table class="scores add-results">
         <tr><th>URL</th><th>结果</th><th>条目</th></tr>
         {% for r in task.result.results %}
-        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
+        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta break-anywhere">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
+        {% if r.acquisition %}<tr><td colspan="3">{% with acquisition=r.acquisition %}{% include "_acquisition.html" %}{% endwith %}</td></tr>{% endif %}
         {% endfor %}
       </table>
       {% if task.result.ingest %}

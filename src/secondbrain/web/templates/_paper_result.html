@@ -1,7 +1,8 @@
 <section class="paper-result" data-paper-status="{{ 'resolved' if result.resolved_by else result.status }}">
 <h2>{% if result.resolved_by %}历史候选（已选择）{% else %}{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}{% endif %}</h2>
 {% if result.resolved_by %}<p>本次候选已处理；<a href="/task-history/{{ result.resolved_by }}">查看后续导入结果</a>。</p>{% else %}<p>{{ result.message }}</p>{% endif %}
-{% for error in result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+{% for error in result.errors %}<p class="refresh break-anywhere">{{ error }}</p>{% endfor %}
+{% with acquisition=result.acquisition %}{% include "_acquisition.html" %}{% endwith %}
 {% if result.ingest %}
 <p class="meta">wiki：新建 {{ result.ingest.get('created', []) | length }} 页、更新 {{ result.ingest.get('updated', []) | length }} 页；整理不代表已读或已掌握。</p>
 {% if result.ingest.get('failures') %}<p class="refresh">wiki 整理有 {{ result.ingest.failures }} 项失败，尚未完成；原因见任务日志。材料仍已保存。</p>{% endif %}

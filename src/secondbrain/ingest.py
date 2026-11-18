@@ -17,7 +17,8 @@ from secondbrain.extract.html import extract_main_text, html_fragment_to_text
 from secondbrain.extract.pdf import extract_pdf_text
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
 from secondbrain.net import FetchError, HttpClient
-from secondbrain.sources import FETCHERS, sitemap
+from secondbrain.public_fetch import PublicClient
+from secondbrain.sources import FETCHERS
 from secondbrain.urls import canonicalize_url, content_hash
 
 # arXiv HTML 版提取到的正文短于该值时视为无效，改用 PDF。
@@ -44,7 +45,7 @@ def skip_reason(source: SourceConfig) -> str | None:
     if not source.enabled:
         return "未启用"
     if source.needs_scraper:
-        return "needs_scraper，待支持"
+        return "手动浏览入口，不自动采集"
     return None
 
 
@@ -52,24 +53,32 @@ class ContentCapture:
     """每条材料独立的抓取上下文；保留实际提取的 PDF 与页面原始响应。"""
 
     def __init__(self, client):
-        self.client = client
+        self.client = client if isinstance(client, PublicClient) else PublicClient(client)
         self.pdf_data: bytes | None = None
         self.pdf_metadata: dict = {}
         self.raw_data: bytes | None = None
         self.completeness: str | None = None
+        self.actual_url: str | None = None
+        self.last_response = None
 
     def get(self, *args, **kwargs):
         response = self.client.get(*args, **kwargs)
-        if "html" in response.headers.get("content-type", ""):
-            self.raw_data = response.content
+        self.last_response = response
         return response
 
     def pdf_text(self, data: bytes, max_pages: int) -> str:
         metadata: dict = {}
-        self.pdf_data = data
         text = extract_pdf_text(data, max_pages, metadata=metadata)
-        self.pdf_metadata = metadata
+        if text.strip():
+            self.pdf_data = data
+            self.pdf_metadata = metadata
         return text
+
+    def select(self, response, *, raw_data=None, completeness=None):
+        """只在响应确实提供所选正文后更新来源，不让后续失败覆盖它。"""
+        self.actual_url = str(response.url)
+        self.raw_data = raw_data
+        self.completeness = completeness
 
     @property
     def pdf_truncated(self) -> bool:
@@ -91,15 +100,23 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
         client = ContentCapture(client)
     if entry.arxiv_id:
         try:
-            resp = client.get(f"https://arxiv.org/html/{entry.arxiv_id}")
-            text = extract_main_text(resp.text, url=str(resp.url))
+            resp = client.get(f"https://arxiv.org/html/{entry.arxiv_id}",
+                              max_bytes=fs.pdf_max_bytes)
+            from secondbrain.ops import _ACCESS_GATE, _CHALLENGE
+
+            blocked = _CHALLENGE.search(resp.text[:20_000]) or _ACCESS_GATE.search(
+                resp.text[:20_000]
+            )
+            text = None if blocked else extract_main_text(resp.text, url=str(resp.url))
             if text and len(text) >= MIN_ARXIV_HTML_CHARS:
+                client.select(resp, raw_data=resp.content, completeness="full")
                 return text, "arxiv_html"
         except FetchError:
             pass
         try:
             text = _pdf_text(client, f"https://arxiv.org/pdf/{entry.arxiv_id}", fs)
             if text:
+                client.select(client.last_response)
                 return text, "pdf"
         except (FetchError, PyPdfError):
             pass
@@ -108,18 +125,18 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
         if len(feed_text) >= fs.min_feed_content_chars:
             return feed_text, "feed"
         try:
-            resp = client.get(entry.url, max_bytes=fs.pdf_max_bytes)
-            if "pdf" in resp.headers.get("content-type", "") or resp.content.startswith(b"%PDF"):
-                text = client.pdf_text(resp.content, fs.pdf_max_pages)
-                method = "pdf"
-            else:
-                text = extract_main_text(resp.text, url=str(resp.url)) or ""
-                method = "html"
-                if entry.page_meta:
-                    sitemap.apply_page_meta(entry, resp.text, str(resp.url))
+            from secondbrain.ops import ManualFetchError, _fetch_page
+
+            page, text, method = _fetch_page(entry.url, client, fs, expected=entry)
+            if entry.page_meta:
+                entry.title = page.title or entry.title
+                entry.author = page.author or entry.author
+                entry.published_at = page.published_at or entry.published_at
+            entry.doi = entry.doi or page.doi
+            entry.arxiv_id = entry.arxiv_id or page.arxiv_id
             if text:
                 return text, method
-        except (FetchError, PyPdfError):
+        except (FetchError, PyPdfError, ManualFetchError):
             pass
         if feed_text:
             return feed_text, "feed"
@@ -203,6 +220,16 @@ def collect(
         if is_backfill and entry.published_at is None and len(text) < fs.backfill_min_content_chars:
             notes.append(f"跳过疑似非文章页（发布时间未知且正文过短）：{entry.title}")
             continue
+        completeness = capture.completeness or (
+            "missing" if not original.strip() else
+            "abstract" if method in ("summary", "abstract_only") else
+            "partial" if capture.pdf_truncated or method == "feed" else "full"
+        )
+        from secondbrain.ops import _acquisition
+
+        provenance = {} if entry.video_id else {
+            "acquisition": _acquisition(entry.url, capture, method, completeness)
+        }
         items.append(
             db.NewItem(
                 source_id=source.id,
@@ -221,15 +248,12 @@ def collect(
                 arxiv_id=entry.arxiv_id,
                 original_text=original,
                 truncated=truncated,
-                completeness=(
-                    "missing" if not original.strip() else
-                    "abstract" if method == "summary" else
-                    "partial" if capture.pdf_truncated or method == "feed" else "full"
-                ),
+                completeness=completeness,
                 pdf_data=capture.pdf_data,
                 raw_data=entry.feed_content.encode() if method == "feed" else capture.raw_data,
                 total_pages=capture.pdf_metadata.get("total_pages"),
                 extracted_pages=capture.pdf_metadata.get("extracted_pages"),
+                provenance=provenance,
             )
         )
     return items, duplicates, notes, homepage
