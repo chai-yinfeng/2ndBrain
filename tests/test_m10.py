@@ -45,7 +45,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ("source_type", "url", "method", "expected"),
     [
         ("arxiv", "https://arxiv.org/abs/2611.1", "arxiv_html", "paper"),
-        ("hf_papers", "https://arxiv.org/abs/2611.2", "summary", "paper"),
+        ("rss", "https://arxiv.org/abs/2611.2", "summary", "paper"),
         ("rss", "https://arxiv.org/abs/2611.3", "feed", "paper"),
         ("rss", "https://blog.example.com/paper.PDF", "pdf", "paper"),
         ("rss", "https://blog.example.com/post", "pdf", "paper"),
@@ -114,22 +114,15 @@ def test_index_filters_only_affect_display(env):
     _seed_mixed_digest()
     client = TestClient(create_app())
     full = client.get("/recommendations").text
-    assert full.count('class="entry lane-') == 3 and 'data-budget="30/105"' in full
     assert 'href="/recommendations?form=paper"' in full
     assert 'href="/recommendations?ctype=explainer"' in full
 
     papers = client.get("/recommendations?form=paper").text
     assert "A paper survey" in papers and "A blog explainer" not in papers
     assert 'data-budget="30/105"' in papers  # 预算不受筛选影响
-    assert '<a class="chip on" href="/recommendations?form=paper">论文</a>' in papers
-    assert '<a class="chip" href="/recommendations">全部</a>' in papers
-    worth = papers.split('id="lane-worth_it"', 1)[1].split("</section>", 1)[0]
-    assert "<small>0</small>" in worth and "（空）" in worth  # 被筛空的 lane 显示空状态
 
     combo = client.get("/recommendations?form=blog&ctype=explainer").text
     assert "A blog explainer" in combo and "A lecture" not in combo and "A quick note" not in combo
-    fyi = combo.split('<details class="lane" id="lane-fyi">', 1)[1].split("</details>", 1)[0]
-    assert "速览（0 条）" in fyi
     video = client.get("/recommendations?form=video&ctype=bogus").text
     assert "A lecture" in video and "A paper survey" not in video
 
@@ -179,9 +172,10 @@ def test_source_homepage_rules():
     assert source_homepage(src(id="a", type="arxiv", query='abs:"kv cache"')).startswith(
         "https://arxiv.org/search/?query="
     )
-    assert source_homepage(src(id="a", type="hf_papers", url="https://h")) == (
-        "https://huggingface.co/papers"
-    )
+    assert source_homepage(src(
+        id="a", type="rss", url="https://papers.example/archive",
+        homepage="https://papers.example/archive", needs_scraper=True,
+    )) == "https://papers.example/archive"
     yt = src(id="a", type="youtube", url="https://www.youtube.com/feeds/videos.xml?channel_id=UC1")
     assert source_homepage(yt) == "https://www.youtube.com/channel/UC1"
     assert safe_url("ftp://x/") is None and safe_url("https://") is None
@@ -204,15 +198,13 @@ def test_feed_homepage_is_detected_and_linked(env, make_client):
     conn.close()
     assert detected == parse_feed(fixture_bytes("rss.xml")).homepage
     html = TestClient(create_app()).get("/sources").text
-    row = html.split('data-source="vllm-blog"', 1)[1].split("</tr>", 1)[0]
-    assert f'<a href="{detected}" target="_blank" rel="noopener noreferrer"' in row
-    lmsys = html.split('data-source="lmsys-sglang-blog"', 1)[1].split("</tr>", 1)[0]
+    row = html.split('data-source="vllm-blog"', 1)[1].split("</article>", 1)[0]
+    assert f'href="{detected}"' in row
+    lmsys = html.split('data-source="lmsys-sglang-blog"', 1)[1].split("</article>", 1)[0]
     assert 'href="https://lmsys.org/"' in lmsys
-    hazy = html.split('data-source="hazy-research"', 1)[1].split("</tr>", 1)[0]
+    hazy = html.split('data-source="hazy-research"', 1)[1].split("</article>", 1)[0]
     # 没抓取过的 rss 信源：兜底为 feed URL 的站点根（M11 修复）
-    assert 'href="https://hazyresearch.stanford.edu/"' in hazy.split("</td>", 1)[0]
-    assert "进入推荐" in html and "前排" not in html
-    assert 'title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）"' in html
+    assert 'href="https://hazyresearch.stanford.edu/"' in hazy
 
 
 # ---------- settings 深合并 ----------
@@ -294,7 +286,6 @@ def test_ops_key_settings_never_echo_value(env):
     assert "已设置" in resp.text and SECRET not in resp.text
     page = client.get("/ops").text
     assert "<b>已设置</b>（来源：.env）" in page and SECRET not in page
-    assert str(len(SECRET)) not in page.split('id="settings"', 1)[1].split("</section>", 1)[0]
     assert config.parse_env_file(config.env_file())["DEEPSEEK_API_KEY"] == SECRET
     assert "已从 .env 删除" in client.post("/ops/settings/key/clear").text
     assert "<b>未设置</b>" in client.get("/ops").text

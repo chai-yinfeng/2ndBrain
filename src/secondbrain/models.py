@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SourceType = Literal[
-    "rss", "arxiv", "hf_papers", "youtube", "sitemap", "html_index", "qwen_research",
+    "rss", "arxiv", "youtube", "sitemap", "html_index",
 ]
 
 

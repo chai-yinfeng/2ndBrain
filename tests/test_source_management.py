@@ -275,7 +275,7 @@ def test_repair_preview_and_apply_preserve_manual_identity(environment, monkeypa
     directory, _ = environment
     monkeypatch.setattr(config, "load_settings", lambda: {})
     candidate = SourceConfig(
-        id="catalog", name="目录名称", type="hf_papers", url="https://example.org/api/papers",
+        id="catalog", name="目录名称", type="rss", url="https://example.org/new.xml",
         homepage="https://example.org/blog/", trust=1, tags=["机器标签"], role="core",
     )
     discovered = []
@@ -283,7 +283,7 @@ def test_repair_preview_and_apply_preserve_manual_identity(environment, monkeypa
     def discover(location, client, settings):
         discovered.append(location)
         return {
-            "homepage": location, "title": "目录名称", "method": "hf_papers", "source": candidate,
+            "homepage": location, "title": "目录名称", "method": "rss", "source": candidate,
             "entries": [], "warnings": [], "status": "empty", "matched_source_id": "catalog",
             "matched_from": "catalog",
         }
@@ -291,12 +291,12 @@ def test_repair_preview_and_apply_preserve_manual_identity(environment, monkeypa
     monkeypatch.setattr(management, "discover_source", discover)
     messages = []
     preview = management.repair_source("personal", messages.append)
-    assert not preview["applied"] and preview["changes"]["type"] == "hf_papers"
+    assert not preview["applied"] and preview["changes"]["url"] == candidate.url
     assert (directory / "sources.yaml").read_text(encoding="utf-8") == PERSONAL
     result = management.repair_source("personal", messages.append, apply=True)
     assert result["applied"] and result["status"] == "empty"
     first = config.load_sources()[0]
-    assert first.id == "personal" and first.type == "hf_papers"
+    assert first.id == "personal" and first.type == "rss" and first.url == candidate.url
     assert first.name == "我的名称" and first.tags == ["人工"]
     assert first.trust == 5 and first.role == "expansion" and not first.enabled
     assert [source.id for source in config.load_sources()] == ["personal", "second"]

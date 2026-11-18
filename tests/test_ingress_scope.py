@@ -8,11 +8,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from secondbrain import config, ops, sources_file
+from secondbrain import config, sources_file
 from secondbrain.models import FetchSettings, SourceConfig
 from secondbrain.net import HttpClient
 from secondbrain.source_discovery import discover_source, follow_source, source_matches
-from secondbrain.sources import qwen, rss
+from secondbrain.sources import rss
 from secondbrain.web.app import create_app
 
 HOME = "https://scope.example/research/"
@@ -140,22 +140,3 @@ def test_web_scope_preview_is_readonly_and_stale_key_cannot_write(monkeypatch):
         assert rejected.status_code == 400
     assert (config.config_dir() / "sources.yaml").read_bytes() == before
 
-
-def test_qwen_manual_material_uses_public_article_not_spa(monkeypatch):
-    record = {"path": "sample", "type": "qwen_ai", "language": "en-US",
-              "title": "Real research", "extra": {"date": "2026-11-01"},
-              "content": "<article><p>Actual research body from public data.</p></article>"}
-    routes = {qwen.ARTICLES_URL: httpx.Response(
-        200, json={"success": True, "data": {"articles": [record]}}),
-        qwen.LEGACY_URL: httpx.Response(200, json=[])}
-    monkeypatch.setattr(ops, "HttpClient", lambda fs: client_for(routes, fs))
-    result = ops.add_manual(["https://qwen.ai/blog?id=sample"], lambda _: None, state="later")
-    item_id = result["results"][0]["item_id"]
-    from secondbrain import db
-    conn = db.connect()
-    row = db.item_detail(conn, item_id)
-    assert row["title"] == "Real research"
-    assert "Actual research body" in row["original_text"]
-    assert row["reading_state"] == "unread" and row["content_completeness"] == "full"
-    assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
-    conn.close()

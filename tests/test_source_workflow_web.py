@@ -15,8 +15,8 @@ from secondbrain.models import FetchSettings, SourceConfig
 from secondbrain.net import HttpClient
 from secondbrain.web.app import create_app
 
-HOME = "https://huggingface.co/papers"
-API = "https://huggingface.co/api/daily_papers"
+HOME = "https://papers.example/"
+FEED = "https://papers.example/feed.xml"
 TITLE = "KV cache memory management for efficient LLM inference"
 
 
@@ -24,11 +24,15 @@ TITLE = "KV cache memory management for efficient LLM inference"
 def environment(tmp_path, monkeypatch):
     monkeypatch.setenv("SB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SB_LLM_BACKEND", "fake")
+    catalog = SourceConfig(id="catalog", type="rss", url=FEED, homepage=HOME, tags=["paper"])
+    (config.config_dir() / "sources.example.yaml").write_text(
+        "sources:\n" + sources_file.dump_entry(catalog) + "\n", encoding="utf-8",
+    )
     requests = []
     original_dns = socket.getaddrinfo
 
     def resolve(host, port, *args, **kwargs):
-        if str(host) in {"huggingface.co", "arxiv.org"} or str(host).endswith(".example"):
+        if str(host) == "arxiv.org" or str(host).endswith(".example"):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
         return original_dns(host, port, *args, **kwargs)
 
@@ -36,11 +40,14 @@ def environment(tmp_path, monkeypatch):
 
     def transport(request):
         requests.append(str(request.url))
-        if str(request.url) == API:
-            return httpx.Response(200, json=[{"paper": {
-                "id": "2611.10001", "title": TITLE,
-                "summary": "Paged KV cache reduces memory waste in large language model serving.",
-            }}])
+        if str(request.url) == FEED:
+            return httpx.Response(200, text=f"""<rss version="2.0"><channel>
+                <title>Research updates</title><link>{HOME}</link>
+                <item><title>{TITLE}</title>
+                <link>https://arxiv.org/abs/2611.10001</link>
+                <description>Paged KV cache reduces memory waste
+                in large language model serving.</description>
+                </item></channel></rss>""")
         return httpx.Response(404)
 
     def client(*args, **kwargs):
@@ -58,7 +65,7 @@ def save_sources(*sources):
 
 
 def sample_source(**changes):
-    values = dict(id="mine", name="我的论文", type="hf_papers", url=API,
+    values = dict(id="mine", name="我的论文", type="rss", url=FEED,
                   homepage=HOME, tags=["人工保留"], trust=5, enabled=False, max_age_days=40)
     return SourceConfig(**(values | changes))
 
@@ -78,13 +85,13 @@ def test_follow_repairs_same_identity_then_edit_migrates_origins(environment):
     with TestClient(app) as client:
         preview = client.post("/sources/home/preview", data={"url": HOME})
         assert preview.status_code == 200 and TITLE in preview.text
-        assert environment == [API]
+        assert environment == [FEED]
         result = client.post("/sources/home/follow", data={"url": HOME, "source_id": "mine"},
                              follow_redirects=False)
         assert result.status_code == 303
         source, other = config.load_sources()
         assert (source.id, other.id) == ("mine", "other")
-        assert (source.type, source.url, source.name) == ("hf_papers", API, "我的论文")
+        assert (source.type, source.url, source.name) == ("rss", FEED, "我的论文")
         assert (source.tags, source.enabled, source.trust) == (["人工保留"], False, 5)
         imported = ops.add_manual(["https://article.example/one"], lambda _: None,
                                   reference_only=True, state="later", origin_source_id="mine")

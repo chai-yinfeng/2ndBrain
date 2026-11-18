@@ -895,3 +895,29 @@
 - 确认无进程占用后清理旧开发目录：`secondbrain-sources.K79JAB`、`secondbrain-ingress.1R2RDJ`、`secondbrain-dialogs.f1Ftli`、`secondbrain-inputs.Cpv5Nt`、`secondbrain-m13-m15.mrpmhR`；本轮 `secondbrain-resume.z2f7nxpr` 也已在验收服务/浏览器结束后清理。**`/tmp/secondbrain-reading.y3Cpac` 是个人试用数据，明确保留，不属于可删除的测试夹具。**
 - 保留讨论边界：KVM作者公开PDF `https://www.cs.columbia.edu/~nieh/pubs/asplos2014_kvmarm.pdf` 与Zap会议PDF `https://static.usenix.org/events/osdi02/tech/full_papers/osman/osman.pdf` 已在暂停前核对，但本轮未自动导入。不同DOI/出版载体候选的更清晰呈现、通用公开全文发现、封面自动刷新、CoSE布局与未知同义实体归并仍是讨论方案，本轮没有擅自实施。原图9节点15边分成4/5节点两组，度数3/4被现有对数同心布局放在同层，不能把空间均匀解释为没有实际链接；显式aliases已有，不承诺未知同义自动归并。
 - 本轮仅本地提交，不push或创建PR。
+
+## 持久个人工作区、专用采集清退与公开全文（ADR 0026）
+
+**数据迁移**
+
+- 用户表单明确选择 `~/Library/Application Support/SecondBrain`，随后确认暂用该位置，不与源码仓库绑定。确认无运行任务后停服，将临时工作区整体复制；**9份材料、6条阅读清单、25个关注**，原件、wiki、笔记、画像及任务记录一并迁移。原44文件摘要一致，两份SQLite integrity_check正常；库内未发现依赖旧临时根目录的绝对路径。
+- 完整迁移前副本集中保存在 `migration-backups/from-temp-20261118-041702`，已逐文件与原目录校验。正式sources仅把 `hf-daily-papers / qwen-research` 转成现有手动主页表示，保持ID、名称、主页、标签、trust/role、启停、时间窗等属性；其他23项逐字段相同。只同步新的sources示例规则，材料/任务数据库及wiki/笔记/原件不改写，不复制原项目.env密钥。
+- 恢复服务为 **`sb-persistent-personal-preview`**，继续8765，data/config/env/LaunchAgents均指向持久工作区；DeepSeek与S2必要凭据仍仅从原.env只读注入进程。来源页/阅读列表/历史HTTP200，25关注正常；实际原件HTTP链接与复制文件摘要一致（本次21460字节）。用量记录迁移前后均6条，没有新真实模型调用。
+- 完成切换后已删除旧 `/tmp/secondbrain-reading.y3Cpac`。恢复副本明确保留，不当测试垃圾清理；README记录启动覆盖变量和恢复配置注意事项。原项目data、.env、launchd与Obsidian均未修改/启动。
+
+**来源与全文**
+
+- 清除HF Papers/Qwen Research的生产枚举、FETCHERS注册、专用解析、提示词/筛选器引用及废弃夹具；原Qwen旧RSS继续按通用RSS使用。手动主页明确“不自动采集”，这些域名以后仍允许通用RSS/HTML/sitemap发现，不硬禁网站，也不保留旧enum运行别名。arXiv、YouTube保留。
+- DOI/arXiv/普通网页、订阅正文与论文候选复用公开获取流程，摘要后继续查明确开放地址及落地页citation PDF。PublicClient逐跳公网/DNS预检查、流式大小/总请求预算、失败地址记忆和跨站凭据隔离；不借登录态、不刷403、不绕验证码或付费墙。诊断URL及reason去查询值；实际正文/摘要的响应单独选择，后续失败不会覆盖实际来源或原件。
+- `acquisition`贯通ManualFetched、AddResult、论文结果和provenance，CLI、任务和材料来源详情显示完整度/实际地址/提取方式/版本与尝试原因。全文、部分、摘要、仅引用分开；未知版本不猜，出版商摘要HTML、登录/验证页不算全文。旧历史没有该字段时仍显示原有事实，不伪造补记录。
+
+**验证**
+
+- 分组命令：`uv run pytest -q tests/test_public_fulltext.py tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_paper_import.py tests/test_manual_add.py tests/test_material_web.py tests/test_source_discovery.py tests/test_source_management.py tests/test_source_workflow_web.py tests/test_sources.py tests/test_sources_catalog.py tests/test_source_analysis.py tests/test_ingress_scope.py tests/test_dedupe.py tests/test_m10.py tests/test_ops.py`，首轮 **324 passed、6 failed**。修正arXiv显式版本在通用URL解析时丢失、API多条响应需按请求ID选择的问题，保留错误身份拒绝；夹具补明确v1地址。另3项旧UI类名/文案和密钥长度偶然撞上pytest目录名的断言移除，保留真实筛选、主页链接与密钥不回显契约。6个失败用例单独 **6 passed**；手动来源不发请求用例单独 **1 passed**。相关Ruff问题修正后通过；未跑全套。
+- 全部新分支使用 `/tmp/secondbrain-public.imVesw`、fake模型与受控HTTP夹具：浏览器从DOI元数据已有摘要→重定向落地页→标准citation PDF，取得full且实际来源为PDF；被拒绝的DOI回退摘要、403尝试可展开，来源仍是提供摘要的元数据响应，不是失败地址。论文名入口复用同一材料，材料来源详情一致。HF设置只显示五种有效获取方式，手动主页勾选。
+- 桌面与390px浏览器实查；发现结果里的长失败URL造成428px横向溢出，复用break-anywhere规则后页面宽恢复390，无应用脚本错误。CLI真实抓取公开Anthropic博客成功，打印full/html和真实内容地址；没有在用户工作区导入验收样例或重试其知乎/KVM/Zap记录。
+- 验收服务/浏览器结束后已清除本轮临时目录及脚本。知乎原记录只能证实HTTP403，不能推断必须Cookie；本轮未重试该被拒绝URL。未接通用搜索API、浏览器采集、OCR或视觉解析，不能承诺发现全部作者主页；M14原生Obsidian缺口不变。
+
+**独立worktree说明**
+
+- `2ndbrain-material-network` 是按最初“先建独立worktree”要求创建的隔离分支目录；Git分支创建记录为 `2026-11-16T03:50:10-05:00`。它与主目录共享Git历史，main尚未整合该分支。当前服务仍从该worktree运行代码，个人记录已与它分离；应先整合并切换服务入口，再用git worktree remove清理，不能直接删除或用旧main运行新数据。本轮不merge、不push、不创建PR。

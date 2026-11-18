@@ -7,7 +7,6 @@ from conftest import fixture_bytes
 from secondbrain import config
 from secondbrain.net import FetchError
 from secondbrain.sources.arxiv import parse_api_response, parse_arxiv_id
-from secondbrain.sources.hf_papers import parse_daily_papers
 from secondbrain.sources.rss import parse_feed
 
 
@@ -60,30 +59,18 @@ def test_parse_arxiv_error_entry():
         parse_api_response(fixture_bytes("arxiv_api_error.xml"))
 
 
-def test_parse_hf_daily_papers():
-    entries = parse_daily_papers(fixture_bytes("hf_daily_papers.json"))
-    assert [e.url for e in entries] == [
-        "https://arxiv.org/abs/2611.01234",
-        "https://arxiv.org/abs/2611.09999",
-    ]
-    assert entries[1].author == "Frank"
-    # 使用进入 Daily Papers 的时间
-    assert entries[0].published_at == datetime(2026, 11, 3, 21, tzinfo=UTC)
-
-
-def test_parse_hf_rejects_bad_payload():
-    with pytest.raises(FetchError):
-        parse_daily_papers(b'{"error": "x"}')
-    with pytest.raises(FetchError):
-        parse_daily_papers(b"<html>")
-
-
 def test_example_sources_are_valid():
     sources = config.load_sources(config.CONFIG_DIR / "sources.example.yaml")
     assert len(sources) > 10
-    assert {s.type for s in sources} >= {"rss", "arxiv", "hf_papers"}
+    assert {s.type for s in sources} >= {"rss", "arxiv", "youtube"}
     assert any(s.role == "expansion" for s in sources)
     assert any(s.needs_scraper for s in sources)
+    by_id = {source.id: source for source in sources}
+    for source_id in ("hf-daily-papers", "qwen-research"):
+        source = by_id[source_id]
+        assert source.type == "rss" and source.needs_scraper
+        assert source.url == source.homepage
+    assert not by_id["qwen-blog"].needs_scraper
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -110,6 +97,15 @@ def _write(tmp_path: Path, text: str) -> Path:
 def test_invalid_sources(tmp_path: Path, text: str, message: str):
     with pytest.raises(config.ConfigError, match=message):
         config.load_sources(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize("source_type", ["hf_papers", "qwen_research", "manual"])
+def test_removed_source_types_are_rejected_without_rewriting(tmp_path, source_type):
+    text = f"sources:\n  - {{id: old, type: {source_type}, url: 'https://example.org/'}}\n"
+    path = _write(tmp_path, text)
+    with pytest.raises(config.ConfigError):
+        config.load_sources(path)
+    assert path.read_text(encoding="utf-8") == text
 
 
 def test_source_defaults(tmp_path: Path):

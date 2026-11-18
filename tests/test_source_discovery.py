@@ -368,24 +368,15 @@ def _preview(source, routes, settings=None):
     return result, requests
 
 
-HF_HOME = "https://huggingface.co/papers"
-HF_API = "https://huggingface.co/api/daily_papers"
-HF_PAPERS = [{
-    "paper": {"id": "2611.00001", "title": "A real paper", "summary": "Evidence"},
-    "publishedAt": "2026-11-01T00:00:00Z",
-}]
 DEEPMIND_HOME = "https://deepmind.google/blog/"
 DEEPMIND_RSS = "https://deepmind.google/blog/rss.xml"
 
 
-@pytest.mark.parametrize("homepage,endpoint,method,response", [
-    (HF_HOME, HF_API, "hf_papers", httpx.Response(200, json=HF_PAPERS)),
-    (DEEPMIND_HOME, DEEPMIND_RSS, "rss", httpx.Response(200, content=RSS)),
-])
-def test_known_adapter_precedes_homepage_guessing(
-    monkeypatch, homepage, endpoint, method, response,
-):
-    result, requests = _discover({endpoint: response}, homepage)
+def test_known_adapter_precedes_homepage_guessing():
+    result, requests = _discover(
+        {DEEPMIND_RSS: httpx.Response(200, content=RSS)}, DEEPMIND_HOME,
+    )
+    method, endpoint = "rss", DEEPMIND_RSS
     assert result["method"] == method and result["status"] == "ready"
     assert result["matched_from"] == "catalog"
     assert result["matched_source_id"] == result["source"].id
@@ -393,24 +384,24 @@ def test_known_adapter_precedes_homepage_guessing(
     assert result["entries"]
 
 
-def test_hf_preview_matches_url_discovery_and_real_fetcher():
-    source = SourceConfig(id="papers", type="hf_papers", url=HF_API, homepage=HF_HOME)
-    preview, requests = _preview(source, {HF_API: httpx.Response(200, json=HF_PAPERS)})
+def test_rss_preview_matches_url_discovery_and_real_fetcher():
+    source = SourceConfig(id="blog", type="rss", url=DEEPMIND_RSS, homepage=DEEPMIND_HOME)
+    preview, requests = _preview(source, {DEEPMIND_RSS: httpx.Response(200, content=RSS)})
     discovered, discovered_requests = _discover(
-        {HF_API: httpx.Response(200, json=HF_PAPERS)}, HF_HOME
+        {DEEPMIND_RSS: httpx.Response(200, content=RSS)}, DEEPMIND_HOME,
     )
     assert preview["entries"] == discovered["entries"]
-    assert preview["entries"][0].url == "https://arxiv.org/abs/2611.00001"
-    assert requests == discovered_requests == [HF_API]
+    assert preview["entries"][0].url == HOME + "blog/first"
+    assert requests == discovered_requests == [DEEPMIND_RSS]
 
 
 def test_current_usable_config_precedes_catalog(monkeypatch):
     source = SourceConfig(
-        id="my-papers", type="rss", url=HOME + "my-feed", homepage=HF_HOME,
+        id="my-papers", type="rss", url=HOME + "my-feed", homepage=DEEPMIND_HOME,
         name="My choice", tags=["personal"], enabled=False, trust=5,
     )
     _with_followed(monkeypatch, [source])
-    result, requests = _discover({source.url: httpx.Response(200, content=RSS)}, HF_HOME)
+    result, requests = _discover({source.url: httpx.Response(200, content=RSS)}, DEEPMIND_HOME)
     assert result["source"] == source and result["matched_from"] == "followed"
     assert requests == [source.url] and result["title"] == "My choice"
 
@@ -421,8 +412,8 @@ sources:
   - id: my-papers
     name: 我的论文
     type: rss
-    url: https://huggingface.co/papers
-    homepage: https://huggingface.co/papers
+    url: https://deepmind.google/blog/
+    homepage: https://deepmind.google/blog/
     needs_scraper: true
     tags: [manual-domain]
     trust: 5  # chosen
@@ -443,16 +434,17 @@ sources:
 
     monkeypatch.setattr("secondbrain.ops.edit_sources", save)
     result, requests = _discover(
-        {HF_API: httpx.Response(200, json=HF_PAPERS)}, HF_HOME, apply=True, name="Not an overwrite",
+        {DEEPMIND_RSS: httpx.Response(200, content=RSS)},
+        DEEPMIND_HOME, apply=True, name="Not an overwrite",
     )
     updated = result["source"]
     assert updated.id == result["saved_id"] == "my-papers"
-    assert updated.type == "hf_papers" and updated.url == HF_API and not updated.needs_scraper
+    assert updated.type == "rss" and updated.url == DEEPMIND_RSS and not updated.needs_scraper
     for field in ("name", "tags", "trust", "enabled", "role", "max_age_days"):
         assert getattr(updated, field) == getattr(sources[0], field)
     assert [source.id for source in config.parse_sources_text(saved[0])] == ["my-papers", "another"]
     assert "# personal order" in saved[0] and "# chosen" in saved[0]
-    assert requests == [HF_API]
+    assert requests == [DEEPMIND_RSS]
 
 
 def test_follow_existing_source_is_idempotent_and_id_change_requires_edit(monkeypatch):
@@ -471,10 +463,8 @@ def test_follow_existing_source_is_idempotent_and_id_change_requires_edit(monkey
     assert len(saved) == 1
 
 
-@pytest.mark.parametrize("homepage,endpoint", [
-    (HF_HOME, HF_API), (DEEPMIND_HOME, DEEPMIND_RSS),
-])
-def test_known_adapter_failure_preserves_existing_bookmark(monkeypatch, homepage, endpoint):
+def test_known_adapter_failure_preserves_existing_bookmark(monkeypatch):
+    homepage, endpoint = DEEPMIND_HOME, DEEPMIND_RSS
     bookmark = SourceConfig(
         id="personal-id", type="rss", url=homepage, homepage=homepage, needs_scraper=True,
         name="Manual name", tags=["curated"], trust=4, enabled=False,
@@ -485,6 +475,38 @@ def test_known_adapter_failure_preserves_existing_bookmark(monkeypatch, homepage
     assert result["source"] == bookmark
     assert "503" in " ".join(result["warnings"])
     assert requests == [endpoint]
+
+
+@pytest.mark.parametrize("homepage", [
+    "https://huggingface.co/papers", "https://qwen.ai/research",
+])
+def test_retired_platform_homepage_uses_generic_discovery_without_api(homepage):
+    result, requests = _discover({homepage: httpx.Response(200, text="<title>Research</title>")},
+                                 homepage)
+    assert result["method"] == "bookmark" and result["status"] == "manual"
+    assert result["source"].type == "rss" and result["source"].needs_scraper
+    assert result["source"].url == result["source"].homepage == homepage
+    assert result["matched_from"] == "generic"
+    assert requests[0] == homepage and all("/api/" not in url for url in requests)
+
+
+@pytest.mark.parametrize("homepage", [
+    "https://huggingface.co/papers", "https://qwen.ai/research",
+])
+def test_retired_platform_domain_still_allows_generic_rss_discovery(homepage):
+    feed_url = homepage + "/feed"
+    page = (
+        '<title>Research</title><link rel="alternate" type="application/rss+xml" '
+        f'href="{feed_url}">'
+    )
+    scoped_feed = RSS.replace(HOME.encode(), (homepage + "/").encode())
+    result, requests = _discover({
+        homepage: httpx.Response(200, text=page),
+        feed_url: httpx.Response(200, content=scoped_feed),
+    }, homepage)
+    assert result["method"] == "rss" and result["status"] == "ready"
+    assert result["source"].url == feed_url and not result["source"].needs_scraper
+    assert requests == [homepage, feed_url]
 
 
 def test_empty_feed_invalid_feed_and_manual_are_distinct():
@@ -671,12 +693,12 @@ def test_shared_index_with_distinct_article_filters_is_not_one_source():
 
 def test_explicit_preview_uses_supplied_rules_not_followed_homepage_match(monkeypatch):
     current = SourceConfig(
-        id="personal-feed", type="rss", url=HOME + "feed", homepage=HF_HOME,
+        id="personal-feed", type="rss", url=HOME + "feed", homepage=DEEPMIND_HOME,
         name="Personal feed",
     )
     _with_followed(monkeypatch, [current])
     explicit = SourceConfig(
-        id="advanced-form", type="html_index", url=HOME + "list", homepage=HF_HOME,
+        id="advanced-form", type="html_index", url=HOME + "list", homepage=DEEPMIND_HOME,
         name="Explicit display", url_pattern=r"/blog/second$", max_links=1,
     )
     result, requests = _preview(explicit, {explicit.url: httpx.Response(200, text=LIST)})
@@ -688,29 +710,29 @@ def test_explicit_preview_uses_supplied_rules_not_followed_homepage_match(monkey
 
 
 def test_proven_public_redirect_can_reach_known_adapter_without_guessing_www_alias():
-    alias = "https://www.huggingface.co/papers"
+    alias = "https://www.deepmind.google/blog/"
     result, requests = _discover({
-        alias: httpx.Response(302, headers={"location": HF_HOME}),
-        HF_HOME: httpx.Response(200, text="<title>Papers</title>"),
-        HF_API: httpx.Response(200, json=HF_PAPERS),
+        alias: httpx.Response(302, headers={"location": DEEPMIND_HOME}),
+        DEEPMIND_HOME: httpx.Response(200, text="<title>Research</title>"),
+        DEEPMIND_RSS: httpx.Response(200, content=RSS),
     }, alias)
-    assert result["method"] == "hf_papers" and result["matched_from"] == "catalog"
-    assert requests == [alias, HF_HOME, HF_API]
+    assert result["method"] == "rss" and result["matched_from"] == "catalog"
+    assert requests == [alias, DEEPMIND_HOME, DEEPMIND_RSS]
 
 
 def test_known_adapter_has_same_shared_request_and_body_limits():
-    source = SourceConfig(id="papers", type="hf_papers", url=HF_API, homepage=HF_HOME)
+    source = SourceConfig(id="blog", type="rss", url=DEEPMIND_RSS, homepage=DEEPMIND_HOME)
     oversized, requests = _preview(
-        source, {HF_API: httpx.Response(200, content=b"x" * 5000)},
+        source, {DEEPMIND_RSS: httpx.Response(200, content=b"x" * 5000)},
         FetchSettings(
             per_host_interval_seconds=0, retries=0, discovery_response_max_bytes=4000
         ),
     )
     assert oversized["status"] == "incomplete" and oversized["source"] == source
     assert oversized["diagnostics"][0]["kind"] == "response_limit"
-    assert requests == [HF_API]
+    assert requests == [DEEPMIND_RSS]
     looping, requests = _preview(source, {
-        HF_API: httpx.Response(302, headers={"location": HF_API}),
+        DEEPMIND_RSS: httpx.Response(302, headers={"location": DEEPMIND_RSS}),
     })
     assert looping["status"] == "failed" and len(requests) <= MAX_REQUESTS
     assert looping["source"] == source
@@ -754,12 +776,14 @@ def test_homepage_subsection_does_not_fall_back_to_another_article_scope():
     assert "未自动扩大" in " ".join(result["warnings"])
 
 
-@pytest.mark.parametrize("papers,status", [(HF_PAPERS, "ready"), ([], "empty")])
+@pytest.mark.parametrize("feed,status", [
+    (RSS, "ready"), (b'<rss version="2.0"><channel><title>Empty</title></channel></rss>', "empty"),
+])
 def test_stale_followed_adapter_repaired_only_after_validated_catalog_preview(
-    monkeypatch, papers, status,
+    monkeypatch, feed, status,
 ):
     current = SourceConfig(
-        id="my-papers", type="rss", url=HOME + "stale-feed", homepage=HF_HOME,
+        id="my-papers", type="rss", url=HOME + "stale-feed", homepage=DEEPMIND_HOME,
         name="My papers", tags=["human"], trust=5, enabled=False, role="expansion",
     )
     _with_followed(monkeypatch, [current])
@@ -770,20 +794,20 @@ def test_stale_followed_adapter_repaired_only_after_validated_catalog_preview(
     )
     result, requests = _discover({
         current.url: httpx.Response(503),
-        HF_API: httpx.Response(200, json=papers),
-    }, HF_HOME, apply=True)
+        DEEPMIND_RSS: httpx.Response(200, content=feed),
+    }, DEEPMIND_HOME, apply=True)
     assert result["status"] == status and result["saved_id"] == "my-papers"
-    assert result["source"].type == "hf_papers" and result["source"].url == HF_API
+    assert result["source"].type == "rss" and result["source"].url == DEEPMIND_RSS
     for field in ("id", "name", "tags", "trust", "enabled", "role", "max_age_days"):
         assert getattr(result["source"], field) == getattr(current, field)
     assert "503" in " ".join(result["warnings"])
-    assert requests == [current.url, HF_API]
+    assert requests == [current.url, DEEPMIND_RSS]
     assert config.parse_sources_text(saved[0]) == [result["source"]]
 
 
 def test_failed_current_and_catalog_adapters_keep_original_config_and_diagnostics(monkeypatch):
     current = SourceConfig(
-        id="my-papers", type="rss", url=HOME + "stale-feed", homepage=HF_HOME,
+        id="my-papers", type="rss", url=HOME + "stale-feed", homepage=DEEPMIND_HOME,
         tags=["human"], enabled=False, trust=4,
     )
     _with_followed(monkeypatch, [current])
@@ -794,22 +818,22 @@ def test_failed_current_and_catalog_adapters_keep_original_config_and_diagnostic
     monkeypatch.setattr("secondbrain.ops.edit_sources", forbidden)
     result, requests = _discover({
         current.url: httpx.Response(503),
-        HF_API: httpx.Response(502),
-    }, HF_HOME, apply=True, name="Do not fill on failure")
+        DEEPMIND_RSS: httpx.Response(502),
+    }, DEEPMIND_HOME, apply=True, name="Do not fill on failure")
     assert result["status"] == "failed" and result["saved_id"] is None
     assert result["source"] == current and result["method"] == "rss"
     warnings = " ".join(result["warnings"])
-    assert "503" in warnings and "502" in warnings and "hf_papers" in warnings
-    assert requests == [current.url, HF_API]
+    assert "503" in warnings and "502" in warnings
+    assert requests == [current.url, DEEPMIND_RSS]
 
 
 @pytest.mark.parametrize("case", ["generic", "catalog", "bookmark"])
 def test_follow_never_saves_any_failed_preview(monkeypatch, case):
-    homepage = HOME if case == "generic" else HF_HOME
-    endpoint = HOME if case == "generic" else HF_API
+    homepage = HOME if case == "generic" else DEEPMIND_HOME
+    endpoint = HOME if case == "generic" else DEEPMIND_RSS
     if case == "bookmark":
         current = SourceConfig(
-            id="mine", type="rss", url=HF_HOME, homepage=HF_HOME, needs_scraper=True,
+            id="mine", type="rss", url=DEEPMIND_HOME, homepage=DEEPMIND_HOME, needs_scraper=True,
         )
         _with_followed(monkeypatch, [current])
 
@@ -824,12 +848,12 @@ def test_follow_never_saves_any_failed_preview(monkeypatch, case):
 
 def test_failed_adapter_fallback_shares_one_request_budget(monkeypatch):
     current = SourceConfig(
-        id="mine", type="rss", url=HOME + "old-feed", homepage=HF_HOME, name="Keep",
+        id="mine", type="rss", url=HOME + "old-feed", homepage=DEEPMIND_HOME, name="Keep",
     )
     adapters = [
-        SourceConfig(id="candidate-one", type="hf_papers", url=HF_API, homepage=HF_HOME),
+        SourceConfig(id="candidate-one", type="rss", url=DEEPMIND_RSS, homepage=DEEPMIND_HOME),
         SourceConfig(
-            id="candidate-two", type="hf_papers", url=HOME + "another-api", homepage=HF_HOME,
+            id="candidate-two", type="rss", url=HOME + "another-feed", homepage=DEEPMIND_HOME,
         ),
     ]
     monkeypatch.setattr(
@@ -837,9 +861,9 @@ def test_failed_adapter_fallback_shares_one_request_budget(monkeypatch):
     )
     result, requests = _discover({
         current.url: httpx.Response(302, headers={"location": current.url}),
-        HF_API: httpx.Response(302, headers={"location": HF_API}),
-        adapters[1].url: httpx.Response(200, json=HF_PAPERS),
-    }, HF_HOME)
+        DEEPMIND_RSS: httpx.Response(302, headers={"location": DEEPMIND_RSS}),
+        adapters[1].url: httpx.Response(200, content=RSS),
+    }, DEEPMIND_HOME)
     assert result["status"] == "incomplete" and result["source"] == current
     assert any(d["kind"] == "request_limit" for d in result["diagnostics"])
     assert len(requests) == MAX_REQUESTS
@@ -849,9 +873,9 @@ def test_failed_adapter_fallback_shares_one_request_budget(monkeypatch):
 
 def test_failed_preview_does_not_retry_identical_catalog_fetch_rules(monkeypatch):
     current = SourceConfig(
-        id="my-papers", type="hf_papers", url=HF_API, homepage=HF_HOME,
+        id="my-papers", type="rss", url=DEEPMIND_RSS, homepage=DEEPMIND_HOME,
     )
     _with_followed(monkeypatch, [current])
-    result, requests = _discover({HF_API: httpx.Response(503)}, HF_HOME)
+    result, requests = _discover({DEEPMIND_RSS: httpx.Response(503)}, DEEPMIND_HOME)
     assert result["status"] == "failed" and result["source"] == current
-    assert requests == [HF_API]
+    assert requests == [DEEPMIND_RSS]

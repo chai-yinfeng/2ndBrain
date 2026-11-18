@@ -386,7 +386,7 @@ def _locations(source: SourceConfig | str) -> set[str]:
     else:
         # RSS / sitemap 的域名根只是展示兜底，不是栏目身份。
         homepage = source.homepage
-        if not homepage and source.type in {"html_index", "hf_papers", "youtube"}:
+        if not homepage and source.type in {"html_index", "youtube"}:
             homepage = source_homepage(source)
         if not homepage and source.type == "arxiv":
             query = source.query or ""

@@ -12,7 +12,7 @@ CTYPES = {
     "tutorial": "教程",
     "opinion": "观点",
 }
-PAPER_SOURCES = {"arxiv", "hf_papers"}
+PAPER_SOURCES = {"arxiv"}
 PAPER_METHODS = {"arxiv_html", "pdf"}
 
 

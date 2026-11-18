@@ -29,7 +29,7 @@ MAX_INPUT_CHARS = 24_000
 MAX_OUTPUT_TOKENS = 1024
 PROMPT_PATH = Path(__file__).parent / "llm" / "prompts" / "source_profile.md"
 _ACQUISITION = {
-    "rss", "atom", "sitemap", "html_index", "hf_papers", "arxiv", "api", "bookmark",
+    "rss", "atom", "sitemap", "html_index", "arxiv", "api", "bookmark",
     "订阅", "网页抓取", "获取方式",
 }
 
