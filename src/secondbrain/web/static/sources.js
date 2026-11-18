@@ -3,11 +3,26 @@
   const list = document.getElementById("following-list");
   if (!list) return;
   const sort = document.getElementById("source-sort");
+  const layout = document.getElementById("source-layout");
   const rows = Array.from(list.children).filter(row => row.matches("[data-source]"));
   const collator = new Intl.Collator("zh-CN", {
     usage: "sort", sensitivity: "base", numeric: true, ignorePunctuation: true,
   });
   const orderKey = "secondbrain-source-sort";
+  const layoutKey = "secondbrain-source-layout";
+  function setLayout(value) {
+    const mode = value === "cards" ? "cards" : "list";
+    list.dataset.layout = mode;
+    layout.value = mode;
+  }
+  let savedLayout = "list";
+  try { savedLayout = localStorage.getItem(layoutKey) || savedLayout; } catch (_) { /* Optional storage. */ }
+  setLayout(savedLayout);
+  layout.disabled = false;
+  layout.addEventListener("change", () => {
+    setLayout(layout.value);
+    try { localStorage.setItem(layoutKey, layout.value); } catch (_) { /* Optional storage. */ }
+  });
   let preference = "recent";
   try { preference = localStorage.getItem(orderKey) || preference; } catch (_) { /* Optional storage. */ }
   function sortRows(value) {
@@ -26,6 +41,39 @@
   sort.addEventListener("change", () => {
     sortRows(sort.value);
     try { localStorage.setItem(orderKey, sort.value); } catch (_) { /* This page still sorts. */ }
+  });
+  document.querySelectorAll("img[data-source-visual]").forEach(image => {
+    image.addEventListener("error", () => { image.hidden = true; });
+    image.addEventListener("load", () => { image.hidden = false; });
+    if (image.complete && image.naturalWidth === 0) image.hidden = true;
+  });
+  document.querySelectorAll("[data-refresh-visual]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.refreshVisual;
+      const row = button.closest("[data-source]");
+      const status = row.querySelector("[data-visual-status]");
+      button.disabled = true;
+      status.textContent = "正在安全获取封面…关闭窗口不会取消。";
+      try {
+        const response = await fetch(`/sources/${encodeURIComponent(id)}/visual`, {
+          method: "POST", headers: {"Accept": "application/json"}, credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error("获取失败");
+        const result = await response.json();
+        const image = row.querySelector("img[data-source-visual]");
+        if (result.available && /^[a-f0-9]{64}$/.test(result.version)) {
+          image.hidden = false;
+          image.src = `/sources/${encodeURIComponent(id)}/visual?v=${result.version}`;
+          status.textContent = result.message || "本地封面已更新。";
+        } else {
+          status.textContent = result.message || "未找到可用封面，保留首字母或现有缓存。";
+        }
+      } catch (_) {
+        status.textContent = "封面更新失败；现有封面与采集配置不受影响，可再次尝试。";
+      } finally {
+        button.disabled = false;
+      }
+    });
   });
 
   const dialogs = Array.from(document.querySelectorAll("dialog.source-dialog"));

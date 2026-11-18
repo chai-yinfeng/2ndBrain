@@ -1,6 +1,6 @@
-<section class="paper-result" data-paper-status="{{ result.status }}">
-<h2>{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}</h2>
-<p>{{ result.message }}</p>
+<section class="paper-result" data-paper-status="{{ 'resolved' if result.resolved_by else result.status }}">
+<h2>{% if result.resolved_by %}历史候选（已选择）{% else %}{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}{% endif %}</h2>
+{% if result.resolved_by %}<p>本次候选已处理；<a href="/task-history/{{ result.resolved_by }}">查看后续导入结果</a>。</p>{% else %}<p>{{ result.message }}</p>{% endif %}
 {% for error in result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
 {% if result.ingest %}
 <p class="meta">wiki：新建 {{ result.ingest.get('created', []) | length }} 页、更新 {{ result.ingest.get('updated', []) | length }} 页；整理不代表已读或已掌握。</p>
@@ -21,11 +21,16 @@
 <p class="meta">{{ c.authors | join(', ') }} · {{ c.year or '年份未知' }} · {{ c.venue or '会议/期刊未知' }}</p>
 <p class="meta break-anywhere">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
 {% if c.abstract %}<details><summary>摘要</summary><p>{{ c.abstract }}</p></details>{% endif %}
-{% if result.status == 'ambiguous' %}
+{% if result.status == 'ambiguous' and not result.resolved_by %}
 <form action="/papers/choose" method="post" class="add-form">
 <input type="hidden" name="search_id" value="{{ result.search_id }}">
 <input type="hidden" name="candidate_id" value="{{ c.id }}">
-<label class="choice"><input type="checkbox" name="read" value="1"{% if result.read_requested %} checked{% endif %}> 此篇已经读过，登记并整理知识（按现有费用上限计费）</label>
+{% with field_prefix="candidate-" ~ c.id,
+  intake_state=result.state_requested|default('read' if result.read_requested else 'later'),
+  learning_notes=result.learning_notes|default(''),
+  discussion_url=result.discussion_url|default('') %}
+{% include "_intake_state.html" %}
+{% endwith %}
 <button type="submit" class="fb primary">选择此论文与版本</button>
 </form>
 <p class="meta">CLI：sb paper choose {{ result.search_id }} {{ c.id }}</p>

@@ -424,23 +424,6 @@ def edit_sources(edit) -> list:
         return sources_file.write(edit(path.read_text(encoding="utf-8")))
 
 
-def catalog_entries() -> list:
-    """尚未关注且未从当前工作空间移除的参考项；不影响底层适配注册表。"""
-    from secondbrain.source_discovery import source_matches
-    from secondbrain.source_management import catalog_hidden_ids
-
-    example = config.config_dir() / "sources.example.yaml"
-    if not example.is_file():
-        return []
-    current = config.load_sources()
-    hidden = catalog_hidden_ids()
-    return [
-        source for source in config.load_sources(example)
-        if source.id not in hidden
-        and not any(source.id == saved.id or source_matches(source, saved) for saved in current)
-    ]
-
-
 # ---------- 深度速读与补前置（M8，ADR 0015） ----------
 
 NO_TRANSCRIPT = "no_transcript"

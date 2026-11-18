@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% block title %}论文导入 · Second Brain{% endblock %}
+{% block title %}{{ task.title }} · Second Brain{% endblock %}
 {% block content %}
 <header class="page-header">
-  <div><p class="eyebrow">添加材料</p><h1>论文导入</h1><p class="meta">检索、消歧与下载在后台执行。可刷新本页查看同一任务；整理不改变阅读状态。</p></div>
-  <div class="page-actions"><a class="fb" href="/add#paper-name">导入另一篇论文</a></div>
+  <div><p class="eyebrow">后台任务</p><h1>{{ task.title }}</h1><p class="meta">进度、结果和待选候选会保留。切页或重启后仍可查看；中断任务不会自动重试。</p></div>
+  <div class="page-actions"><a class="fb" href="/add">添加另一份材料</a><a class="fb" href="/task-history">全部任务记录</a></div>
 </header>
 <section class="panel">
 {% include "_task.html" %}
 </section>
+<script src="{{ static_asset('intake.js') }}" defer></script>
 {% endblock %}

@@ -8,6 +8,7 @@ from conftest import fast_settings, fixture_bytes
 from fastapi.testclient import TestClient
 
 from secondbrain import config, db
+from secondbrain import sources_file as sf
 from secondbrain.ingest import fetch_sources
 from secondbrain.models import SourceConfig
 from secondbrain.net import FetchError, HttpClient
@@ -110,15 +111,18 @@ def test_fetch_without_matching_links_fails(tmp_path):
         html_index.fetch(src, client, client.settings)
 
 
-def test_catalog_lists_sglang_with_homepage_and_peek(tmp_path, monkeypatch):
+def test_configured_sglang_homepage_and_peek(tmp_path, monkeypatch):
     monkeypatch.setenv("SB_DATA_DIR", str(tmp_path))
-    (config.config_dir() / "sources.yaml").write_text("sources: []\n", encoding="utf-8")
+    example = config.load_sources(config.config_dir() / "sources.example.yaml")
+    source = next(s for s in example if s.id == "sglang-blog")
+    (config.config_dir() / "sources.yaml").write_text(
+        "sources:\n" + sf.dump_entry(source) + "\n", encoding="utf-8"
+    )
     routes = {INDEX: httpx.Response(200, content=fixture_bytes("sglang_blog_index.html"))}
     monkeypatch.setattr("secondbrain.web.app._http_client", lambda fs: _client(routes))
     client = TestClient(create_app())
     html = client.get("/sources").text
-    item = html.split('data-catalog="sglang-blog"', 1)[1].split("</div>", 1)[0]
-    assert f'href="{INDEX}"' in item
+    assert f'href="{INDEX}"' in html
     peek = client.post("/sources/sglang-blog/peek").text
     assert "解析到 13 条" in peek and "kimi-k3.1-pro-day0-support" in peek and "2026-10-19" in peek
 

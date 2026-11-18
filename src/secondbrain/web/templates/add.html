@@ -5,6 +5,7 @@
   <div><p class="eyebrow">材料入口</p><h1>添加材料</h1><p class="meta">从链接、论文、文件或文本开始，默认加入稍后阅读。已读内容可以直接登记学习记录。</p></div>
   <div class="page-actions"><a class="fb" href="/sources">关注持续更新的主页</a></div>
 </header>
+<p class="toolbar"><a class="fb" href="/task-history">任务记录{% if task_count %}（{{ task_count }}）{% endif %}</a><span class="meta">{% if active_task_count %}{{ active_task_count }} 项运行中或等待选择。{% endif %}切页或重启后仍可返回查看；旧日志不在此堆叠。</span></p>
 <div data-intake>
 <div class="subnav intake-tabs" role="tablist" aria-label="材料类型" hidden>
   <button id="intake-tab-link" class="fb" type="button" role="tab" data-intake-type="link" aria-controls="intake-manual">链接</button>
@@ -26,20 +27,7 @@
     <input id="add-title" name="title" type="text">
   </div>
 
-  <fieldset class="field">
-    <legend>状态</legend>
-    <label class="choice"><input type="radio" name="state" value="later" checked> 加入稍后阅读清单</label>
-    <label class="choice"><input type="radio" name="state" value="read"> 已在外部读过，登记并整理知识</label>
-    <label class="choice"><input type="radio" name="state" value="unread"> 仅保存到材料存档，不加入清单</label>
-  </fieldset>
-
-  <fieldset class="field when-read" data-intake-read>
-    <legend>外部学习记录（登记已读时使用；仅单份材料）</legend>
-    <label for="add-learning-notes">可粘贴 ChatGPT 讨论结论或自己的笔记</label>
-    <textarea id="add-learning-notes" name="learning_notes" rows="5"></textarea>
-    <label for="add-discussion">讨论链接（只保存引用，不自动读取私有对话）</label>
-    <input id="add-discussion" type="url" name="discussion_url">
-  </fieldset>
+  {% with field_prefix="add" %}{% include "_intake_state.html" %}{% endwith %}
 
   <details class="field" open data-intake-content>
     <summary data-intake-content-label>独立材料或单个链接的补充正文（二选一）</summary>
@@ -68,7 +56,7 @@
 <form action="/papers/add" method="post" class="add-form">
   <div class="field"><label for="paper-query">论文名</label><input id="paper-query" name="query" type="text" required maxlength="1000" placeholder="Attention Is All You Need"></div>
   <p class="help">后台检索公开元数据与正文；同名或版本不明确时先选择，不会猜测导入。找不到全文会明确标记仅摘要。</p>
-  <label class="choice"><input type="checkbox" name="read" value="1"> 这篇已经读过，导入后登记阅读并整理知识（按现有费用上限计费）</label>
+  {% with field_prefix="paper" %}{% include "_intake_state.html" %}{% endwith %}
   <button type="submit" class="fb primary">检索并导入论文</button>
 </form>
 </section>

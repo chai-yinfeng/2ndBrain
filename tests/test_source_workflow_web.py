@@ -106,26 +106,6 @@ def test_follow_repairs_same_identity_then_edit_migrates_origins(environment):
         assert config.load_sources()[0].name == "Personal Reader"
 
 
-def test_reference_removal_does_not_delete_following_or_adapter(environment):
-    save_sources(sample_source())
-    before = (config.config_dir() / "sources.yaml").read_bytes()
-    with TestClient(create_app()) as client:
-        client.post("/sources/catalog/clear")
-        assert ops.catalog_entries() == []
-        preview = client.post("/sources/home/preview", data={"url": HOME})
-        assert TITLE in preview.text
-        assert (config.config_dir() / "sources.yaml").read_bytes() == before
-        client.post("/sources/catalog/restore")
-        assert any(s.id == "google-deepmind" for s in ops.catalog_entries())
-        client.post("/sources/catalog/google-deepmind/hide")
-        assert all(s.id != "google-deepmind" for s in ops.catalog_entries())
-        assert [s.id for s in config.load_sources()] == ["mine"]
-        conn = db.connect()
-        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
-        conn.close()
-
-
 def test_explicit_classification_keeps_tags_and_cli_reuses_cache(environment):
     save_sources(sample_source())
     before = (config.config_dir() / "sources.yaml").read_bytes()

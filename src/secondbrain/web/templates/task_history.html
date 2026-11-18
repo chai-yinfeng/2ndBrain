@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}任务记录 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><p class="eyebrow">后台工作</p><h1>任务记录</h1><p class="meta">进度、候选和结果持久保留。等待选择不代表已导入；重启中断不会自动重试。</p></div>
+  <div class="page-actions"><a class="fb" href="/add">添加材料</a><a class="fb" href="/task-history{% if not include_dismissed %}?closed=1{% endif %}">{{ '隐藏已关闭' if include_dismissed else '包括已关闭' }}</a></div>
+</header>
+<section class="panel">
+{% for record in records %}
+<article class="task" data-task-record="{{ record.id }}">
+  <p><a href="/task-history/{{ record.id }}">{{ record.title }}</a> · <span data-task-status="{{ record.status }}">{{ {'running':'运行中','waiting':'等待选择 · 尚未导入','resolved':'历史候选 · 已选择','not_found':'未找到 · 未导入','done':'完成','partial':'部分完成 · 有失败','failed':'失败','interrupted':'已中断，未自动重试'}.get(record.status, record.status) }}</span>{% if record.dismissed %} · 已关闭反馈{% endif %}</p>
+  <p class="meta">{{ record.started.strftime('%Y-%m-%d %H:%M') }} UTC · 用时 {{ record.elapsed_seconds }} 秒{% if record.result.material_id %} · <a href="/item/{{ record.result.material_id }}">材料 #{{ record.result.material_id }}</a>{% endif %}</p>
+</article>
+{% else %}<p class="meta">暂无任务记录。</p>{% endfor %}
+</section>
+<nav class="toolbar" aria-label="任务分页">
+{% if offset %}<a class="fb" href="/task-history?offset={{ [0, offset - 30]|max }}{% if include_dismissed %}&amp;closed=1{% endif %}">上一页</a>{% endif %}
+{% if has_more %}<a class="fb" href="/task-history?offset={{ offset + 30 }}{% if include_dismissed %}&amp;closed=1{% endif %}">下一页</a>{% endif %}
+</nav>
+{% endblock %}

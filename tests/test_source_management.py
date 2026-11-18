@@ -318,29 +318,6 @@ def test_failed_repair_never_writes_even_when_candidate_exists(environment, monk
     assert (directory / "sources.yaml").read_text(encoding="utf-8") == PERSONAL
 
 
-def test_catalog_hiding_does_not_delete_followed_sources_or_materials(environment):
-    directory, note = environment
-    management.hide_catalog("second")  # 已关注来源也只隐藏目录显示。
-    assert management.catalog_hidden_ids() == {"second"}
-    management.hide_catalog("second")
-    with pytest.raises(config.ConfigError):
-        management.hide_catalog("not-in-example")
-    management.clear_catalog()
-    assert management.catalog_hidden_ids() == {"catalog", "second"}
-    assert (directory / "sources.yaml").read_text(encoding="utf-8") == PERSONAL
-    assert (directory / "sources.example.yaml").read_text(encoding="utf-8") == CATALOG
-    conn = db.connect()
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == 2
-        assert conn.execute("SELECT source_id FROM items WHERE id=41").fetchone()[0] == "personal"
-        assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 1
-    finally:
-        conn.close()
-    management.restore_catalog()
-    assert management.catalog_hidden_ids() == set()
-    assert note.read_text(encoding="utf-8") == "个人手写笔记"
-
-
 def _hold_source_lock(directory, entered, release):
     import os
 

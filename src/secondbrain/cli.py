@@ -247,34 +247,6 @@ def source_analyze(
         typer.echo(f"- {evidence['title']} · {evidence['url']}")
 
 
-@sources_app.command("catalog")
-def source_catalog(
-    action: str = typer.Argument("list", help="list / remove / clear / restore"),
-    source_id: str | None = typer.Argument(None),
-) -> None:
-    """维护临时参考目录的显示，不删除已关注来源或底层识别规则。"""
-    from secondbrain import ops
-    from secondbrain.source_management import clear_catalog, hide_catalog, restore_catalog
-
-    try:
-        if action == "list":
-            for source in ops.catalog_entries():
-                typer.echo(f"{source.id} · {source.name or source.id} · {source.type}")
-        elif action == "remove" and source_id:
-            hide_catalog(source_id)
-            typer.echo("已从参考目录移除；已关注来源不变")
-        elif action == "clear":
-            clear_catalog()
-            typer.echo("已清空参考目录；已关注来源不变")
-        elif action == "restore":
-            restore_catalog()
-            typer.echo("已恢复参考目录")
-        else:
-            raise ValueError("使用 list / remove ID / clear / restore")
-    except (ValueError, config.ConfigError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
 @reading_app.command("list")
 def reading_list() -> None:
     conn = db.connect()
@@ -441,7 +413,7 @@ def sources_list() -> None:
         if hints.get("existing_topics"):
             typer.echo("  历史文章主题：" + "、".join(hints["existing_topics"]))
         elif hints.get("catalog_tags"):
-            typer.echo("  参考目录标签：" + "、".join(hints["catalog_tags"]))
+            typer.echo("  已知规则标签：" + "、".join(hints["catalog_tags"]))
 
 
 @app.command()

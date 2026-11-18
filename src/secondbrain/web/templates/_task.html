@@ -1,16 +1,22 @@
-{# 后台任务状态片段：运行中每 2 秒轮询 GET /tasks/<kind>，结束后停止轮询。 #}
-<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="/tasks/{{ kind }}{% if refresh_on_done %}?refresh=1{% endif %}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+{# 保留既有 kind 片段入口；材料与独立详情固定记录 ID，避免新任务替换旧结果。 #}
+<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="{% if detail or kind == 'manual_add' %}/task-history/{{ task.id }}/fragment{% else %}/tasks/{{ kind }}{% endif %}{% if refresh_on_done %}?refresh=1{% endif %}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   {% if message %}<p class="refresh">{{ message }}</p>{% endif %}
-  {% if task %}
+  {% if task and (not task.dismissed or detail) %}
   <p class="meta" data-task-status="{{ task.status }}">
     {{ task.title }} ·
-    {% if task.running %}运行中…{% elif task.status == "done" %}✓ 完成{% else %}✗ 失败{% endif %}
+    {% if task.running %}运行中…{% elif task.status == "waiting" %}等待选择 · 尚未导入{% elif task.status == "resolved" %}历史候选 · 已选择{% elif task.status == "not_found" %}未找到 · 未导入{% elif task.status == "done" %}✓ 完成{% elif task.status == "partial" %}部分完成 · 有失败{% elif task.status == "interrupted" %}任务中断{% else %}✗ 失败{% endif %}
     · 用时 {{ task.elapsed_seconds }} 秒
   </p>
-  {% if task.lines %}<pre class="log">{{ task.lines[-15:] | join("\n") }}</pre>{% endif %}
+  <p class="meta"><a href="/task-history/{{ task.id }}">任务详情</a> · <a href="/task-history">全部任务</a></p>
+  {% if task.lines %}<details><summary>运行日志（{{ task.lines|length }} 行）</summary><pre class="log">{{ task.lines | join("\n") }}</pre></details>{% endif %}
   {% if task.error %}<p class="refresh">✗ {{ task.error }}</p>{% endif %}
-  {% if task.status == "done" %}
-    {% if kind.startswith("paper-") %}{% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}{% endif %}
+  {% if kind.startswith("paper-") and task.result.status %}
+    <details open><summary>查看 / 收起论文结果</summary>
+    {% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}
+    </details>
+  {% endif %}
+  {% if task.result and not task.running and not kind.startswith("paper-") %}
+    <details open><summary>查看 / 收起任务结果</summary>
     {% if kind.startswith("read-") %}
       {% set summary=task.result.ingest %}
       <p>{% if task.result.cached %}已复用现有知识整理，无新增模型调用。{% else %}已登记阅读；新建 {{ summary.created|length }} 页，更新 {{ summary.updated|length }} 页。{% endif %}</p>
@@ -31,7 +37,11 @@
         <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
         {% endfor %}
       </table>
-      {% if task.result.ingest %}<p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>{% endif %}
+      {% if task.result.ingest %}
+      <p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>
+      {% if task.result.ingest.failures %}<p class="refresh">知识整理尚未完成；材料和已读记录已保留，可在材料详情重试。</p>{% endif %}
+      {% for error in task.result.ingest.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      {% endif %}
     {% elif kind.startswith("summary-") %}
       <p class="meta">{% if task.result.cached %}已有结果{% else %}估算费用 ${{ "%.4f" | format(task.result.cost) }}{% endif %} · <a href="/item/{{ task.result.item_id }}#summary">查看深度速读</a></p>
     {% elif kind.startswith("source-profile-") %}
@@ -45,6 +55,10 @@
         </li>{% endfor %}</ul>
       <a class="fb small" href="/sources">刷新来源列表</a>
     {% endif %}
+    </details>
+  {% endif %}
+  {% if not task.running and task.status != "waiting" and not task.dismissed %}
+  <form action="/task-history/{{ task.id }}/dismiss" method="post" hx-post="/task-history/{{ task.id }}/dismiss" hx-target="#task-{{ kind }}" hx-swap="outerHTML"><button class="fb small" type="submit">关闭反馈（记录仍保留）</button></form>
   {% endif %}
   {% endif %}
 </div>

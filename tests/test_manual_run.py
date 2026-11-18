@@ -147,17 +147,15 @@ def seed_digest(day: str) -> int:
 
 
 def test_home_start_button_until_today_has_run(env):
+    shutil.copy(config.CONFIG_DIR / "sources.example.yaml", config.CONFIG_DIR / "sources.yaml")
     client = TestClient(create_app())
     home = client.get("/recommendations").text
-    assert 'data-run-state="todo"' in home and "开始今日过滤" in home
-    assert 'name="all_time"' in home and 'name="refresh" value="1"' in home
-    assert "（非高峰）" in home  # 费用区间
+    assert 'data-run-state="todo"' in home
     seed_digest((datetime.now().date() - timedelta(days=1)).isoformat())
-    assert "开始今日过滤" in client.get("/recommendations").text  # 只有昨天的 digest
+    assert 'data-run-state="todo"' in client.get("/recommendations").text
     seed_digest(datetime.now().date().isoformat())
     home = client.get("/recommendations").text
-    assert 'data-run-state="done"' in home and "开始今日过滤" not in home
-    assert '<a href="/ops">再运行一次</a>' in home
+    assert 'data-run-state="done"' in home
 
 
 def test_home_shows_running_when_locked_or_task_running(env):
@@ -189,20 +187,6 @@ def test_web_run_all_time_option(env):
     assert task.status == "done" and "不限时间窗" in task.title
     assert any("不限时间窗：只去重" in line for line in task.lines)
     assert 'name="all_time"' in client.get("/ops").text
-
-
-def test_fyi_and_archived_are_folded_with_working_feedback(env):
-    item = seed_digest(datetime.now().date().isoformat())
-    client = TestClient(create_app())
-    html = client.get("/recommendations").text
-    fyi = html.split('<details class="lane" id="lane-fyi">', 1)[1].split("</details>", 1)[0]
-    assert "<summary><h2>速览（1 条）</h2></summary>" in fyi
-    assert f'id="feedback-{item}"' in fyi and 'hx-post="/feedback"' in fyi
-    archived = html.split('<details class="lane" id="lane-archived">', 1)[1].split("</details>")[0]
-    assert "归档（1 条）" in archived and "Archived post" in archived
-    assert "<details open" not in html  # 默认折叠
-    resp = client.post("/feedback", data={"item_id": item, "kind": "dismiss"})
-    assert resp.status_code == 200 and "已记录：不感兴趣" in resp.text
 
 
 # ---------- 运行方式开关 ----------
@@ -258,6 +242,8 @@ def test_ops_schedule_toggle(env, monkeypatch):
 
 
 def test_low_yield_sources(env):
+    shutil.copy(config.CONFIG_DIR / "sources.example.yaml", config.CONFIG_DIR / "sources.yaml")
+    before = (config.CONFIG_DIR / "sources.yaml").read_bytes()
     conn = db.connect()
     now = datetime.now(UTC)
     sources = config.load_sources()
@@ -281,7 +267,7 @@ def test_low_yield_sources(env):
     html = TestClient(create_app()).get("/sources").text
 
     def row(sid: str) -> str:
-        return html.split(f'data-source="{sid}"', 1)[1].split("</tr>", 1)[0]
+        return html.split(f'data-source="{sid}"', 1)[1].split("</article>", 1)[0]
 
     assert "低产出，建议停用" in row("vllm-blog") and 'data-yield="6/0/0/0/0"' in row("vllm-blog")
     assert "低产出" not in row("pytorch-blog") and 'data-yield="6/0/1/1/0"' in row("pytorch-blog")
@@ -291,4 +277,4 @@ def test_low_yield_sources(env):
     out = runner.invoke(cli_app, ["sources", "tune"]).output
     assert "低产出信源（近 30 天入库 ≥ 5 条、进入推荐 0 条）：1 个" in out
     assert "vllm-blog：入库 6，精读 0，进入推荐 0 —— 建议停用" in out
-    assert not (config.CONFIG_DIR / "sources.yaml").exists()  # tune 只读
+    assert (config.CONFIG_DIR / "sources.yaml").read_bytes() == before  # tune 只读

@@ -63,14 +63,12 @@ def personal(env: Path) -> Path:
     return env / "config" / "sources.yaml"
 
 
-def test_unconfigured_sources_are_reference_only(client, env):
+def test_unconfigured_sources_do_not_follow_examples(client, env):
     personal(env).unlink()
     html = client.get("/sources").text
     assert config.load_sources() == []
     assert 'data-source="vllm-blog"' not in html
-    assert 'data-catalog="vllm-blog"' in html
     assert not personal(env).exists()
-    assert 'href="/sources"' in html
 
 
 def test_configured_sources_show_real_config_location(client, env):

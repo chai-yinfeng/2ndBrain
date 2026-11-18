@@ -1,6 +1,12 @@
 """论文名 CLI/Web 使用真实共享服务；仅替换元数据及正文网络传输。"""
 
+import html
+import json
 import re
+import subprocess
+import sys
+import threading
+from contextlib import closing
 from pathlib import Path
 
 import httpx
@@ -9,7 +15,7 @@ from conftest import fast_settings, make_pdf
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from secondbrain import db, papers
+from secondbrain import config, db, ops, papers
 from secondbrain.cli import app as cli_app
 from secondbrain.net import HttpClient
 from secondbrain.web.app import create_app
@@ -78,7 +84,8 @@ def rows():
 
 def settle(app):
     for task in list(app.state.tasks._tasks.values()):
-        task.thread.join(timeout=10)
+        if task.thread is not None:
+            task.thread.join(timeout=10)
         assert not task.running
 
 
@@ -152,6 +159,7 @@ def test_web_not_found_and_invalid_saved_selection(paper_env):
         )
         settle(app)
         assert 'data-paper-status="not_found"' in client.get(response.headers["location"]).text
+        assert 'data-task-status="not_found"' in client.get(response.headers["location"]).text
         invalid = client.post("/papers/choose", data={
             "search_id": "missing", "candidate_id": "missing"
         }, follow_redirects=False)
@@ -171,7 +179,7 @@ def test_cli_and_web_full_material_wiki_without_read_feedback(paper_env):
     app = create_app()
     with TestClient(app) as client:
         response = client.post(
-            "/papers/add", data={"query": TITLE, "read": "1"}, follow_redirects=False
+            "/papers/add", data={"query": TITLE, "state": "read"}, follow_redirects=False
         )
         settle(app)
         page = client.get(response.headers["location"])
@@ -205,7 +213,7 @@ def test_web_preserves_material_and_reports_failed_wiki_processing(paper_env, mo
     monkeypatch.setattr(FakeBackend, "complete_json", fail_wiki)
     app = create_app()
     with TestClient(app) as client:
-        response = client.post("/papers/add", data={"query": TITLE, "read": "1"})
+        response = client.post("/papers/add", data={"query": TITLE, "state": "read"})
         settle(app)
         response = client.get(response.url)
         assert "尚未完成" in response.text
@@ -218,15 +226,266 @@ def test_web_ambiguous_selection_retains_requested_wiki_processing(paper_env):
     paper_env["ambiguous"] = True
     app = create_app()
     with TestClient(app) as client:
-        response = client.post("/papers/add", data={"query": TITLE, "read": "1"})
+        response = client.post("/papers/add", data={"query": TITLE, "state": "read"})
         settle(app)
         response = client.get(response.url)
-        assert 'name="read" value="1" checked' in response.text
+        assert 'name="state" value="read" checked' in response.text
         task = next(task for task in app.state.tasks._tasks.values() if task.result)
         result = task.result
         chosen = client.post("/papers/choose", data={
             "search_id": result["search_id"],
-            "candidate_id": result["candidates"][0]["id"], "read": "1",
+            "candidate_id": result["candidates"][0]["id"], "state": "read",
         })
         settle(app)
         assert "/wiki/page/material-" in client.get(chosen.url).text
+
+
+def test_web_waiting_choice_survives_restart_with_learning_record(paper_env):
+    paper_env.update(ambiguous=True, full=True)
+    original = create_app()
+    notes = "外部讨论结论：候选版本需要人工核对。\nA < B & C"
+    discussion = "https://chatgpt.com/share/public-reference"
+    with TestClient(original) as client:
+        response = client.post("/papers/add", data={
+            "query": TITLE, "state": "read",
+            "learning_notes": notes, "discussion_url": discussion,
+        }, follow_redirects=False)
+        settle(original)
+        location = response.headers["location"]
+        task = next(t for t in original.state.tasks.records() if t.kind.startswith("paper-"))
+        assert task.status == "waiting"
+        assert rows() == []
+        assert client.post(f"/task-history/{task.id}/dismiss").status_code == 409
+    restarted = create_app()
+    with TestClient(restarted) as client:
+        page = client.get(location)
+        assert 'data-task-status="waiting"' in page.text
+        assert "等待选择 · 尚未导入" in page.text
+        assert 'name="state" value="read" checked' in page.text
+        assert html.escape(notes) in page.text and discussion in page.text
+        assert 'action="/papers/choose"' not in client.get("/add").text
+        history = client.get("/task-history").text
+        assert f"/task-history/{task.id}" in history
+        assert 'action="/papers/choose"' not in history
+        restored = restarted.state.tasks.get(task.id).result
+        paper_env["empty"] = True  # 已保存候选仍可选，不能重新检索。
+        chosen = client.post("/papers/choose", data={
+            "search_id": restored["search_id"],
+            "candidate_id": restored["candidates"][1]["id"],
+            "state": restored["state_requested"],
+            "learning_notes": restored["learning_notes"],
+            "discussion_url": restored["discussion_url"],
+        }, follow_redirects=False)
+        settle(restarted)
+        result_page = client.get(chosen.headers["location"])
+        assert restarted.state.tasks.get(task.id).status == "resolved"
+        old_page = client.get(f"/task-history/{task.id}").text
+        assert 'action="/papers/choose"' not in old_page
+        assert "历史候选" in old_page
+        assert 'data-paper-status="imported"' in result_page.text
+        imported, = rows()
+        assert imported["reading_state"] == "read"
+        assert ops.material_notes(imported["id"]) == notes
+        with closing(db.connect()) as conn:
+            assert db.get_ai(conn, imported["id"], "reading_record")["discussion_url"] == discussion
+
+
+def test_web_recovers_legacy_paper_attempt_without_changing_history(paper_env):
+    paper_env["ambiguous"] = True
+    result = CliRunner().invoke(cli_app, ["paper", "add", TITLE])
+    assert result.exit_code == 0, result.output
+    with closing(db.connect()) as conn:
+        searches = [tuple(r) for r in conn.execute("SELECT * FROM paper_searches")]
+        attempts = [tuple(r) for r in conn.execute("SELECT * FROM paper_import_attempts")]
+        stored = json.loads(attempts[0][3])
+    app = create_app()
+    with TestClient(app) as client:
+        assert "/task-history" in client.get("/add").text
+        task, = app.state.tasks.records()
+        assert task.status == "waiting"
+        assert task.result["search_id"] == stored["search_id"]
+        assert 'action="/papers/choose"' in client.get(f"/task-history/{task.id}").text
+        assert "等待选择" in client.get("/task-history").text
+        paper_env["empty"] = True
+        chosen = client.post("/papers/choose", data={
+            "search_id": stored["search_id"], "candidate_id": stored["candidates"][0]["id"],
+            "state": "unread",
+        }, follow_redirects=False)
+        settle(app)
+        assert 'data-paper-status="abstract_only"' in client.get(chosen.headers["location"]).text
+    with closing(db.connect()) as conn:
+        assert [tuple(r) for r in conn.execute("SELECT * FROM paper_searches")] == searches
+        assert [tuple(r) for r in conn.execute(
+            "SELECT * FROM paper_import_attempts WHERE id = ?", (attempts[0][0],)
+        )] == attempts
+    restarted = create_app()
+    assert len(restarted.state.tasks.records()) == 2  # 恢复不重复生成旧记录。
+
+
+def test_web_restart_marks_running_interrupted_without_retry(paper_env):
+    script = """
+import sys
+import threading
+from pathlib import Path
+from secondbrain.web.tasks import TaskRegistry
+ready = threading.Event()
+gate = threading.Event()
+registry = TaskRegistry(Path(sys.argv[1]))
+def work(task):
+    task.log("已保存进度，不自动重试")
+    ready.set()
+    gate.wait(60)
+task = registry.start("manual_add", "被重启的导入", work,
+                      initial_result={"progress": "已收到输入"})
+assert ready.wait(5)
+print(task.id, flush=True)
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(config.data_dir() / "web_tasks.db")],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    task_id = proc.stdout.strip()
+    app = create_app()
+    with TestClient(app) as client:
+        task = app.state.tasks.get(task_id)
+        assert task.status == "interrupted" and task.thread is None
+        assert task.result["progress"] == "已收到输入"
+        page = client.get(f"/task-history/{task_id}")
+        assert 'data-task-status="interrupted"' in page.text
+        assert "未自动重试" in page.text and "已保存进度" in page.text
+        assert "hx-trigger" not in page.text
+
+
+@pytest.mark.parametrize("material_type", ["paper", "link", "file", "text"])
+def test_material_state_and_external_learning_are_symmetric(paper_env, material_type):
+    paper_env["full"] = True
+    app = create_app()
+    notes = "已经在外部学习，保留个人结论。"
+    discussion = "https://example.org/discussion"
+    with TestClient(app) as client:
+        material_id = None
+        for state in ("later", "read", "unread"):
+            data = {"state": state, "learning_notes": notes, "discussion_url": discussion}
+            if material_type == "paper":
+                response = client.post(
+                    "/papers/add", data={**data, "query": TITLE}, follow_redirects=False
+                )
+            elif material_type == "file":
+                response = client.post("/add", data=data, files={
+                    "pdf": ("material.pdf", make_pdf([ABSTRACT]), "application/pdf"),
+                })
+            else:
+                data["text"] = ABSTRACT
+                if material_type == "link":
+                    data["urls"] = "https://example.org/material"
+                response = client.post("/add", data=data)
+            assert response.status_code in {200, 303}
+            settle(app)
+            imported, = rows()
+            assert material_id in (None, imported["id"])
+            material_id = imported["id"]
+            with closing(db.connect()) as conn:
+                queued = {r["id"] for r in db.reading_list_items(conn)}
+                assert (material_id in queued) == (state == "later")
+                assert imported["reading_state"] == ("read" if state == "read" else "unread")
+                if state == "read":
+                    record = db.get_ai(conn, material_id, "reading_record")
+                    assert record["discussion_url"] == discussion
+                    assert ops.material_notes(material_id) == notes
+        assert len(app.state.tasks.records()) == 3
+
+
+def test_manual_batch_failure_and_closed_feedback_keep_own_results(paper_env):
+    app = create_app()
+    with TestClient(app) as client:
+        client.post("/add", data={
+            "urls": "https://example.org/first\nhttps://example.org/second",
+            "state": "later", "reference_only": "1",
+        })
+        settle(app)
+        first = app.state.tasks.get("manual_add")
+        assert len(first.result["results"]) == 2
+        client.post("/add", data={
+            "urls": "https://example.org/first\nhttps://example.org/unavailable", "state": "later",
+        })
+        settle(app)
+        second = app.state.tasks.get("manual_add")
+        assert second.status == "partial"
+        assert sum(r["status"] == "失败" for r in second.result["results"]) == 1
+        page = client.get(f"/task-history/{second.id}").text
+        assert 'data-task-status="partial"' in page and "unavailable" in page
+        assert "<summary>运行日志" in page and "<details><summary>运行日志" in page
+        invalid = client.post("/add", data={"state": "later"})
+        assert "unavailable" not in invalid.text
+        client.post(f"/task-history/{second.id}/dismiss")
+        assert second.dismissed
+        assert f'data-task-record="{second.id}"' not in client.get("/task-history").text
+        assert f'data-task-record="{second.id}"' in client.get("/task-history?closed=1").text
+        assert "unavailable" in client.get(f"/task-history/{second.id}").text
+        assert "unavailable" not in client.get(f"/task-history/{first.id}").text
+        assert "unavailable" not in client.get("/add").text
+
+
+def test_web_recovers_search_with_no_import_attempt(paper_env):
+    candidate = papers._candidate(
+        provider="semantic_scholar", title=TITLE, authors=["Ada Example"], year=2024,
+        doi="10.1234/pending", url="https://doi.org/10.1234/pending",
+        abstract=ABSTRACT,
+    )
+    with closing(db.connect()) as conn:
+        conn.execute("INSERT INTO paper_searches VALUES (?, ?, ?, ?, ?)", (
+            "saved-before-attempt", TITLE, json.dumps([candidate]), "[]",
+            "2026-11-18T00:00:00Z",
+        ))
+        conn.commit()
+    app = create_app()
+    with TestClient(app) as client:
+        task, = app.state.tasks.records()
+        assert task.status == "waiting"
+        page = client.get(f"/task-history/{task.id}").text
+        assert 'name="search_id" value="saved-before-attempt"' in page
+        assert f'name="candidate_id" value="{candidate["id"]}"' in page
+        assert "等待选择 · 尚未导入" in page
+    with closing(db.connect()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM paper_import_attempts").fetchone()[0] == 0
+
+
+def test_legacy_successful_selection_resolves_older_waiting_record(paper_env):
+    paper_env["ambiguous"] = True
+    runner = CliRunner()
+    searched = runner.invoke(cli_app, ["paper", "add", TITLE])
+    assert searched.exit_code == 0, searched.output
+    command = re.search(r"sb paper choose (\S+) (\S+)", searched.output)
+    assert command
+    selected = runner.invoke(cli_app, ["paper", "choose", *command.groups()])
+    assert selected.exit_code == 0, selected.output
+    app = create_app()
+    with TestClient(app) as client:
+        records = app.state.tasks.records()
+        assert len(records) == 2
+        assert not any(task.status == "waiting" for task in records)
+        historic = next(task for task in records if task.status == "resolved")
+        historic_page = client.get(f"/task-history/{historic.id}").text
+        assert 'data-task-status="resolved"' in historic_page
+        assert 'action="/papers/choose"' not in historic_page
+        assert "查看后续导入结果" in historic_page
+
+
+def test_running_task_cannot_be_closed_from_feedback(paper_env):
+    app = create_app()
+    gate = threading.Event()
+
+    def work(task):
+        task.log("运行中")
+        gate.wait(10)
+        return {"results": []}
+
+    task = app.state.tasks.start("manual_add", "仍在运行的导入", work)
+    try:
+        with TestClient(app) as client:
+            assert client.post(f"/task-history/{task.id}/dismiss").status_code == 409
+            assert not task.dismissed
+            assert f'data-task-record="{task.id}"' in client.get("/task-history").text
+    finally:
+        gate.set()
+        task.thread.join(timeout=10)

@@ -382,13 +382,9 @@ DEEPMIND_RSS = "https://deepmind.google/blog/rss.xml"
     (HF_HOME, HF_API, "hf_papers", httpx.Response(200, json=HF_PAPERS)),
     (DEEPMIND_HOME, DEEPMIND_RSS, "rss", httpx.Response(200, content=RSS)),
 ])
-def test_catalog_adapter_precedes_homepage_guessing(
+def test_known_adapter_precedes_homepage_guessing(
     monkeypatch, homepage, endpoint, method, response,
 ):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("UI-visible catalog must not constrain adapter recognition")
-
-    monkeypatch.setattr("secondbrain.ops.catalog_entries", forbidden)
     result, requests = _discover({endpoint: response}, homepage)
     assert result["method"] == method and result["status"] == "ready"
     assert result["matched_from"] == "catalog"

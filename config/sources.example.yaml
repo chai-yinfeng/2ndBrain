@@ -1,4 +1,4 @@
-# 信源清单（种子）。复制为 config/sources.yaml 后按需修改。
+# 既有采集规则与配置示例；默认关注为空，请在 Web/CLI 主动输入主页。
 # 所有 URL（含 YouTube 频道 RSS 的 channel_id）已于 2026-11 实测可用。
 #
 # 每个条目字段：
@@ -6,8 +6,8 @@
 #   name:          可选显示名称，独立于稳定 id
 #   type:          rss | arxiv | hf_papers | youtube | sitemap | html_index | qwen_research
 #   url:           各适配器的采集地址；人类浏览入口由 homepage 保存
-#                  （Qwen Research 仅使用已验证的固定公开接口；不执行网页脚本）
-#   homepage:      人实际浏览的博客列表页或频道页（/sources 上信源名的链接；2026-11 逐个实测）
+#                  （qwen_research 为既有单站规则，不再扩展同类适配；见 ADR 0025）
+#   homepage:      人实际浏览的博客列表页或频道页（Web 右侧主页入口）
 #   query:         arxiv 使用的检索式（分类 + 关键词）
 #   trust:         1–5，信源可信度，参与排序加权
 #                  建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3

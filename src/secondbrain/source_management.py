@@ -1,4 +1,4 @@
-"""来源安全编辑、采集配置修复与参考目录显示设置。"""
+"""来源安全编辑与采集配置修复。"""
 
 from __future__ import annotations
 
@@ -207,54 +207,3 @@ def repair_source(
     }
 
 
-def catalog_hidden_ids() -> set[str]:
-    conn = db.connect()
-    try:
-        return {row[0] for row in conn.execute("SELECT source_id FROM source_catalog_hidden")}
-    finally:
-        conn.close()
-
-
-def _catalog_ids() -> set[str]:
-    path = config.config_dir() / "sources.example.yaml"
-    return {source.id for source in config.load_sources(path)} if path.is_file() else set()
-
-
-def hide_catalog(source_id: str) -> None:
-    with source_lock():
-        if source_id not in _catalog_ids():
-            raise config.ConfigError(f"参考目录中找不到信源：{source_id}")
-        conn = db.connect()
-        try:
-            with conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO source_catalog_hidden(source_id) VALUES (?)",
-                    (source_id,),
-                )
-        finally:
-            conn.close()
-
-
-def clear_catalog() -> None:
-    """隐藏当前完整目录；不修改关注配置、参考文件或任何来源/材料记录。"""
-    with source_lock():
-        identities = _catalog_ids()
-        conn = db.connect()
-        try:
-            with conn:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO source_catalog_hidden(source_id) VALUES (?)",
-                    [(identity,) for identity in identities],
-                )
-        finally:
-            conn.close()
-
-
-def restore_catalog() -> None:
-    with source_lock():
-        conn = db.connect()
-        try:
-            with conn:
-                conn.execute("DELETE FROM source_catalog_hidden")
-        finally:
-            conn.close()

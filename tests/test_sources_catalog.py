@@ -86,36 +86,14 @@ def test_write_validates_before_replacing(env):
     assert personal().read_text(encoding="utf-8") == "sources: []\n"
 
 
-# ---------- 信源目录 ----------
-
-
-def test_catalog_lists_missing_entries_and_adds_verbatim(env):
-    personal().write_text("# 我的信源\nsources: []\n", encoding="utf-8")
-    client = TestClient(create_app())
-    html = client.get("/sources").text
-    assert 'data-catalog="vllm-blog"' in html
-
-    resp = client.post("/sources/catalog/anthropic-news/add", follow_redirects=False)
-    assert resp.status_code == 303
-    text = personal().read_text(encoding="utf-8")
-    assert text.startswith("# 我的信源\nsources:\n")
-    assert sf.entry_text(EXAMPLE, "anthropic-news") in text  # 原样追加（含注释）
-    html = client.get("/sources").text
-    assert 'data-source="anthropic-news"' in html and 'data-catalog="anthropic-news"' not in html
-    assert client.post("/sources/catalog/anthropic-news/add").status_code == 400
-    assert client.post("/sources/catalog/nope/add").status_code == 404
-
-
-def test_preview_catalog_and_configured_sources(env):
-    personal().write_text("sources: []\n", encoding="utf-8")
+def test_preview_configured_sources(env):
+    personal().write_text(EXAMPLE, encoding="utf-8")
     client = TestClient(create_app())
     peek = client.post("/sources/vllm-blog/peek").text
     assert "解析到 3 条" in peek and "Paged KV cache explained" in peek and "2026-11-03" in peek
     failed = client.post("/sources/pytorch-blog/peek").text
     assert "HTTP 404" in failed
     assert client.post("/sources/nope/peek").status_code == 404
-    client.post("/sources/catalog/vllm-blog/add")
-    assert "解析到 3 条" in client.post("/sources/vllm-blog/peek").text  # 已配置的也能预览
     conn = db.connect()
     assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0  # 预览不写库
     conn.close()

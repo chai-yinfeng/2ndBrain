@@ -156,7 +156,7 @@ th, td { border-bottom: 1px solid var(--border); padding: 11px 12px; text-align:
 td { vertical-align: top; overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 7px; }
 .table-scroll tr:last-child td { border-bottom: 0; }
-.sources .actions form, .catalog-item form { display: inline; }
+.sources .actions form { display: inline; }
 .peek-row td { padding: 0 12px; border-bottom: none; }
 .peek { padding: 12px 0; font-size: 12px; }
 .peek li { margin: 10px 0; overflow-wrap: anywhere; }
@@ -204,12 +204,10 @@ pre.log { max-height: 320px; }
 .intake-tabs { border: 0; padding: 4px; width: fit-content; background: var(--surface); border-radius: 7px; gap: 3px; }
 .intake-tabs .fb { background: transparent; border-color: transparent; color: var(--muted); min-width: 78px; }
 .intake-tabs .fb[aria-selected="true"] { background: var(--card); border-color: var(--border); color: var(--fg); box-shadow: 0 1px 2px #0000000a; }
-.source-item, .catalog-item { padding: 18px 0; border-bottom: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
-.source-item:last-child, .catalog-item:last-child { border-bottom: 0; }
-.source-item h2, .catalog-item h3 { margin: 0 0 5px; }
+.source-item { padding: 18px 0; border-bottom: 1px solid var(--border); min-width: 0; overflow-wrap: anywhere; }
+.source-item:last-child { border-bottom: 0; }
+.source-item h2 { margin: 0 0 5px; }
 .source-preview { margin-top: 12px; }
-.catalog-panel { border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; margin: 24px 0; background: var(--card); scroll-margin-top: 20px; }
-.catalog-panel > summary { display: flex; justify-content: space-between; align-items: center; }
 .no-js .theme-control { display: none; }
 .mobile-only { display: none; }
 @media (max-width: 1000px) {
@@ -253,11 +251,28 @@ pre.log { max-height: 320px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
 
 /* 来源：关闭时只有紧凑摘要，配置/统计不另占一整行。 */
-.source-list .source-item, .source-list .catalog-item { padding: 0; }
+.source-list .source-item { padding: 0; }
 .source-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; padding: 10px 16px; }
 .source-row h3 { margin: 0; font-size: 13px; font-weight: 500; }
 .source-row .row-actions { gap: 5px; }
 .source-row .meta { font-size: 11px; }
+.source-view-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.source-view-controls .source-sort { margin-left: 0; }
+.source-cover { position: relative; flex: 0 0 48px; width: 48px; height: 48px; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--muted); }
+.source-initial { display: grid; place-items: center; width: 100%; height: 100%; font-size: 22px; font-weight: 600; }
+.source-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: scale-down; background: var(--surface); }
+.source-cover img[hidden] { display: none; }
+.source-cover:focus-visible, .source-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.source-list[data-layout="cards"] { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 12px; border: 0; background: transparent; }
+.source-list[data-layout="cards"] .source-item { border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.source-list[data-layout="cards"] .source-row { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; padding: 12px; gap: 10px; align-content: start; }
+.source-list[data-layout="cards"] .source-cover { width: 100%; height: 116px; }
+.source-list[data-layout="cards"] .source-initial { font-size: 36px; }
+.source-list[data-layout="cards"] .row-main { width: 100%; }
+.source-list[data-layout="cards"] .row-main h3 { font-size: 14px; }
+.source-list[data-layout="cards"] .row-actions { width: 100%; margin: auto 0 0; justify-content: flex-end; flex-wrap: wrap; }
+.source-list[data-layout="cards"] .source-row .meta { margin-bottom: 0; }
+.source-visual-settings { border-top: 1px solid var(--border); margin: 16px 0; padding-top: 10px; }
 .source-actions, .source-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 12px 0 18px; }
 .source-actions form { display: inline-flex; gap: 6px; }
 .source-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
@@ -279,7 +294,7 @@ pre.log { max-height: 320px; }
 .source-repair-results > li { border-bottom: 1px solid var(--border); padding: 10px 0; }
 @media (max-width: 760px) {
   .source-row { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
-  .source-row .row-main { flex-basis: 100%; }
+  .source-row .row-main { flex: 1 1 calc(100% - 72px); }
   .source-row .row-actions { width: auto; margin-left: auto; }
   .source-fields { grid-template-columns: minmax(0, 1fr); }
   .source-home-confirm { display: grid; grid-template-columns: minmax(0, 1fr); }

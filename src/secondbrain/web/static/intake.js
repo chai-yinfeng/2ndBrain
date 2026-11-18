@@ -1,11 +1,25 @@
 (() => {
+  function syncReadingForms() {
+    for (const current of document.querySelectorAll("form")) {
+      const selected = current.querySelector('[name="state"]:checked');
+      const learning = current.querySelector("[data-intake-read]");
+      if (!selected || !learning) continue;
+      learning.hidden = selected.value !== "read";
+      for (const field of learning.querySelectorAll("input, textarea")) {
+        field.disabled = !!field.closest("[hidden]");
+      }
+    }
+  }
+  document.addEventListener("change", syncReadingForms);
+  document.addEventListener("htmx:afterSwap", syncReadingForms);
+  syncReadingForms();
   const root = document.querySelector("[data-intake]");
   if (!root) return;
   const tabs = [...root.querySelectorAll("[data-intake-type]")];
   const panels = [...root.querySelectorAll("[data-intake-panel]")];
   const form = root.querySelector("[data-intake-form]");
   const fields = [...form.querySelectorAll("input, textarea, select")];
-  const readFields = form.querySelector("[data-intake-read]");
+  const forms = [...root.querySelectorAll("form")];
   const content = form.querySelector("[data-intake-content]");
   const contentLabel = form.querySelector("[data-intake-content-label]");
   const headings = {link: "添加链接", file: "上传 PDF", text: "粘贴文本"};
@@ -27,7 +41,7 @@
     for (const wrapper of form.querySelectorAll("[data-intake-field]")) {
       wrapper.hidden = !wrapper.dataset.intakeField.split(" ").includes(active);
     }
-    readFields.hidden = form.querySelector('[name="state"]:checked').value !== "read";
+    syncReadingForms();
     for (const field of root.querySelectorAll("form input, form textarea, form select, form button")) {
       field.disabled = !!field.closest("[hidden]");
     }
@@ -74,7 +88,7 @@
       select(tabs[next].dataset.intakeType, true);
     });
   });
-  form.addEventListener("change", sync);
+  forms.forEach(current => current.addEventListener("change", sync));
   window.addEventListener("hashchange", () => {
     if (location.hash === "#paper-name") select("paper");
   });
