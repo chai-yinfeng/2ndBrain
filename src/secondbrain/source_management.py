@@ -18,7 +18,8 @@ from secondbrain.source_discovery import discover_source
 _thread_lock = threading.RLock()
 _lock_state = threading.local()
 _REPAIR_FIELDS = (
-    "type", "url", "query", "url_pattern", "max_links", "use_lastmod", "needs_scraper"
+    "type", "url", "query", "url_pattern", "max_links", "use_lastmod", "needs_scraper",
+    "rss_categories", "scope_note",
 )
 
 

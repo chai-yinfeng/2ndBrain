@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SourceType = Literal["rss", "arxiv", "hf_papers", "youtube", "sitemap", "html_index"]
+SourceType = Literal[
+    "rss", "arxiv", "hf_papers", "youtube", "sitemap", "html_index", "qwen_research",
+]
 
 
 class SourceConfig(BaseModel):
@@ -33,11 +35,16 @@ class SourceConfig(BaseModel):
     url_pattern: str | None = None  # sitemap / html_index：只保留匹配该正则的 URL（re.search）
     max_links: int | None = Field(default=None, ge=1)  # html_index：列表页最多取前 N 个链接
     use_lastmod: bool = False  # sitemap：URL 无日期时按 <lastmod> 选最新条目（页面日期优先）
+    rss_categories: list[str] = Field(default_factory=list)
+    scope_note: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _check_location(self) -> SourceConfig:
         if self.name is not None:
             self.name = self.name.strip() or None
+        self.rss_categories = [value.strip() for value in self.rss_categories if value.strip()]
+        if self.rss_categories and self.type != "rss":
+            raise ValueError("rss_categories 只用于 RSS 分类过滤")
         if self.type == "arxiv" and not self.query:
             raise ValueError("arxiv 信源需要 query")
         if self.type != "arxiv" and not self.url:
@@ -72,6 +79,8 @@ class FetchSettings(BaseModel):
     arxiv_max_results: int = Field(default=50, ge=1)
     min_feed_content_chars: int = Field(default=1500, ge=0)
     content_max_chars: int = Field(default=200_000, ge=1)
+    discovery_response_max_bytes: int = Field(default=8_000_000, ge=1)
+    discovery_total_max_bytes: int = Field(default=16_000_000, ge=1)
     pdf_max_pages: int = Field(default=30, ge=1)
     pdf_max_bytes: int = Field(default=20_000_000, ge=1)
     transcript_interval_seconds: float = Field(default=3.0, ge=0)  # 两次字幕请求的最小间隔
@@ -102,6 +111,7 @@ class RawEntry:
     doi: str | None = None  # 论文 DOI（arXiv API 的 arxiv:doi、S2、Crossref、citation_doi）
     # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
     page_meta: bool = False
+    categories: list[str] = field(default_factory=list)
 
 
 # ---------- M2：LLM 与过滤 / 分级设置 ----------

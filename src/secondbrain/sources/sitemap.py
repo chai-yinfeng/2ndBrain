@@ -119,10 +119,19 @@ def collect_sitemap(
         )
         visited.add(str(response.url))
         requests += 1
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" in content_type or re.match(
+            br"\s*(?:<!doctype\s+html|<html\b)", response.content[:1024], re.I
+        ):
+            raise reader.error(
+                str(response.url), "候选 sitemap 返回 HTML 页面，不是 XML，未继续解析", "format"
+            )
         try:
             root = ET.fromstring(response.content)
         except ET.ParseError as exc:
-            raise FetchError(f"不是有效的 sitemap XML：{exc}") from exc
+            raise reader.error(
+                str(response.url), f"不是有效的 sitemap XML：{exc}", "format"
+            ) from exc
         if _local(root.tag) == "sitemapindex":
             if depth >= MAX_SITEMAP_DEPTH:
                 reader.warnings.append(f"sitemap index 超过 {MAX_SITEMAP_DEPTH} 层，未继续展开。")

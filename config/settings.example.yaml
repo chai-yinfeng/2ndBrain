@@ -79,6 +79,8 @@ fetch:
   arxiv_max_results: 50          # 每次 arXiv API 查询返回的最大条数
   min_feed_content_chars: 1500   # feed 自带正文达到该长度就不再抓原网页
   content_max_chars: 200000      # 入库正文的长度上限
+  discovery_response_max_bytes: 8000000  # 发现/预览每个解压后响应的下载上限，与正文截断无关
+  discovery_total_max_bytes: 16000000    # 一轮发现/预览所有响应的累计预算
   pdf_max_pages: 30              # PDF 只提取前 N 页
   pdf_max_bytes: 20000000        # 超过该大小的 PDF 不下载
   transcript_interval_seconds: 3 # 两次 YouTube 字幕请求的最小间隔（避免被限流）

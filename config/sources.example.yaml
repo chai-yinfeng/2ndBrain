@@ -3,15 +3,18 @@
 #
 # 每个条目字段：
 #   id:            唯一标识（小写、短横线）
-#   type:          rss | arxiv | hf_papers | youtube | sitemap | html_index
-#   url:           rss / hf_papers / youtube / sitemap / html_index 使用的地址
-#                  （sitemap 为 sitemap.xml；html_index 为博客列表页）
+#   name:          可选显示名称，独立于稳定 id
+#   type:          rss | arxiv | hf_papers | youtube | sitemap | html_index | qwen_research
+#   url:           各适配器的采集地址；人类浏览入口由 homepage 保存
+#                  （Qwen Research 仅使用已验证的固定公开接口；不执行网页脚本）
 #   homepage:      人实际浏览的博客列表页或频道页（/sources 上信源名的链接；2026-11 逐个实测）
 #   query:         arxiv 使用的检索式（分类 + 关键词）
 #   trust:         1–5，信源可信度，参与排序加权
 #                  建议：个人一线博客与 infra 博客 5，实验室官方与论文 4，newsletter 3，expansion 3
 #   role:          core | expansion（expansion 只进入"意外"栏候选池），默认 core
 #   tags:          标签列表
+#   rss_categories: RSS 分类过滤，留空不过滤；与人工 tags 不同
+#   scope_note:    确认候选时保存的有限范围依据，不承诺网页/历史等价
 #   max_age_days:  只采集该天数内发布的内容
 #   enabled:       是否启用
 #   backfill:      是否把 feed 中时间窗以外的历史条目放进回补池（默认 false；ADR 0004 / 0009）
@@ -337,6 +340,18 @@ sources:
     type: rss
     url: https://qwenlm.github.io/blog/index.xml
     homepage: https://qwenlm.github.io/blog/
+    trust: 4
+    role: core
+    tags: [lab, open-weights]
+    max_age_days: 30
+    enabled: true
+
+  # 新站 Research 使用公开 JSON；与旧站 RSS 的内容范围、更新时间不同。
+  - id: qwen-research
+    name: Qwen Research
+    type: qwen_research
+    url: https://qwen.ai/api/v2/article/retrieval?type=qwen_ai&language=en-US
+    homepage: https://qwen.ai/research
     trust: 4
     role: core
     tags: [lab, open-weights]

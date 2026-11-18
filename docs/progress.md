@@ -823,3 +823,23 @@
 - 严格核对ID及顺序、tags/trust/role/enabled/backfill/max_age_days/homepage和既有名称保持；材料/来源记录/阅读列表/反馈/知识整理/评估/笔记与文件哈希、LLM调用记录前后完全一致。没有清理用户来源、材料或个人内容，也没有批量分类费用。
 - 当前服务 `sb-sources-personal-preview`：`http://127.0.0.1:8765/sources?update=unified`；仍为用户试用数据及真实DeepSeek进程环境，个人.env只读、临时配置隔离、上限不变。独立8767验收服务已停止。
 - 不启动Obsidian、不改launchd、不push或PR；M14原生验收缺口不变。今后该试用目录继续视为用户内容，不可自动清空。
+
+## 独立下载预算、栏目证据与 Qwen Research（ADR 0024）
+
+**实现与取舍**
+
+- 旧800000字节上限来自正文长度×4且最多1MB，已拆为 FetchSettings 独立单响应8MB/累计16MB（解压后），保留8请求/3跳/公网检查；正文窗口仍200000字符。诊断带阶段、去查询值的URL和预算；耗尽为 incomplete，不能当成已证实只能手动浏览。
+- sitemap 的HTML响应先明确拒绝，不再按XML报行列号。主页/声明RSS/同源已知RSS提供有限证据，综合RSS和同名分类分别展示，用户确认key后服务端重新发现验证；不自动扩大/缩小栏目。rss_categories 后续真实采集也过滤，scope_note 保存当时依据，现有homepage/身份和人工设置保持。
+- OpenAI Research 精选页包含 Product 等发布，而RSS也混合多个分类；同名Research过滤不等价。真实新流程2请求下载1,229,847字节，得到综合与Research两个候选：10个页面URL重合，其中分类Research命中2、另8个属于其他/无分类。页面候选链接还含导航，未核对数量不冒充可靠文章覆盖率。
+- Qwen新增公开GET适配：qwen_ai/en-US retrieval与旧research.research-list/en配置；旧60项按官方0.0.91前端53项白名单过滤，再合并新41项，本次94条，排序后预览50。真实2请求4,919,053字节；不执行脚本，不以旧站RSS冒充新列表。真实HTML文章导入走接口，legacy摘要明确区分；未知文章不回退采集SPA壳。
+
+**验证**
+
+- 全部样例在 `/tmp/secondbrain-ingress.1R2RDJ`，fake模型/离线夹具。核心分组233 passed，仅旧“请求预算耗尽=failed”断言失败，更新为 incomplete 与明确request_limit；该项及预算/范围/材料整合等40 passed。相关Ruff通过；未跑全套。
+- 浏览器在8768副本实际比较OpenAI宽/窄候选、确认Research过滤并核对保存字段；390px无整页横向溢出。Qwen从输入主页→确认关注→预览→首篇加入阅读列表成功，得到真实 `Qwen4-Max: Your New Teammate Has Arrived` 正文，不是导航页，无脚本错误、无模型调用。独立验收服务已停止。
+
+**用户预览保护**
+
+- 更新前确认无运行任务，用户现有13关注、0材料；没有自动关注OpenAI/Qwen，也没有替用户选择采集范围。
+- 只同步两个示例规则/预算模板，正式sources/settings、env、画像保持；数据库所有表和wiki文件哈希基线前后相同。未清理任何用户关注或资料，未触发模型费用。
+- 当前服务 `sb-scoped-personal-preview`，同一8765端口与用户试用目录，真实DeepSeek环境仍只在进程中读取密钥；页面只读核对13来源正常。M14原生验收缺口不变，无Obsidian/launchd/push/PR。

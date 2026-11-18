@@ -29,6 +29,9 @@ uv run pytest -q
 uv run sb serve                                      # 本地 Web：http://127.0.0.1:8000/
 uv run sb sources follow https://example.com/         # 只识别主页并预览，不保存
 uv run sb sources follow https://example.com/ --apply # 明确关注，不自动导入文章
+uv run sb sources follow https://example.com/research # 查看范围证据与候选 key
+uv run sb sources follow https://example.com/research --candidate <key> --apply
+uv run sb sources follow https://example.com/ --manual-only --apply # 明确仅保存主页
 uv run sb sources repair                            # 检查全部关注，默认不写配置、不调用模型
 uv run sb sources repair <source_id> --apply          # 原位修复采集配置，保留关注身份与人工字段
 uv run sb sources edit <source_id> --set 'name=我的博客' # 改显示名称；id=新标识会同步迁移引用
@@ -79,6 +82,15 @@ Web 上的其他页面：
 - `/ops`：设置与管理，包含用量、运行方式、API key 状态/配置、模型及画像入口；`/recommendations` 与 `/history` 保留为辅助推荐与历史。
 
 来源的 `rss / hf_papers / sitemap` 是获取方式，不是内容领域。来源页免费显示匹配的参考标签和已有文章主题，并注明依据；“分析领域与性质”才显式采样最多10条标题/摘要并调用 cheap 模型，显示领域、内容性质、置信度与样本链接。建议独立保存，不覆盖手动标签，不读取全文、不导入材料；同输入复用缓存，强制重做才忽略缓存。失败保留旧结果，用量和错误记为 `SOURCE`，沿用现有预估费用上限。有限样本分类不等于理解整个网站。
+
+### 下载预算与栏目范围
+
+发现/预览下载预算独立于正文处理长度：`fetch.discovery_response_max_bytes` 默认8MB，`fetch.discovery_total_max_bytes` 默认16MB，按解压后字节计数；`content_max_chars` 仍只控制入库处理窗口。超限显示具体阶段、请求路径和“识别未完成”，不自动放开上限，也不将它解释成网站只能手动浏览。
+
+人类 Research 页面与机器 RSS 可以是不同范围。识别会展示实际 URL 重合、分类、未覆盖/未核对链接，分别提供综合 RSS 和更窄分类候选，由你确认后采用。`rss_categories` 作用于实际后续采集；确认时的 `scope_note` 与主页一起保留。样本证据不是整站/历史等价证明，同站候选不会自动合并身份。
+
+Qwen 新站 Research 使用公开 JSON 数据，不执行 JavaScript，也不以旧站 RSS 冒充当前列表。选文导入复用实际正文接口，旧记录只有摘要时明确标摘要；不能提取时提示补正文，不把 SPA 导航当文章。公开接口和旧展示规则变化时仍可能需要更新适配。
+
 
 ### 界面与图谱
 

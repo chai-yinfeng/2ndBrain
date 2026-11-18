@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import re
 import socket
 from html.parser import HTMLParser
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 from urllib.parse import parse_qsl, unquote, urldefrag, urlencode, urljoin, urlsplit, urlunsplit
 
 import feedparser
@@ -19,10 +20,10 @@ import httpx
 
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
 from secondbrain.net import FetchError, HttpClient
+from secondbrain.source_candidates import feed_scope_candidate
 from secondbrain.sources import FETCHERS, html_index, rss, sitemap
 from secondbrain.sources.homepage import source_homepage
 
-MAX_BYTES = 1_000_000
 MAX_LINKS = 500
 MAX_ENTRIES = 50
 MAX_REQUESTS = 8
@@ -45,9 +46,12 @@ class DiscoveryResult(TypedDict):
     source: SourceConfig | None
     entries: list[RawEntry]
     warnings: list[str]
-    status: Literal["ready", "empty", "failed", "manual", "rejected"]
+    status: Literal["ready", "empty", "failed", "manual", "incomplete", "rejected"]
     matched_source_id: str | None
     matched_from: Literal["followed", "catalog", "generic"]
+    candidates: NotRequired[list[dict]]
+    diagnostics: NotRequired[list[dict]]
+    budget: NotRequired[dict]
 
 
 class _UnsafeURL(FetchError):
@@ -102,14 +106,42 @@ def _origin(url: str) -> tuple[str, str]:
     return parts.scheme, parts.netloc
 
 
+def _diagnostic_url(url: str) -> str:
+    """诊断保留请求路径，不回显订阅 token 等查询值。"""
+    try:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "…" if parts.query else "", ""))
+    except ValueError:
+        return "(无效地址)"
+
+
 class _Reader:
     def __init__(self, client: HttpClient, settings: FetchSettings) -> None:
         self.client = client
         self.remaining = MAX_REQUESTS
-        self.max_bytes = min(MAX_BYTES, settings.content_max_chars * 4)
+        self.max_bytes = settings.discovery_response_max_bytes
+        self.max_total_bytes = settings.discovery_total_max_bytes
+        self.total_bytes = 0
+        self.limited = False
+        self.phase = "来源内容"
+        self.diagnostics: list[dict] = []
         self.warnings: list[str] = []
         self.title = ""
         self.title_mode: str | None = None
+
+    def error(self, url: str, message: str, kind: str = "fetch") -> FetchError:
+        safe = _diagnostic_url(url)
+        self.limited |= kind in {"response_limit", "total_limit", "request_limit"}
+        self.diagnostics.append(
+            {"url": safe, "phase": self.phase, "kind": kind, "message": message}
+        )
+        return FetchError(f"{self.phase} [{safe}]：{message}")
+
+    def budget(self) -> dict:
+        return {
+            "response_max_bytes": self.max_bytes, "total_max_bytes": self.max_total_bytes,
+            "downloaded_bytes": self.total_bytes, "requests_used": MAX_REQUESTS - self.remaining,
+        }
 
     def get(
         self, url: str, *, origin: tuple[str, str] | None = None,
@@ -120,32 +152,52 @@ class _Reader:
         for hop in range(MAX_REDIRECTS + 1):
             url = _public_url(url, resolve=True)
             if origin is not None and _origin(url) != origin:
-                raise FetchError("列表或 sitemap 重定向到了其他站点，未自动采用")
+                raise self.error(url, "重定向到了其他站点，未自动采用", "redirect")
             if self.remaining <= 0:
-                raise FetchError("已达到主页发现请求上限")
+                raise self.error(url, "已达到发现请求数上限", "request_limit")
+            if self.total_bytes >= self.max_total_bytes:
+                raise self.error(
+                    url, f"累计下载已达上限（{self.max_total_bytes} 字节）", "total_limit"
+                )
             self.remaining -= 1
             self.client._throttle(urlsplit(url).hostname or "")
             try:
-                # HttpClient.get 自动跟随重定向且仅按 Content-Length 限制大小；这里必须逐跳
-                # 验证，并对实际解压后的字节计数，不能先下载完再检查。
                 with self.client._client.stream("GET", url, follow_redirects=False) as response:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location or hop == MAX_REDIRECTS:
-                            raise FetchError("主页重定向次数过多或缺少目标")
+                            raise self.error(url, "重定向次数过多或缺少目标", "redirect")
                         url = urljoin(url, location)
                         continue
                     if response.status_code >= 400:
-                        raise FetchError(f"HTTP {response.status_code}：公开预览不可用")
+                        raise self.error(
+                            url, f"HTTP {response.status_code}：公开预览不可用", "http"
+                        )
                     length = response.headers.get("content-length", "")
                     if length.isdigit() and int(length) > self.max_bytes:
-                        raise FetchError(f"页面超过预览下载上限（{self.max_bytes} 字节）")
+                        raise self.error(
+                            url, f"单响应超过下载上限（{self.max_bytes} 字节）", "response_limit"
+                        )
+                    if length.isdigit() and int(length) > self.max_total_bytes - self.total_bytes:
+                        raise self.error(
+                            url, f"响应将超过累计下载预算（{self.max_total_bytes} 字节）",
+                            "total_limit",
+                        )
                     chunks: list[bytes] = []
                     size = 0
                     for chunk in response.iter_bytes(chunk_size=16_384):
                         size += len(chunk)
+                        self.total_bytes += len(chunk)
                         if size > self.max_bytes:
-                            raise FetchError(f"页面超过预览下载上限（{self.max_bytes} 字节）")
+                            raise self.error(
+                                url, f"解压后单响应超过上限（{self.max_bytes} 字节）",
+                                "response_limit",
+                            )
+                        if self.total_bytes > self.max_total_bytes:
+                            raise self.error(
+                                url, f"解压后累计下载超过上限（{self.max_total_bytes} 字节）",
+                                "total_limit",
+                            )
                         chunks.append(chunk)
                     headers = {
                         key: value for key, value in response.headers.items()
@@ -158,7 +210,7 @@ class _Reader:
                     if self.title_mode == "feed":
                         feed = feedparser.parse(buffered.content)
                         if not feed.version:
-                            raise FetchError("采集地址未返回有效 RSS/Atom")
+                            raise self.error(url, "未返回有效 RSS/Atom", "format")
                         self.title = str(feed.feed.get("title") or "")
                     elif self.title_mode == "html":
                         page = _Page(str(buffered.url))
@@ -166,8 +218,8 @@ class _Reader:
                         self.title = " ".join(page.title.split())
                     return buffered
             except httpx.HTTPError as exc:
-                raise FetchError("主页网络请求失败") from exc
-        raise FetchError("主页重定向次数过多")
+                raise self.error(url, "网络请求失败", "network") from exc
+        raise self.error(url, "重定向次数过多", "redirect")
 
 
 class _Page(HTMLParser):
@@ -304,6 +356,7 @@ def _feed(data: bytes) -> bool:
 
 _ADAPTER_FIELDS = (
     "type", "url", "query", "homepage", "needs_scraper", "url_pattern", "max_links", "use_lastmod",
+    "rss_categories", "scope_note",
 )
 
 
@@ -343,13 +396,20 @@ def _locations(source: SourceConfig | str) -> set[str]:
                     {"query": query, "searchtype": "all"}
                 )
             )
-        urls = [url for url in (source.url, homepage) if url]
+        urls = [url for url in (homepage,) if url] if source.rss_categories else [
+            url for url in (source.url, homepage) if url
+        ]
     return {normalized for url in urls if (normalized := _normalized_location(url))}
 
 
 def source_matches(left: SourceConfig | str, right: SourceConfig | str) -> bool:
     """按明确主页或采集地址匹配，保留栏目路径和查询条件；不以裸域名合并。"""
     if isinstance(left, SourceConfig) and isinstance(right, SourceConfig):
+        if left.type == right.type == "rss" and not (left.needs_scraper or right.needs_scraper):
+            if {c.casefold() for c in left.rss_categories} != {
+                c.casefold() for c in right.rss_categories
+            }:
+                return False
         if left.type == right.type == "arxiv" and left.query != right.query:
             return False
         if (
@@ -364,6 +424,7 @@ def _with_adapter(existing: SourceConfig, adapter: SourceConfig) -> SourceConfig
     return SourceConfig.model_validate({
         **existing.model_dump(),
         **{key: getattr(adapter, key) for key in _ADAPTER_FIELDS},
+        "homepage": existing.homepage or adapter.homepage,
     })
 
 
@@ -415,6 +476,7 @@ def _preview_source(
         if fetcher is None:
             raise FetchError("该来源没有已注册的采集适配器")
         reader.title = ""
+        reader.phase = f"{source.type} 采集"
         reader.title_mode = (
             "feed" if source.type in {"rss", "youtube", "arxiv"}
             else "html" if source.type == "html_index" else None
@@ -449,7 +511,8 @@ def preview_source(
                 updated = updated.model_copy(update={"name": result["source"].name})
             result.update(source=updated, matched_source_id=source.id)
         return result
-    return _preview_source(source, _Reader(client, fetch_settings), fetch_settings)
+    reader = _Reader(client, fetch_settings)
+    return _result_metadata(_preview_source(source, reader, fetch_settings), reader)
 
 
 def _known_preview(
@@ -469,7 +532,7 @@ def _known_preview(
     for adapter in adapters:
         if current is not None and not current.needs_scraper and all(
             getattr(current, key) == getattr(adapter, key)
-            for key in _ADAPTER_FIELDS if key != "homepage"
+            for key in _ADAPTER_FIELDS if key not in {"homepage", "scope_note"}
         ):
             continue
         preview = _preview_source(adapter, reader, fetch_settings)
@@ -503,14 +566,87 @@ def _known_preview(
     return result
 
 
+def _result_metadata(result: DiscoveryResult, reader: _Reader) -> DiscoveryResult:
+    if reader.limited and result["status"] in {"failed", "manual"}:
+        result["status"] = "incomplete"
+    result["warnings"] = list(dict.fromkeys(result["warnings"]))
+    result["diagnostics"] = list(reader.diagnostics)
+    result["budget"] = reader.budget()
+    result.setdefault("candidates", [])
+    return result
+
+
+def _related_feed_urls(homepage: str) -> list[str]:
+    """同站规则只用于提出候选，不参与来源身份合并。"""
+    from secondbrain import config
+
+    path = config.config_dir() / "sources.example.yaml"
+    catalog = config.load_sources(path) if path.is_file() else []
+    sources = [*config.load_sources(), *catalog]
+    return list(dict.fromkeys(
+        source.url for source in sources
+        if source.type == "rss" and not source.needs_scraper and source.url
+        and _origin(source.url) == _origin(homepage)
+    ))[:2]
+
+
+def _add_feed_candidates(
+    result: DiscoveryResult, reader: _Reader, feed_urls: list[str], page_links: list[str],
+    loaded: httpx.Response | None = None,
+) -> None:
+    candidates = result.setdefault("candidates", [])
+    for feed_url in dict.fromkeys(feed_urls):
+        previous_mode = reader.title_mode
+        reader.phase = "候选 RSS 栏目核对"
+        reader.title_mode = "feed"
+        try:
+            response = loaded if loaded is not None else reader.get(feed_url)
+            evidence = feed_scope_candidate(
+                result["homepage"], page_links, str(response.url), response.content
+            )
+            alternatives = evidence.get("alternatives") or [evidence]
+            for option in alternatives:
+                if option["relation"] == "unverified":
+                    result["warnings"].append(option["note"])
+                    continue
+                source = _source(result["homepage"], "rss", str(response.url)).model_copy(
+                    update={"rss_categories": option["scope_categories"],
+                            "scope_note": option["note"],
+                            "name": reader.title or result["title"]}
+                )
+                identity = json.dumps(
+                    [source.homepage, source.url, sorted(source.rss_categories)],
+                    ensure_ascii=False,
+                )
+                key = hashlib.sha256(identity.encode()).hexdigest()[:16]
+                if not any(item["key"] == key for item in candidates):
+                    candidates.append({**option, "key": key, "source": source})
+        except FetchError as exc:
+            result["warnings"].append(str(exc))
+        finally:
+            reader.title_mode = previous_mode
+
+
+def _feed_fits_page(homepage: str, entries: list[RawEntry], channel: str | None) -> bool:
+    scope = urlsplit(homepage).path.rstrip("/") + "/"
+    if scope == "/" or (
+        channel and _normalized_location(channel) == _normalized_location(homepage)
+    ):
+        return True
+    return bool(entries) and all(
+        _origin(entry.url) == _origin(homepage) and urlsplit(entry.url).path.startswith(scope)
+        for entry in entries
+    )
+
+
 def _discover_source(
-    url: str, client: HttpClient, fetch_settings: FetchSettings,
+    url: str, reader: _Reader, fetch_settings: FetchSettings,
 ) -> DiscoveryResult:
     """预览 URL；method 为 rss / html_index / sitemap / bookmark / rejected。
 
     bookmark 也有可持久化 SourceConfig：needs_scraper=True，现有采集流程跳过它，主页
     仍可访问。rejected 的 source=None。任何结果均不写配置、数据库或稍后阅读清单。
-    预览最多 8 次请求、每跳最多 3 次重定向、每响应 1 MB、500 链接、50 条候选。
+    预览的独立单响应/累计下载预算来自 FetchSettings，与正文长度无关。
     """
     result: DiscoveryResult = {
         "homepage": "", "title": "", "method": "rejected", "source": None,
@@ -525,11 +661,11 @@ def _discover_source(
         return result
     result["homepage"] = homepage
     result["title"] = urlsplit(homepage).hostname or homepage
-    reader = _Reader(client, fetch_settings)
     known = _known_preview(homepage, reader, fetch_settings)
     if known is not None:
         return known
     try:
+        reader.phase = "输入主页"
         response = reader.get(homepage)
     except _UnsafeURL as exc:
         warnings.append(str(exc))
@@ -590,12 +726,18 @@ def _discover_source(
             else:
                 for feed_url in dict.fromkeys(page.feeds[:3]):
                     try:
+                        reader.phase = "页面声明的 RSS"
                         feed_response = reader.get(feed_url)
                         if not _feed(feed_response.content):
                             raise FetchError("声明的 feed 不是有效 RSS/Atom")
-                        entries = _safe_entries(
-                            rss.parse_feed(feed_response.content), str(feed_response.url)
-                        )
+                        parsed = rss.parse_feed(feed_response.content)
+                        entries = _safe_entries(parsed, str(feed_response.url))
+                        channel = getattr(parsed, "homepage", None)
+                        if not _feed_fits_page(homepage, entries, channel):
+                            _add_feed_candidates(
+                                result, reader, [feed_url], page.links, loaded=feed_response
+                            )
+                            continue
                         result.update(
                             method="rss",
                             source=_source(homepage, "rss", str(feed_response.url)),
@@ -604,6 +746,13 @@ def _discover_source(
                         return result
                     except FetchError as exc:
                         warnings.append(str(exc))
+                if not result.get("candidates"):
+                    _add_feed_candidates(result, reader, _related_feed_urls(homepage), page.links)
+                if result.get("candidates"):
+                    result.update(method="bookmark", status="manual",
+                                  source=_source(homepage, "bookmark", homepage))
+                    warnings.append("发现候选订阅，范围与当前网页不一定相同；请选择后采用。")
+                    return result
                 pattern = _pattern(page.links, homepage, warnings)
                 if pattern:
                     entries = html_index.parse_index(response.text, homepage, pattern, MAX_ENTRIES)
@@ -618,7 +767,9 @@ def _discover_source(
                     dict.fromkeys(page.sitemaps + [urljoin(homepage, "/sitemap.xml")])
                 )
                 for sitemap_url in sitemap_urls[:2]:
+                    reader.phase = "候选 sitemap"
                     try:
+                        reader.title_mode = None
                         candidates = sitemap.collect_sitemap(
                             reader, sitemap_url, max_entries=MAX_LINKS, origin=_origin(homepage)
                         )
@@ -644,38 +795,39 @@ def _discover_source(
                         return result
                     except FetchError as exc:
                         warnings.append(str(exc))
+    if result["status"] == "failed" and reader.limited:
+        _add_feed_candidates(result, reader, _related_feed_urls(homepage), [])
     result.update(
         method="bookmark", status="failed" if result["status"] == "failed" else "manual",
         source=_source(result["homepage"], "bookmark", result["homepage"]),
     )
-    warnings.append(
-        "仅支持保存主页并手动浏览：未可靠发现公开文章列表；不登录、不执行脚本；"
-        "不会自动导入或加入稍后阅读。"
-    )
+    if not result.get("candidates") and not reader.limited:
+        warnings.append(
+            "未可靠发现公开文章列表，可显式保存主页手动浏览；不登录、不执行脚本。"
+        )
     return result
 
 
 def discover_source(url: str, client: HttpClient, fetch_settings: FetchSettings) -> DiscoveryResult:
-    """依次复用已关注、完整参考目录和通用发现；只返回候选，不写配置。"""
+    """统一发现与候选范围说明；只返回结果，不写配置或调用模型。"""
     from secondbrain import config
 
-    result = _discover_source(url, client, fetch_settings)
+    reader = _Reader(client, fetch_settings)
+    result = _discover_source(url, reader, fetch_settings)
     source = result["source"]
-    if source is None:
-        return result
-    if result["matched_from"] == "generic":
-        existing = next(
-            (item for item in config.load_sources() if source_matches(item, source)
-             or source_matches(item, url)),
-            None,
-        )
-        if existing is not None:
-            source = _with_adapter(existing, source)
-            result.update(matched_source_id=existing.id, matched_from="followed")
-    if result["status"] in {"ready", "empty", "manual"} and not source.name and result["title"]:
-        source = source.model_copy(update={"name": result["title"][:200]})
-    result["source"] = source
-    return result
+    if source is not None:
+        if result["matched_from"] == "generic":
+            existing = next(
+                (item for item in config.load_sources() if source_matches(item, source)
+                 or source_matches(item, url)), None,
+            )
+            if existing is not None:
+                source = _with_adapter(existing, source)
+                result.update(matched_source_id=existing.id, matched_from="followed")
+        if result["status"] in {"ready", "empty", "manual"} and not source.name and result["title"]:
+            source = source.model_copy(update={"name": result["title"][:200]})
+        result["source"] = source
+    return _result_metadata(result, reader)
 
 
 class FollowResult(DiscoveryResult):
@@ -689,6 +841,8 @@ def follow_source(
     *,
     source_id: str | None = None,
     name: str | None = None,
+    candidate_key: str | None = None,
+    manual_only: bool = False,
 ) -> FollowResult:
     """确认后新增或修复同一来源；人工字段和既有 ID 保持不变，不导入候选。"""
     from secondbrain import config, ops, sources_file
@@ -698,7 +852,23 @@ def follow_source(
         "saved_id": None,
     }
     source = result["source"]
-    if source is None or result["status"] in {"rejected", "failed"}:
+    if source is None or result["status"] == "rejected":
+        return result
+    if candidate_key and manual_only:
+        raise ValueError("候选采集与仅保存主页不能同时选择")
+    if candidate_key:
+        candidate = next(
+            (item for item in result.get("candidates", []) if item["key"] == candidate_key), None
+        )
+        if candidate is None:
+            raise ValueError("候选范围已改变或不可验证，请重新预览")
+        source = candidate["source"]
+        result.update(source=source, method="rss", entries=candidate["entries"],
+                      status="ready" if candidate["entries"] else "empty")
+    elif manual_only:
+        source = _source(result["homepage"], "bookmark", result["homepage"])
+        result.update(source=source, method="bookmark", status="manual")
+    elif result["status"] in {"failed", "incomplete"}:
         return result
     if source_id is not None:
         SourceConfig.model_validate({**source.model_dump(), "id": source_id})
@@ -716,7 +886,9 @@ def follow_source(
     def save(text: str) -> str:
         nonlocal source
         existing = config.parse_sources_text(text)
-        matched = next((item for item in existing if source_matches(item, source)), None)
+        matched = next(
+            (item for item in existing if item.id == result.get("matched_source_id")), None
+        ) or next((item for item in existing if source_matches(item, source)), None)
         if matched is not None:
             if source_id is not None and source_id != matched.id:
                 raise ValueError("该来源已关注；修改 ID 请使用正式编辑接口，不会复制来源")

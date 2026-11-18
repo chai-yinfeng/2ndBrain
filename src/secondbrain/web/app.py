@@ -382,6 +382,11 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
             data[key] = value
     if "tags" in data:
         data["tags"] = [t.strip() for t in re.split(r"[,，]", data["tags"]) if t.strip()]
+    if data.get("type") == "rss":
+        data["rss_categories"] = [
+            item.strip() for item in re.split(r"[,，]", form.get("rss_categories", ""))
+            if item.strip()
+        ]
     if data.get("type") in ("sitemap", "html_index"):
         if (form.get("url_pattern") or "").strip():
             data["url_pattern"] = form["url_pattern"].strip()
@@ -1403,6 +1408,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def source_home_follow(
         request: Request, url: str = Form(...), source_id: str = Form(""),
         name: str = Form(""),
+        candidate_key: str = Form(""), manual_only: bool = Form(False),
     ):
         from secondbrain.source_discovery import follow_source
 
@@ -1410,7 +1416,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             fs = _fetch_settings()
             with _http_client(fs) as client:
                 result = follow_source(
-                    url, client, fs, source_id=source_id or None, name=name.strip() or None
+                    url, client, fs, source_id=source_id or None, name=name.strip() or None,
+                    candidate_key=candidate_key or None, manual_only=manual_only,
                 )
             if not result.get("saved_id"):
                 return templates.TemplateResponse(
@@ -1434,7 +1441,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             fs = _fetch_settings()
             with _http_client(fs) as client:
                 result = preview_source(source, client, fs)
-            if result["status"] in ("failed", "rejected", "manual"):
+            if result["status"] in ("failed", "rejected", "manual", "incomplete"):
                 raise FetchError("；".join(result["warnings"]) or "无法自动列举此来源")
         except (ValueError, FetchError, config.ConfigError) as exc:
             context["error"] = f"试抓失败：{exc}"
@@ -1489,6 +1496,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 if changes["type"] == "html_index" and form.get("max_links") else None
             )
             changes["use_lastmod"] = changes["type"] == "sitemap" and "use_lastmod" in form
+            changes["rss_categories"] = [
+                item.strip() for item in re.split(r"[,，]", str(form.get("rss_categories", "")))
+                if item.strip()
+            ] if changes["type"] == "rss" else []
             source = update_source(source_id, changes)
         except (ValueError, config.ConfigError, sqlite3.Error) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -1611,7 +1622,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             "source": source, "entries": result["entries"][:PREVIEW_ENTRIES],
             "total": len(result["entries"]), "channel": result["homepage"],
             "error": "；".join(result["warnings"])
-            if result["status"] in ("failed", "rejected") else None,
+            if result["status"] in ("failed", "rejected", "incomplete") else None,
             "manual": result["status"] == "manual",
         }
         return templates.TemplateResponse(request, "_peek.html", context)

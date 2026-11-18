@@ -132,6 +132,10 @@ def source_follow(
     url: str, apply: bool = typer.Option(False, "--apply", help="确认关注；默认只识别预览"),
     source_id: str | None = typer.Option(None, "--id"),
     name: str | None = typer.Option(None, "--name", help="来源显示名称"),
+    candidate: str | None = typer.Option(None, "--candidate", help="预览列出的候选范围 key"),
+    manual_only: bool = typer.Option(
+        False, "--manual-only", help="明确仅保存主页，不表示自动识别成功"
+    ),
 ) -> None:
     """输入普通主页，发现 RSS/HTML 列表；不可枚举时明确保存为手动浏览入口。"""
     from secondbrain.net import FetchError
@@ -141,7 +145,8 @@ def source_follow(
     try:
         with HttpClient(settings) as client:
             result = (
-                follow_source(url, client, settings, source_id=source_id, name=name)
+                follow_source(url, client, settings, source_id=source_id, name=name,
+                              candidate_key=candidate, manual_only=manual_only)
                 if apply else discover_source(url, client, settings)
             )
     except (ValueError, FetchError, config.ConfigError) as exc:
@@ -151,7 +156,13 @@ def source_follow(
         typer.echo(f"! {warning}")
     for entry in result["entries"]:
         typer.echo(f"- {entry.title} · {entry.url}")
-    if result["source"] is None or result["status"] in ("failed", "rejected"):
+    for choice in result.get("candidates", []):
+        typer.echo(
+            f"候选 {choice['key']} · {choice['source'].url} · "
+            f"分类：{', '.join(choice['source'].rss_categories) or '综合RSS'}"
+        )
+        typer.echo(choice["note"])
+    if result["source"] is None or result["status"] in ("failed", "rejected", "incomplete"):
         raise typer.Exit(code=1)
     typer.echo(
         f"已关注：{result['saved_id']}" if apply
@@ -211,7 +222,7 @@ def source_repair(
         )
         for warning in result["warnings"]:
             typer.echo(f"! {warning}")
-        failed |= result["status"] in ("failed", "rejected")
+        failed |= result["status"] in ("failed", "rejected", "incomplete")
     if failed:
         raise typer.Exit(code=1)
 

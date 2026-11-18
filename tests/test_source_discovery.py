@@ -85,10 +85,6 @@ def test_discovers_advertised_feed(data, kind):
         HOME: httpx.Response(200, text=page),
         HOME + "feed": httpx.Response(200, content=data),
     })
-    assert set(result) == {
-        "homepage", "title", "method", "source", "entries", "warnings",
-        "status", "matched_source_id", "matched_from",
-    }
     assert result["status"] == "ready" and result["matched_from"] == "generic"
     assert result["method"] == "rss" and result["title"] == "Example"
     assert result["source"].url == HOME + "feed"
@@ -241,10 +237,13 @@ def test_chunked_body_size_is_bounded_without_content_length():
 
     result, requests = _discover(
         {HOME: lambda request: httpx.Response(200, stream=Body())},
-        settings=FetchSettings(per_host_interval_seconds=0, retries=0, content_max_chars=1000),
+        settings=FetchSettings(
+            per_host_interval_seconds=0, retries=0, discovery_response_max_bytes=4000
+        ),
     )
     assert result["method"] == "bookmark"
-    assert "下载上限" in " ".join(result["warnings"])
+    assert result["status"] == "incomplete"
+    assert result["diagnostics"][0]["kind"] == "response_limit"
     assert len(consumed) < 100 and requests == [HOME]
 
 
@@ -707,10 +706,13 @@ def test_known_adapter_has_same_shared_request_and_body_limits():
     source = SourceConfig(id="papers", type="hf_papers", url=HF_API, homepage=HF_HOME)
     oversized, requests = _preview(
         source, {HF_API: httpx.Response(200, content=b"x" * 5000)},
-        FetchSettings(per_host_interval_seconds=0, retries=0, content_max_chars=1000),
+        FetchSettings(
+            per_host_interval_seconds=0, retries=0, discovery_response_max_bytes=4000
+        ),
     )
-    assert oversized["status"] == "failed" and oversized["source"] == source
-    assert "下载上限" in " ".join(oversized["warnings"]) and requests == [HF_API]
+    assert oversized["status"] == "incomplete" and oversized["source"] == source
+    assert oversized["diagnostics"][0]["kind"] == "response_limit"
+    assert requests == [HF_API]
     looping, requests = _preview(source, {
         HF_API: httpx.Response(302, headers={"location": HF_API}),
     })
@@ -842,7 +844,8 @@ def test_failed_adapter_fallback_shares_one_request_budget(monkeypatch):
         HF_API: httpx.Response(302, headers={"location": HF_API}),
         adapters[1].url: httpx.Response(200, json=HF_PAPERS),
     }, HF_HOME)
-    assert result["status"] == "failed" and result["source"] == current
+    assert result["status"] == "incomplete" and result["source"] == current
+    assert any(d["kind"] == "request_limit" for d in result["diagnostics"])
     assert len(requests) == MAX_REQUESTS
     assert adapters[1].url not in requests
     assert "上限" in " ".join(result["warnings"])

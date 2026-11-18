@@ -1090,6 +1090,27 @@ def _fetch_manual(
     canonical = manual_canonical(url)
     doi, arxiv_id = _url_ids(url)
     result, reasons = None, []
+    if not (arxiv_id or doi or fallback):
+        from secondbrain.extract.html import html_fragment_to_text
+        from secondbrain.net import FetchError
+        from secondbrain.sources.qwen import resolve_article
+
+        try:
+            qwen_entry = resolve_article(url, client.client, fs)
+        except FetchError as exc:
+            raise ManualFetchError(str(exc)) from exc
+        if qwen_entry is not None:
+            body = qwen_entry.feed_content
+            text = html_fragment_to_text(body) if body else qwen_entry.summary or ""
+            if not text.strip():
+                raise ManualFetchError("Qwen 公开接口未提供可用正文或摘要")
+            result = ManualFetched(
+                qwen_entry, text, "html" if body else "abstract_only", canonical,
+                note="Qwen 公开 Research 接口" if body else "Qwen 旧文章仅提供摘要",
+            )
+            if body:
+                client.raw_data = body.encode("utf-8")
+                client.completeness = "full"
     try:
         if arxiv_id:
             entry, content, method = _fetch_arxiv(

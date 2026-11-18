@@ -243,6 +243,8 @@ _OMIT_DEFAULTS = ("backfill", "needs_scraper", "use_lastmod")
 
 def source_to_dict(source: SourceConfig) -> dict[str, Any]:
     data = source.model_dump(exclude_none=True)
+    if not data.get("rss_categories"):
+        data.pop("rss_categories", None)
     for key in _OMIT_DEFAULTS:
         if data.get(key) is False:
             del data[key]

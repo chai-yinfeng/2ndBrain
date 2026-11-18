@@ -2,17 +2,43 @@
 {% if result %}
 <section class="source-preview">
 <h3 class="break-anywhere">{{ result.title or result.homepage }}</h3>
-<p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · 获取方式：{{ result.method }}{% if result.matched_from == 'followed' %} · 已关注：{{ result.matched_source_id }}（不会重复添加）{% elif result.matched_from == 'catalog' %} · 复用已知适配{% endif %}</p>
+<p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · {% if result.candidates %}已发现公开订阅候选，待确认范围{% else %}获取方式：{{ result.method }}{% endif %}{% if result.matched_from == 'followed' %} · 已关注：{{ result.matched_source_id }}（不会重复添加）{% elif result.matched_from == 'catalog' %} · 复用已知适配{% endif %}</p>
 {% for warning in result.warnings|unique %}<p class="refresh">{{ warning }}</p>{% endfor %}
-{% if result.source and result.status|default('ready') not in ['failed','rejected'] %}
-{% if result.method == "bookmark" %}<p class="help">只能保存为手动浏览入口，目前不能自动列举内容。</p>{% endif %}
+{% if result.budget %}<details class="source-request-details"><summary>请求诊断与下载预算</summary>
+  <p class="meta">单响应上限 {{ "%.1f"|format(result.budget.response_max_bytes / 1000000) }}MB · 累计上限 {{ "%.1f"|format(result.budget.total_max_bytes / 1000000) }}MB · 已下载 {{ "%.2f"|format(result.budget.downloaded_bytes / 1000000) }}MB · {{ result.budget.requests_used }} 次请求；不改变正文入库长度。</p>
+  {% for diagnostic in result.diagnostics|default([]) %}<p class="meta break-anywhere">{{ diagnostic.phase }} · {{ diagnostic.url }} · {{ diagnostic.message }}</p>{% endfor %}
+</details>{% endif %}
+{% for candidate in result.candidates|default([]) %}
+<section class="panel feed-candidate" data-candidate="{{ candidate.key }}">
+  <h3>{% if candidate.scope_categories %}RSS 分类：{{ candidate.scope_categories|join('、') }}（范围更窄）{% else %}综合 RSS（范围更广）{% endif %}</h3>
+  <p class="meta break-anywhere"><a href="{{ candidate.source.url }}" target="_blank" rel="noopener noreferrer">{{ candidate.source.url }}</a></p>
+  <p>{{ candidate.note }}</p>
+  <details><summary>核对本次样本和候选文章</summary>
+    <p class="help">整个 RSS 共 {{ candidate.feed_total }} 条；与页面出现的链接重合样本 {{ candidate.matched_urls|length }} 条（最多显示10条）。不能据此证明历史或完整覆盖。</p>
+    <ul>{% for link in candidate.matched_urls %}<li><a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ link }}</a></li>{% endfor %}</ul>
+    {% if candidate.uncovered_page_urls %}<p class="help">当前候选未覆盖或尚未核对的页面链接：</p><ul>{% for link in candidate.uncovered_page_urls %}<li class="break-anywhere">{{ link }}</li>{% endfor %}</ul>{% endif %}
+    {% with source=candidate.source, entries=candidate.entries[:10], total=candidate.entries|length, channel=candidate.source.url, error=None, manual=False %}{% include "_peek.html" %}{% endwith %}
+  </details>
+  <form method="post" action="/sources/home/follow" class="source-home-confirm">
+    <input type="hidden" name="url" value="{{ result.homepage }}"><input type="hidden" name="candidate_key" value="{{ candidate.key }}">
+    <label>显示名称<input name="name" maxlength="200" value="{{ result.source.name or candidate.source.name or result.title }}"></label>
+    <label>关注标识<input name="source_id" pattern="[a-z0-9][a-z0-9-]*" required value="{{ result.source.id if result.source else candidate.source.id }}"{% if result.matched_from == 'followed' %} readonly{% endif %}></label>
+    <button class="fb primary" type="submit">确认此采集范围并采用</button>
+  </form>
+</section>
+{% endfor %}
+{% if result.source and result.status|default('ready') != 'rejected' %}
+{% set incomplete = result.status|default('ready') in ['failed','incomplete'] %}
+{% if incomplete %}<p class="refresh">本次识别未完成，未判定该网站只能手动浏览，未覆盖任何已有配置。可以调整下载预算后重新识别，或明确仅保存主页。</p>
+{% elif result.method == "bookmark" %}<p class="help">尚未自动采用采集方式。可选择上方候选，或仅保存主页。</p>{% endif %}
 <form method="post" action="/sources/home/follow" class="source-home-confirm">
   <input type="hidden" name="url" value="{{ result.homepage }}">
+  {% if incomplete %}<input type="hidden" name="manual_only" value="true">{% endif %}
   <label>显示名称<input name="name" maxlength="200" value="{{ result.source.name or result.title }}" required{% if result.matched_from == 'followed' and result.source.name %} readonly{% endif %}></label>
   <label>关注标识<input name="source_id" value="{{ result.source.id }}" required pattern="[a-z0-9][a-z0-9-]*"{% if result.matched_from == 'followed' %} readonly{% endif %}></label>
-  <button class="fb primary" type="submit">{{ '更新已有来源的采集配置' if result.matched_from == 'followed' else '确认关注此来源' }}</button>
+  <button class="fb{% if not incomplete %} primary{% endif %}" type="submit">{% if incomplete or result.method == 'bookmark' %}仍仅保存主页（不启用自动采集）{% elif result.matched_from == 'followed' %}更新已有来源的采集配置{% else %}确认关注此来源{% endif %}</button>
 </form>
-{% with source=result.source, entries=result.entries, total=result.entries|length, channel=result.homepage, error=None, manual=result.method == 'bookmark' %}{% include "_peek.html" %}{% endwith %}
-{% elif result.source %}<p class="help">抓取未通过，未保存或覆盖任何配置。已有来源可在设置中检查和修复。</p>{% endif %}
+{% if not incomplete and result.method != 'bookmark' %}{% with source=result.source, entries=result.entries, total=result.entries|length, channel=result.homepage, error=None, manual=False %}{% include "_peek.html" %}{% endwith %}{% endif %}
+{% endif %}
 </section>
 {% endif %}

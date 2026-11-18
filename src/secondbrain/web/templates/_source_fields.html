@@ -7,6 +7,7 @@
   <label>获取方式<select name="type">{% for t in types %}<option value="{{ t }}"{% if s and s.type == t %} selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
   <label>arXiv 查询<input name="query" value="{{ s.query or '' if s else '' }}" placeholder="仅 arxiv 使用"></label>
   <label class="wide">手动标签<input name="tags" value="{{ s.tags|join(', ') if s else '' }}" placeholder="逗号分隔；AI 不会覆盖"></label>
+  <label class="wide">RSS 分类过滤<input name="rss_categories" value="{{ s.rss_categories|join(', ') if s else '' }}" placeholder="仅 RSS；留空不过滤，逗号分隔，如 Research"></label>
   <label>信任度<input name="trust" type="number" min="1" max="5" value="{{ s.trust if s else 3 }}"></label>
   <label>推荐角色<select name="role">{% for role in ['core','expansion'] %}<option value="{{ role }}"{% if s and s.role == role %} selected{% endif %}>{{ role }}</option>{% endfor %}</select></label>
   <label>时间窗（天）<input name="max_age_days" type="number" min="1" value="{{ s.max_age_days if s else 30 }}"></label>
@@ -18,3 +19,4 @@
   {% if s %}<label><input name="enabled" type="checkbox" value="1"{% if s.enabled %} checked{% endif %}> 启用</label><label><input name="needs_scraper" type="checkbox" value="1"{% if s.needs_scraper %} checked{% endif %}> 仅保存主页，手动浏览</label>{% endif %}
 </div>
 {% if s %}<p class="help">修改 ID 会同步迁移材料来源和历史引用；只想改列表名称时，修改显示名称即可。未展示的个人配置保持不变。</p>{% endif %}
+{% if s and s.scope_note %}<p class="help">确认采集时的范围说明：{{ s.scope_note }}</p>{% endif %}
