@@ -1,6 +1,7 @@
 """来源发现/维护/领域分析的共同 CLI/Web 路径，不接触真实关注和模型。"""
 
 import json
+import re
 import socket
 
 import httpx
@@ -190,3 +191,19 @@ def test_existing_content_topics_and_catalog_hints_need_no_model(environment):
     conn = db.connect()
     assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
     conn.close()
+
+
+def test_following_defaults_to_latest_import_without_rewriting_configuration(environment):
+    sources = [
+        sample_source(id="first", name="Zulu"),
+        sample_source(id="second", name="Alpha"),
+        sample_source(id="third", name="Middle"),
+    ]
+    save_sources(*sources)
+    before = (config.config_dir() / "sources.yaml").read_bytes()
+    with TestClient(create_app()) as client:
+        response = client.get("/sources")
+    shown = re.findall(r'<article[^>]*data-source="([^"]+)"', response.text)
+    assert shown == ["third", "second", "first"]
+    assert [source.id for source in config.load_sources()] == ["first", "second", "third"]
+    assert (config.config_dir() / "sources.yaml").read_bytes() == before

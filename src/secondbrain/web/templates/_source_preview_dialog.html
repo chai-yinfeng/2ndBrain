@@ -1,0 +1,15 @@
+<dialog id="preview-{{ source.id }}" class="source-dialog" aria-labelledby="preview-title-{{ source.id }}">
+  <header class="source-dialog-header">
+    <h2 id="preview-title-{{ source.id }}">{{ source.name or source.id }} · 预览选文</h2>
+    <div class="page-actions">
+      <span id="preview-loading-{{ source.id }}" class="htmx-indicator meta" role="status">正在获取…</span>
+      {% if can_edit %}<button class="fb small" type="button" data-dialog-open="settings-{{ source.id }}" aria-haspopup="dialog" aria-controls="settings-{{ source.id }}">来源设置</button>{% endif %}
+      <button class="fb icon-button" type="button" data-dialog-close aria-label="关闭预览">×</button>
+    </div>
+  </header>
+  <div class="source-dialog-body">
+    <div data-source-task-host aria-live="polite"></div>
+    <div id="peek-{{ source.id }}" class="source-peek"></div>
+  </div>
+  <footer class="source-dialog-footer">关闭按钮或 Escape 收起预览；已启动的导入任务继续运行，重新打开预览可查看结果。</footer>
+</dialog>

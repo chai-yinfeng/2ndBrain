@@ -11,16 +11,21 @@
 {% if error %}<p class="refresh" role="alert">{{ error }}</p>{% endif %}
 <details class="panel source-add" open>
   <summary>关注一个主页</summary>
-  <form hx-post="/sources/home/preview" hx-target="#homepage-preview" class="source-home-form">
+  <form hx-post="/sources/home/preview" hx-target="#homepage-preview" hx-indicator="#homepage-preview-loading" class="source-home-form" data-preview-dialog="homepage-preview-dialog">
     <label class="sr-only" for="source-home-url">主页 URL</label><input id="source-home-url" name="url" type="url" required placeholder="博客、网站或账号主页 URL">
     <button class="fb primary" type="submit">识别并预览</button>
   </form>
   <p class="help">优先复用已有关注与已知适配；识别不保存、不调用模型。</p>
-  <div id="homepage-preview"></div>
 </details>
-{% with kind="manual_add", task=None, message=None %}{% include "_task.html" %}{% endwith %}
+<div id="source-task-home">{% with kind="manual_add", task=None, message=None %}{% include "_task.html" %}{% endwith %}</div>
+<dialog id="homepage-preview-dialog" class="source-dialog" aria-labelledby="homepage-preview-title">
+  <header class="source-dialog-header"><h2 id="homepage-preview-title">主页识别与采集范围</h2><div class="page-actions"><span id="homepage-preview-loading" class="htmx-indicator meta" role="status">正在识别…</span><button type="button" class="fb icon-button" data-dialog-close aria-label="关闭识别预览">×</button></div></header>
+  <div class="source-dialog-body"><div data-source-task-host aria-live="polite"></div><div id="homepage-preview"></div></div>
+  <footer class="source-dialog-footer">关闭不会保存或采用候选；可随时重新识别。</footer>
+</dialog>
 <div class="panel-header">
   <h2 id="following-title">已关注</h2>
+  <label class="source-sort" for="source-sort">排序<select id="source-sort" disabled><option value="recent">最近导入</option><option value="name">首字母 A–Z</option></select></label>
   <form hx-post="/sources/repair" hx-target="#task-sources-repair" hx-swap="outerHTML" class="page-actions">
     <button class="fb small" name="apply" value="false" type="submit">检查采集配置</button>
     <button class="fb small" name="apply" value="true" type="submit">修复可验证来源</button>
@@ -28,22 +33,23 @@
 </div>
 <p class="help">检查与修复不调用模型、不删关注；修改字段前先验证适配。当前配置：<span class="break-anywhere">{{ path }}</span></p>
 {% with kind="sources-repair", task=bulk_repair_task|default(none), message=None %}{% include "_task.html" %}{% endwith %}
-<section class="compact-list source-list" aria-labelledby="following-title">
-{% for s in sources %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}{% set home = homepages.get(s.id) %}{% set a = analyses.get(s.id) %}{% set hints = source_contexts.get(s.id, {}) %}
-  <article class="source-item" data-source="{{ s.id }}">
+<section id="following-list" class="compact-list source-list" aria-labelledby="following-title">
+{% for s in sources|reverse %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}{% set home = homepages.get(s.id) %}{% set a = analyses.get(s.id) %}{% set hints = source_contexts.get(s.id, {}) %}
+  <article class="source-item" data-source="{{ s.id }}" data-source-name="{{ s.name or s.id }}" data-import-order="{{ loop.revindex0 }}">
     <div class="source-row">
-      <div class="row-main"><h3>{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer">{{ s.name or s.id }}</a>{% else %}{{ s.name or s.id }}{% endif %}{% if not s.enabled %}<span class="tag">已停用</span>{% endif %}</h3>
+      <div class="row-main"><h3><button type="button" class="source-title" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}" title="配置 {{ s.name or s.id }}">{{ s.name or s.id }}</button>{% if not s.enabled %}<span class="tag">已停用</span>{% endif %}</h3>
         <p class="meta">{{ s.id }} · {{ "手动浏览" if s.needs_scraper else s.type }}{% for tag in s.tags %} · {{ tag }}{% endfor %}{% if a %} · {% for domain in a.profile.domains %}{{ domain }}{% if not loop.last %} / {% endif %}{% endfor %}{% elif hints.existing_topics %} · 历史主题：{{ hints.existing_topics|join(' / ') }}{% elif hints.catalog_tags %} · 参考标签：{{ hints.catalog_tags|join(' / ') }}{% elif not s.tags %} · 领域未分析{% endif %}</p>
       </div>
       <div class="row-actions">
         {% if home %}<a class="fb ghost small" href="{{ home }}" target="_blank" rel="noopener noreferrer" aria-label="浏览 {{ s.name or s.id }} 主页">主页 ↗</a>{% endif %}
-        <button type="button" class="fb small" hx-post="/sources/{{ s.id }}/peek" hx-target="#peek-{{ s.id }}">预览选文</button>
-        <button type="button" class="fb small" data-disclosure="settings-{{ s.id }}" aria-controls="settings-{{ s.id }}" aria-expanded="false">设置</button>
+        <button type="button" class="fb small" hx-post="/sources/{{ s.id }}/peek" hx-target="#peek-{{ s.id }}" hx-indicator="#preview-loading-{{ s.id }}" data-dialog-open="preview-{{ s.id }}" aria-haspopup="dialog" aria-controls="preview-{{ s.id }}">预览选文</button>
+        <button type="button" class="fb small" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}">设置</button>
       </div>
     </div>
-    <div id="peek-{{ s.id }}" class="source-peek"></div>
-    <details id="settings-{{ s.id }}" class="source-settings">
-      <summary>收起来源设置</summary>
+    {% with source=s, can_edit=True %}{% include "_source_preview_dialog.html" %}{% endwith %}
+    <dialog id="settings-{{ s.id }}" class="source-dialog" aria-labelledby="settings-title-{{ s.id }}">
+      <header class="source-dialog-header"><h2 id="settings-title-{{ s.id }}">{{ s.name or s.id }} · 来源设置</h2><button type="button" class="fb icon-button" data-dialog-close aria-label="关闭来源设置">×</button></header>
+      <div class="source-dialog-body">
       <nav class="source-actions" aria-label="来源维护">
         <form hx-post="/sources/{{ s.id }}/repair" hx-target="#task-source-repair-{{ s.id }}" hx-swap="outerHTML"><button class="fb small" name="apply" value="false" type="submit">检查</button><button class="fb small" name="apply" value="true" type="submit">修复采集</button></form>
         <form method="post" action="/sources/{{ s.id }}/toggle"><button class="fb small" type="submit">{{ "停用" if s.enabled else "启用" }}</button></form>
@@ -70,7 +76,9 @@
         {% set d = dist.get(s.id, {}) %}<p class="meta dist" data-dist="{% for k in dist_kinds %}{{ d.get(k, 0) }}{% if not loop.last %}/{% endif %}{% endfor %}">反馈：{% for k in dist_kinds %}{% if d.get(k) %}{{ feedback_kinds[k] }} {{ d[k] }} · {% endif %}{% endfor %}{% if not d %}暂无{% endif %}</p>
         <p class="meta yield" data-yield="{{ y.items }}/{{ y.l2 }}/{{ y.front }}/{{ y.positive }}/{{ y.negative }}">近 {{ pers.yield_window_days }} 天：入库 {{ y.items }} · 精读 {{ y.l2 }} · 推荐 {{ y.front }}{% if y.low_yield %} · <span class="refresh low-yield">低产出，建议停用</span>{% endif %}</p>
       </details>
-    </details>
+      </div>
+      <footer class="source-dialog-footer">关闭不会提交未保存修改；已启动的分析或修复任务会继续运行。</footer>
+    </dialog>
   </article>
 {% else %}<p class="empty">还没有关注信源。输入主页，或从参考目录选择。</p>{% endfor %}
 </section>
@@ -86,9 +94,9 @@
   {% for c in catalog %}<article class="catalog-item" data-catalog="{{ c.id }}">
     <div class="source-row">
       <div class="row-main">{% set home = catalog_homepages.get(c.id) %}<h3>{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer">{{ c.name or c.id }}</a>{% else %}{{ c.name or c.id }}{% endif %}</h3><p class="meta">{{ c.type }}{% for tag in c.tags %} · {{ tag }}{% endfor %}{% if c.needs_scraper %} · 手动浏览{% endif %}</p></div>
-      <div class="row-actions"><button type="button" class="fb small" hx-post="/sources/{{ c.id }}/peek" hx-target="#peek-{{ c.id }}">预览</button><form method="post" action="/sources/catalog/{{ c.id }}/add"><button class="fb small" type="submit">关注</button></form><form method="post" action="/sources/catalog/{{ c.id }}/hide"><button class="fb ghost small" type="submit" aria-label="从参考目录移除 {{ c.name or c.id }}">移除</button></form></div>
+      <div class="row-actions"><button type="button" class="fb small" hx-post="/sources/{{ c.id }}/peek" hx-target="#peek-{{ c.id }}" hx-indicator="#preview-loading-{{ c.id }}" data-dialog-open="preview-{{ c.id }}" aria-haspopup="dialog" aria-controls="preview-{{ c.id }}">预览</button><form method="post" action="/sources/catalog/{{ c.id }}/add"><button class="fb small" type="submit">关注</button></form><form method="post" action="/sources/catalog/{{ c.id }}/hide"><button class="fb ghost small" type="submit" aria-label="从参考目录移除 {{ c.name or c.id }}">移除</button></form></div>
     </div>
-    <div id="peek-{{ c.id }}" class="source-peek"></div>
+    {% with source=c, can_edit=False %}{% include "_source_preview_dialog.html" %}{% endwith %}
   </article>{% else %}<p class="empty">没有可显示的候选。可清除筛选或恢复参考目录；已关注列表不受影响。</p>{% endfor %}
   </div>
 </details>
@@ -99,4 +107,5 @@
     <button class="fb" type="submit">试抓</button>
   </form><div id="source-preview"></div>
 </details>
+<script src="{{ static_asset('sources.js') }}" defer></script>
 {% endblock %}

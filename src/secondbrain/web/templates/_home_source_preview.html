@@ -3,7 +3,7 @@
 <section class="source-preview">
 <h3 class="break-anywhere">{{ result.title or result.homepage }}</h3>
 <p class="meta"><a href="{{ result.homepage }}" target="_blank" rel="noopener noreferrer">打开主页</a> · {% if result.candidates %}已发现公开订阅候选，待确认范围{% else %}获取方式：{{ result.method }}{% endif %}{% if result.matched_from == 'followed' %} · 已关注：{{ result.matched_source_id }}（不会重复添加）{% elif result.matched_from == 'catalog' %} · 复用已知适配{% endif %}</p>
-{% for warning in result.warnings|unique %}<p class="refresh">{{ warning }}</p>{% endfor %}
+{% for warning in result.warnings|unique %}<p class="{{ 'help' if result.status in ['ready','empty'] else 'refresh' }}">{{ warning }}</p>{% endfor %}
 {% if result.budget %}<details class="source-request-details"><summary>请求诊断与下载预算</summary>
   <p class="meta">单响应上限 {{ "%.1f"|format(result.budget.response_max_bytes / 1000000) }}MB · 累计上限 {{ "%.1f"|format(result.budget.total_max_bytes / 1000000) }}MB · 已下载 {{ "%.2f"|format(result.budget.downloaded_bytes / 1000000) }}MB · {{ result.budget.requests_used }} 次请求；不改变正文入库长度。</p>
   {% for diagnostic in result.diagnostics|default([]) %}<p class="meta break-anywhere">{{ diagnostic.phase }} · {{ diagnostic.url }} · {{ diagnostic.message }}</p>{% endfor %}
