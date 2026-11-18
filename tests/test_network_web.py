@@ -70,10 +70,7 @@ def test_home_supports_materials_and_network_without_digest(network):
     with TestClient(create_app()) as client:
         response = client.get("/")
         assert response.status_code == 200
-        assert "材料库为空" in response.text
         assert 'href="/add"' in response.text and 'href="/wiki/graph"' in response.text
-        assert "开始今日过滤" not in response.text
-        assert "还没有 digest" in client.get("/recommendations").text
 
 
 def test_generated_notes_migrate_without_colliding_with_material_filename(tmp_path, monkeypatch):

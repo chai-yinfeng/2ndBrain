@@ -3,7 +3,7 @@
 {% block head %}<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">{% endblock %}
 {% block content %}
 <header class="page-header"><div><p class="eyebrow">KNOWLEDGE WORKSPACE</p><h1>知识库 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">登记阅读后由 AI 增量生成概念与关联。机器草稿默认不在这里展示；历史页面保留但不冒充新登记记录。</p></div><div class="page-actions"><a class="fb" href="/materials?reading=read">已登记材料</a><a class="fb primary" href="/wiki/graph">探索知识图谱</a></div></header>
-<nav class="subnav" aria-label="知识库视图"><a href="/wiki" aria-current="page">知识页面</a><a href="/wiki/graph">知识图谱</a><a href="/later">阅读列表</a></nav>
+<nav class="subnav" aria-label="知识库视图"><a href="/wiki" aria-current="page">知识页面</a><a href="/wiki/graph">关系图谱</a></nav>
 {% if pending_read %}<section class="panel wiki-pending"><h2>已登记，待整理 <small>{{ pending_read|length }}</small></h2><p class="help">登记记录已保留，可查看错误、补充学习记录或重试整理。</p><ul class="wiki-link-list">{% for item in pending_read %}<li><a href="/item/{{ item.id }}#register-read">{{ item.title }}</a></li>{% endfor %}</ul></section>{% endif %}
 <div class="wiki-overview">
   <section class="panel wiki-index"><div class="wiki-section-heading"><h2>知识页面</h2><span class="meta">Markdown 索引</span></div><div class="wiki-body">{{ index_html | safe }}</div></section>

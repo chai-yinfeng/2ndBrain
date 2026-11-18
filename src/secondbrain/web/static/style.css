@@ -268,10 +268,10 @@ pre.log { max-height: 320px; }
 .source-list[data-layout="cards"] .source-row { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; padding: 12px; gap: 10px; align-content: start; }
 .source-list[data-layout="cards"] .source-cover { width: 100%; height: 116px; }
 .source-list[data-layout="cards"] .source-initial { font-size: 36px; }
-.source-list[data-layout="cards"] .row-main { width: 100%; }
-.source-list[data-layout="cards"] .row-main h3 { font-size: 14px; }
-.source-list[data-layout="cards"] .row-actions { width: 100%; margin: auto 0 0; justify-content: flex-end; flex-wrap: wrap; }
-.source-list[data-layout="cards"] .source-row .meta { margin-bottom: 0; }
+.source-list[data-layout="cards"] .source-row > .row-main { width: 100%; }
+.source-list[data-layout="cards"] .source-row > .row-main h3 { font-size: 14px; }
+.source-list[data-layout="cards"] .source-row > .row-actions { width: 100%; margin: auto 0 0; justify-content: flex-end; flex-wrap: wrap; }
+.source-list[data-layout="cards"] .source-row > .row-main .meta { margin-bottom: 0; }
 .source-visual-settings { border-top: 1px solid var(--border); margin: 16px 0; padding-top: 10px; }
 .source-actions, .source-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 12px 0 18px; }
 .source-actions form { display: inline-flex; gap: 6px; }

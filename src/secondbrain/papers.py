@@ -514,6 +514,12 @@ def _fetch_candidate(candidate, client, fs):
                           "responses": responses}
             if fetched.method == "abstract_only":
                 provenance["actual_version"] = "metadata_only"
+                summary = max((candidate["abstract"], fetched.entry.summary or ""), key=len)
+                if summary and summary not in fetched.content:
+                    fetched.entry.summary = summary
+                    fetched.content = f"{fetched.entry.title}\n\n{summary}"
+                    fetched.note = "仅摘要"
+                    provenance["abstract_source"] = "selected_candidate"
                 if (abstract_fallback is None
                         or len(fetched.content) > len(abstract_fallback[0].content)):
                     abstract_fallback = fetched, provenance

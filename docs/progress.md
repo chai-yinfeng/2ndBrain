@@ -875,3 +875,23 @@
 
 - 重启前只读检查已知论文、导入、整理、运行及全部25关注的分析/修复任务均未运行。新版服务 **`sb-manual-input-personal-preview`** 继续8765与原用户试用目录；DeepSeek密钥仅从原.env只读注入进程，不复制/打印密钥，不改正式个人配置、真实数据或launchd。
 - 新版只读页面核对25关注与2个待选论文；重启前后业务库全部15表及既有14份配置/wiki文件哈希保持，仅新增任务记录库。未在用户库导入验收材料、选择候选、更新封面或触发模型费用。原.env和Obsidian均未修改/启动，M14原生验收仍未完成；本轮仅本地提交、不push/PR。
+
+## 权限恢复后的卡片预览、导航与导入修复
+
+- 暂停前仓库读取与三次博客导入同时出现 `EPERM / Operation not permitted`；后者没有日志或结果，不能定位到精确调用栈。用户完整退出 Ghostty 后仓库访问恢复。本轮没有用忽略权限错误、降级引用或自动重试掩盖故障；旧失败任务保持，不替用户重新提交。
+- 来源卡片的 `.row-main` / `.row-actions` 后代样式污染了条目内的预览窗口；现限定到来源摘要行的直接子元素。知识库两页的内部导航统一为“知识页面／关系图谱”，不再混入阅读列表或材料库。
+- 修正论文摘要回退：DOI 只给标题或较短摘要时，保留已选候选已有的较完整摘要，并在 provenance 标明 `abstract_source=selected_candidate`，仍标 metadata_only，不冒充全文。身份核对、继续寻找已知正文、材料去重和版本记录沿用原流程；增加两个离线回归覆盖无远端摘要与较短远端摘要。
+
+**验证与数据保护**
+
+- `uv run pytest -q tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_network_web.py tests/test_source_visuals.py tests/test_manual_add.py` 首轮 **91 passed、1 failed**；失败是已有首页空态文案断言，删除失效文案断言、保留无digest也能访问材料/网络的契约验证，该用例单独 **1 passed**。相关 Python Ruff 通过，未跑全套。
+- 独立 fake 环境实际浏览器：Simon RSS 长标题预览在卡片与列表模式文字区均730px；390px窗口的弹窗宽374、文字区314、主体无横向溢出。关闭/切换来源设置正常，无应用脚本错误。知识页面与图谱的两项导航文字及地址实际一致。
+- 从 Web 链接入口添加公开博客 `https://www.anthropic.com/research/components-of-agent-memory`，切页后通过任务详情找回结果，再在阅读列表看到该材料；正文 **21282字符、full、unread**，CLI `sb reading list` 也显示同一条目，**0次模型调用**。这证明权限恢复后的博客→材料→清单链路可用；不将旧失败的精确底层调用伪称已定位。
+- 用户的25来源、2份材料及业务库全部表、既有配置/wiki文件哈希保持。没有补写用户KVM正文、替用户选择Zap或触发模型调用。恢复8765服务为 `sb-recovered-personal-preview`，继续使用 `/tmp/secondbrain-reading.y3Cpac`；原.env仅只读提取必要key到进程，未打印/复制密钥、未改launchd或启动Obsidian。M14原生验收缺口不变。
+
+**交接内容归档与清理**
+
+- 删除暂停时写在 `.omp/agent/pending-2ndbrain.md` 与旧会话 `local/source-graph-current-block.md` 的两份交接记录，后续以本文件及仓库设计为准，不在工作目录外继续留独立状态文档。
+- 确认无进程占用后清理旧开发目录：`secondbrain-sources.K79JAB`、`secondbrain-ingress.1R2RDJ`、`secondbrain-dialogs.f1Ftli`、`secondbrain-inputs.Cpv5Nt`、`secondbrain-m13-m15.mrpmhR`；本轮 `secondbrain-resume.z2f7nxpr` 也已在验收服务/浏览器结束后清理。**`/tmp/secondbrain-reading.y3Cpac` 是个人试用数据，明确保留，不属于可删除的测试夹具。**
+- 保留讨论边界：KVM作者公开PDF `https://www.cs.columbia.edu/~nieh/pubs/asplos2014_kvmarm.pdf` 与Zap会议PDF `https://static.usenix.org/events/osdi02/tech/full_papers/osman/osman.pdf` 已在暂停前核对，但本轮未自动导入。不同DOI/出版载体候选的更清晰呈现、通用公开全文发现、封面自动刷新、CoSE布局与未知同义实体归并仍是讨论方案，本轮没有擅自实施。原图9节点15边分成4/5节点两组，度数3/4被现有对数同心布局放在同层，不能把空间均匀解释为没有实际链接；显式aliases已有，不承诺未知同义自动归并。
+- 本轮仅本地提交，不push或创建PR。

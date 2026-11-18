@@ -157,6 +157,39 @@ def test_abstract_only_is_explicit_not_fabricated_fulltext(monkeypatch):
     assert row["extract_method"] == "abstract_only"
     conn.close()
 
+@pytest.mark.parametrize("remote_abstract", [None, "Short remote summary."])
+def test_selected_abstract_is_not_replaced_by_poorer_doi_metadata(monkeypatch, remote_abstract):
+    doi_url = f"https://doi.org/{DOI}"
+    abstract = "The selected candidate contains a complete abstract about bounded material search."
+    search(monkeypatch, [candidate(url=doi_url, pdf_url=None, abstract=abstract)])
+
+    def handler(request):
+        if request.url.host == "api.semanticscholar.org":
+            return httpx.Response(200, json={
+                "title": TITLE, "authors": [{"name": "Alice Example"}], "year": 2024,
+                "abstract": remote_abstract, "externalIds": {"DOI": DOI},
+            })
+        if request.url.host == "api.crossref.org":
+            return httpx.Response(200, json={"message": {"title": [TITLE]}})
+        return httpx.Response(403)
+
+    with client(handler) as http:
+        result = papers.import_by_name(TITLE, lambda _: None, client=http)
+    assert result["status"] == "abstract_only"
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, result["material_id"])
+        assert row["original_text"] == f"{TITLE}\n\n{abstract}"
+        assert row["summary"] == abstract
+        assert row["content_completeness"] == "abstract"
+        origin = db.material_origins(conn, row["id"])[0]
+        metadata = json.loads(origin["metadata_json"])
+        assert metadata["actual_version"] == "metadata_only"
+        assert metadata["abstract_source"] == "selected_candidate"
+    finally:
+        conn.close()
+
+
 
 def test_no_body_or_abstract_is_failure(monkeypatch):
     search(monkeypatch, [candidate(abstract="")])
