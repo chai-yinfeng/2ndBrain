@@ -49,6 +49,8 @@ def _sources(page: Page) -> set[int]:
 def _marker(page: Page, states: dict, item_ids: set[int]) -> dict | None:
     if page.meta.get("generated_by") != "wiki_ingest":
         return None
+    if type(page.meta.get("merged_into")) is int:
+        return {"status": "withdrawn", "merged_into": page.meta["merged_into"]}
     sources = _sources(page)
     removed = sorted(iid for iid in sources if states.get(iid, {}).get("trashed"))
     if not removed:
@@ -64,9 +66,14 @@ def _marker(page: Page, states: dict, item_ids: set[int]) -> dict | None:
 
 def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
     states = db.lifecycle_states(conn) if conn is not None else {}
+    aliases = {}
+    if conn is not None and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'material_aliases'"
+    ).fetchone():
+        aliases = dict(conn.execute("SELECT alias_id, canonical_id FROM material_aliases"))
     rows = {
         row["id"]: db.item_detail(conn, row["id"])
-        for row in conn.execute("SELECT id FROM items ORDER BY id")
+        for row in conn.execute("SELECT id FROM items ORDER BY id") if row["id"] not in aliases
     } if conn is not None else {}
     inputs = {}
     changes = []
@@ -112,14 +119,14 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
                 continue
         action = (
             "withdraw" if state.get("trashed") else
-            "restore" if lifecycle_pending or not needs_ingest else "ingest"
+            "ingest" if needs_ingest else "restore"
         )
         changes.append({
             "item_id": iid, "title": row["title"], "action": action,
             "reason": (
                 "材料已回收" if state.get("trashed") else
-                "材料已恢复" if lifecycle_pending else
-                "已登记材料的正文或学习笔记需要整理" if needs_ingest else "来源状态需要重新同步"
+                "已登记材料的正文或学习笔记需要整理" if needs_ingest else
+                "材料状态需要同步" if lifecycle_pending else "来源状态需要重新同步"
             ),
             "pages": pages, "needs_ingest": needs_ingest,
             "revision": state.get("revision", 0),
@@ -128,7 +135,9 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
         path.relative_to(wiki.root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(wiki.root.rglob("*.md")) if path.is_file()
     }
-    snapshot = {"inputs": inputs, "states": states, "files": files, "changes": changes}
+    snapshot = {
+        "inputs": inputs, "states": states, "aliases": aliases, "files": files, "changes": changes,
+    }
     token = hashlib.sha256(json.dumps(
         snapshot, ensure_ascii=False, sort_keys=True, default=str,
     ).encode("utf-8")).hexdigest()
@@ -232,7 +241,12 @@ def apply_sync(token: str, echo: Callable[[str], None]) -> dict:
                 wiki.reload_pages()
                 # 新来源可能让既有 unsupported 机器页恢复为 review。
                 states = db.lifecycle_states(conn)
-                current_ids = set(states)
+                current_ids = {
+                    row[0] for row in conn.execute(
+                        "SELECT id FROM items WHERE id NOT IN "
+                        "(SELECT alias_id FROM material_aliases)"
+                    )
+                }
                 for page in wiki.pages.values():
                     affected = _sources(page).intersection(compile_ids)
                     if page.meta.get("generated_by") != "wiki_ingest" or not affected:

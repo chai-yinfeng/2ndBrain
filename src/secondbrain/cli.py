@@ -516,6 +516,29 @@ def items_manage(
     typer.echo(f"已处理 {len(result['changed'])} 份，未变化 {len(result['unchanged'])} 份")
 
 
+@items_app.command("merge")
+def items_merge(
+    canonical_id: int = typer.Argument(help="保留的主材料ID"),
+    duplicate_id: int = typer.Argument(help="重复材料ID；旧ID保留为只读映射"),
+    apply: str | None = typer.Option(None, "--apply", help="应用预览返回的检查点token"),
+) -> None:
+    """凭身份依据预览归并；确认后保留主ID、原件、笔记和历史，不调用模型。"""
+    from secondbrain import material_identity, ops
+
+    try:
+        result = (
+            material_identity.apply_merge(canonical_id, duplicate_id, apply)
+            if apply else material_identity.preview_merge(canonical_id, duplicate_id)
+        )
+    except (ops.OpsError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if not apply:
+        typer.echo(
+            f"确认后执行：sb items merge {canonical_id} {duplicate_id} --apply {result['token']}"
+        )
+
+
 @items_app.command("hide-read")
 def items_hide_read() -> None:
     """隐藏全部已读材料；不改变阅读事实或知识内容，可在已隐藏视图恢复。"""

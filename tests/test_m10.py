@@ -47,8 +47,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ("arxiv", "https://arxiv.org/abs/2611.1", "arxiv_html", "paper"),
         ("rss", "https://arxiv.org/abs/2611.2", "summary", "paper"),
         ("rss", "https://arxiv.org/abs/2611.3", "feed", "paper"),
-        ("rss", "https://blog.example.com/paper.PDF", "pdf", "paper"),
-        ("rss", "https://blog.example.com/post", "pdf", "paper"),
+        ("rss", "https://blog.example.com/paper.PDF", "pdf", "document"),
+        ("rss", "https://blog.example.com/post", "pdf", "document"),
         ("youtube", "https://www.youtube.com/watch?v=x", "transcript", "video"),
         ("rss", "https://youtu.be/abc", "feed", "video"),
         ("rss", "https://blog.example.com/post", "html", "blog"),
@@ -58,6 +58,14 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 )
 def test_item_form(source_type, url, method, expected):
     assert item_form(source_type, url, method) == expected
+
+
+def test_verified_bibliography_classifies_paper_without_treating_every_pdf_as_one():
+    facts = {"kind": "paper", "verified": True}
+    assert item_form(None, "https://author.example/work.pdf", "pdf", bibliography=facts) == "paper"
+    assert item_form(None, "", "manual_pdf") == "document"
+    assert item_form(None, "https://doi.org/10.1234/work", "abstract_only") == "paper"
+    assert item_form(None, "https://example.org/post", "html", doi="10.1234/work") == "paper"
 
 
 def test_chips_keep_other_dimensions():

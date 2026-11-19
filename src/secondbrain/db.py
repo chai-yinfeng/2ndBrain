@@ -11,9 +11,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from secondbrain import config
+from secondbrain.bibliography import compare_bibliography, split_authors
 from secondbrain.models import SourceConfig
 
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+class MaterialMergedError(ValueError):
+    """A historical material ID cannot receive writes after a merge."""
+
+    def __init__(self, item_id: int, canonical_id: int) -> None:
+        self.item_id = item_id
+        self.canonical_id = canonical_id
+        super().__init__(f"材料 #{item_id} 已归并至主材料 #{canonical_id}，请对主 ID 操作")
+
 
 # 每个元素是一个版本的迁移脚本；只能追加，不能修改已发布的脚本。
 MIGRATIONS: list[str] = [
@@ -317,6 +328,24 @@ MIGRATIONS: list[str] = [
         updated_at TEXT NOT NULL
     );
     """,
+    # v15: append-only identity redirects; source rows and historical IDs survive.
+    """
+    CREATE TABLE material_aliases (
+        alias_id INTEGER PRIMARY KEY REFERENCES items(id),
+        canonical_id INTEGER NOT NULL REFERENCES items(id),
+        created_at TEXT NOT NULL,
+        CHECK(alias_id != canonical_id)
+    );
+    CREATE INDEX idx_material_aliases_canonical ON material_aliases(canonical_id);
+    CREATE TABLE material_merges (
+        token TEXT PRIMARY KEY,
+        canonical_id INTEGER NOT NULL REFERENCES items(id),
+        duplicate_id INTEGER NOT NULL REFERENCES items(id),
+        evidence_json TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -518,6 +547,15 @@ def persist_material(
     多个标识指向不同材料时拒绝写入，不擅自合并已存在的身份或转移来源。
     item_id 仅供显式补全已有材料，仍执行相同的身份冲突校验。
     """
+    if item_id is not None:
+        require_canonical(conn, item_id)
+    incoming = dict((item.provenance or {}).get("bibliography") or {})
+    explicit = {"doi": item.doi, "arxiv_id": item.arxiv_id}
+    conflicts = compare_bibliography(incoming, explicit)["conflicts"]
+    if conflicts:
+        raise ValueError("材料身份冲突：" + "、".join(conflicts))
+    item.doi = item.doi or incoming.get("doi")
+    item.arxiv_id = item.arxiv_id or incoming.get("arxiv_id")
     original = item.original_text if item.original_text is not None else item.content
     doi, arxiv_id = discover_ids(original)
     if item.doi and doi and item.doi.lower() != doi:
@@ -577,6 +615,13 @@ def persist_material(
                  identity_text, identity_text, pdf_hash, pdf_hash),
             )
         )
+    candidates = {resolve_material_id(conn, candidate) for candidate in candidates}
+    from secondbrain.material_identity import resolve_existing
+
+    incoming.update(doi=item.doi, arxiv_id=item.arxiv_id)
+    bibliographic = resolve_existing(conn, incoming)
+    if bibliographic is not None:
+        candidates.add(bibliographic)
     if len(candidates) > 1:
         raise ValueError("材料身份冲突：" + "、".join(f"#{i}" for i in sorted(candidates)))
     item_id = next(iter(candidates), None)
@@ -587,6 +632,10 @@ def persist_material(
         for column, value in (("doi", item.doi), ("arxiv_id", item.arxiv_id)):
             if value and old[column] and value != old[column]:
                 raise ValueError(f"材料身份冲突：#{item_id} 的 {column} 不同")
+        previous_bibliography = material_bibliography(conn, item_id)
+        compared = compare_bibliography(incoming, previous_bibliography)
+        if compared["conflicts"]:
+            raise ValueError("材料身份冲突：" + "、".join(compared["conflicts"]))
     resource = _save_original(item.pdf_data, "pdf") if item.pdf_data else None
     text_resource = _save_original(original.encode(), "txt") if original else None
     raw_resource = _save_original(item.raw_data, "html") if item.raw_data else None
@@ -634,6 +683,21 @@ def persist_material(
         elif resource and not str(old["resource_path"] or "").endswith(".pdf"):
             conn.execute("UPDATE items SET resource_path = ? WHERE id = ?", (resource, item_id))
         fill_ids(conn, item_id, item.doi, item.arxiv_id)
+        custom = any(json.loads(row["metadata_json"]).get("display_title_custom")
+                     for row in material_origins(conn, item_id))
+        placeholder = (not old["title"] or old["title"] == old["url"]
+                       or old["title"].startswith(("http://", "https://", "urn:")))
+        if placeholder and not custom and item.title:
+            conn.execute("UPDATE items SET title = ? WHERE id = ?", (item.title, item_id))
+        if not old["author"] and item.author:
+            conn.execute("UPDATE items SET author = ? WHERE id = ?", (item.author, item_id))
+        preprint_upgrade = (
+            previous_bibliography.get("preprint_year") and not previous_bibliography.get("year")
+            and incoming.get("year")
+        )
+        if item.published_at and (not old["published_at"] or preprint_upgrade):
+            conn.execute("UPDATE items SET published_at = ? WHERE id = ?",
+                         (format_time(item.published_at), item_id))
     kind = item.origin_kind or ("subscription" if item.source_id else "url")
     locator = item.origin_locator or item.url or f"sha256:{pdf_hash or fingerprint}"
     conn.execute(
@@ -661,7 +725,7 @@ def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -
 def list_items(
     conn: sqlite3.Connection, since: datetime | None = None, source_id: str | None = None
 ) -> list[sqlite3.Row]:
-    clauses, params = [], []
+    clauses, params = ["id NOT IN (SELECT alias_id FROM material_aliases)"], []
     if since is not None:
         clauses.append("COALESCE(published_at, fetched_at) >= ?")
         params.append(format_time(since))
@@ -700,6 +764,7 @@ def items_by_status(
         f"""
         SELECT {ITEM_COLUMNS} FROM items i JOIN sources s ON s.id = i.source_id
         WHERE i.status IN ({marks}){extra}
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
           AND NOT EXISTS (
               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
           )
@@ -715,6 +780,7 @@ def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
         """
         SELECT COUNT(*) FROM digests d JOIN items i ON i.id = d.item_id
         WHERE d.date = ? AND i.is_backfill = 1 AND d.lane IN ('refresher', 'deferred')
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
           AND NOT EXISTS (
               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
           )
@@ -725,6 +791,8 @@ def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
 
 def set_status(conn: sqlite3.Connection, item_ids: list[int], status: str) -> None:
     assert status in ITEM_STATUSES
+    for item_id in item_ids:
+        require_canonical(conn, item_id)
     conn.executemany("UPDATE items SET status = ? WHERE id = ?", [(status, i) for i in item_ids])
 
 
@@ -737,6 +805,7 @@ def add_assessment(
     model: str | None = None,
     score: float | None = None,
 ) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         "INSERT INTO assessments (item_id, stage, model, data, score, created_at)"
         " VALUES (?, ?, ?, ?, ?, ?)",
@@ -751,6 +820,7 @@ def latest_assessments(conn: sqlite3.Connection, stage: str) -> dict[int, dict]:
         SELECT a.item_id, a.data, a.score, a.model FROM assessments a
         JOIN (SELECT item_id, MAX(id) AS id FROM assessments WHERE stage = ? GROUP BY item_id) m
           ON m.id = a.id
+        WHERE a.item_id NOT IN (SELECT alias_id FROM material_aliases)
         """,
         (stage,),
     ).fetchall()
@@ -767,6 +837,7 @@ def deferred_since(conn: sqlite3.Connection) -> dict[int, str]:
         SELECT d.item_id, COALESCE(d.deferred_from, d.date) AS since FROM digests d
         JOIN items i ON i.id = d.item_id
         WHERE i.status = 'deferred' AND d.lane = 'deferred'
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
           AND NOT EXISTS (
               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
           )
@@ -788,7 +859,8 @@ def day_usage(
     rows = conn.execute(
         "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests d"
         " WHERE date = ? AND NOT EXISTS ("
-        " SELECT 1 FROM material_lifecycle m WHERE m.item_id = d.item_id AND m.trashed = 1)",
+        " SELECT 1 FROM material_lifecycle m WHERE m.item_id = d.item_id AND m.trashed = 1)"
+        " AND d.item_id NOT IN (SELECT alias_id FROM material_aliases)",
         (day,),
     )
     for r in rows:
@@ -799,6 +871,7 @@ def day_usage(
 
 
 def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -> None:
+    require_canonical(conn, placement.item_id)
     conn.execute(
         """
         INSERT INTO digests (date, item_id, lane, rank, est_minutes, is_deep_read, deferred_from,
@@ -831,6 +904,7 @@ def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int
         LEFT JOIN ({LATEST_FEEDBACK}) lf ON lf.item_id = d.item_id
         WHERE d.lane = 'must_read' AND d.date < ? AND i.read_at IS NULL
           AND COALESCE(lf.kind, '') NOT IN ('later', 'dismiss')
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
           AND NOT EXISTS (
               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
           )
@@ -841,6 +915,8 @@ def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int
 
 
 def demote_must_reads(conn: sqlite3.Connection, item_ids: list[int], before_day: str) -> None:
+    for item_id in item_ids:
+        require_canonical(conn, item_id)
     conn.executemany(
         "UPDATE digests SET lane = 'fyi' WHERE item_id = ? AND lane = 'must_read' AND date < ?",
         [(i, before_day) for i in item_ids],
@@ -856,7 +932,9 @@ def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
         FROM digests d JOIN items i ON i.id = d.item_id LEFT JOIN sources s ON s.id = i.source_id
         WHERE d.date = ? AND NOT EXISTS (
             SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
-        ) ORDER BY d.lane, d.rank
+        )
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+        ORDER BY d.lane, d.rank
         """,
         (day,),
     ).fetchall()
@@ -882,6 +960,8 @@ def reading_list_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                   i.reading_state, i.processing_status
            FROM reading_list r JOIN items i ON i.id = r.item_id
            WHERE NOT EXISTS (
+               SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id
+           ) AND NOT EXISTS (
                SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
            )
            ORDER BY r.added_at DESC, i.id DESC"""
@@ -892,6 +972,7 @@ def add_to_reading_list(
     conn: sqlite3.Connection, item_id: int, ts: datetime | None = None
 ) -> None:
     """幂等加入清单，不创建反馈、不改变阅读状态。"""
+    require_canonical(conn, item_id)
     if is_trashed(conn, item_id):
         raise ValueError(f"材料 #{item_id} 已回收，请先恢复")
     conn.execute(
@@ -903,6 +984,7 @@ def add_to_reading_list(
 
 def remove_from_reading_list(conn: sqlite3.Connection, item_id: int) -> None:
     """移出清单，不改变偏好或已读事实。"""
+    require_canonical(conn, item_id)
     conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
     conn.commit()
 
@@ -911,6 +993,7 @@ def add_feedback(
     conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
 ) -> None:
     """记录评价；读后反馈同步已读，读前意愿/撤销不撤销阅读事实。"""
+    require_canonical(conn, item_id)
     assert kind in FEEDBACK_KINDS or kind == CLEAR_KIND
     previous = feedback_state(conn, [item_id])[item_id]
     conn.execute(
@@ -946,14 +1029,22 @@ def toggle_feedback(
 
 def feedback_for(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, kind, note, ts FROM feedback WHERE item_id = ? ORDER BY id", (item_id,)
+        """SELECT id, kind, note, ts, item_id FROM feedback
+           WHERE item_id = ? OR item_id IN
+               (SELECT alias_id FROM material_aliases WHERE canonical_id = ?) ORDER BY id""",
+        (item_id, item_id),
     ).fetchall()
 
 
 # 每个条目最新的一条反馈（即当前状态；kind 为 clear 时表示无状态）
 LATEST_FEEDBACK = """
-    SELECT f.* FROM feedback f
-    JOIN (SELECT item_id, MAX(id) AS id FROM feedback GROUP BY item_id) m ON m.id = f.id
+    SELECT f.id, COALESCE(a.canonical_id, f.item_id) AS item_id, f.kind, f.note, f.ts
+    FROM feedback f LEFT JOIN material_aliases a ON a.alias_id = f.item_id
+    WHERE f.id = (
+        SELECT MAX(f2.id) FROM feedback f2
+        LEFT JOIN material_aliases a2 ON a2.alias_id = f2.item_id
+        WHERE COALESCE(a2.canonical_id, f2.item_id) = COALESCE(a.canonical_id, f.item_id)
+    )
 """
 
 
@@ -1032,10 +1123,14 @@ def item_assessment(conn: sqlite3.Connection, item_id: int, stage: str) -> dict 
 
 
 def ingested_ids(conn: sqlite3.Connection) -> set[int]:
-    return {r[0] for r in conn.execute("SELECT item_id FROM wiki_ingests")}
+    return {r[0] for r in conn.execute(
+        "SELECT item_id FROM wiki_ingests WHERE item_id NOT IN "
+        "(SELECT alias_id FROM material_aliases)"
+    )}
 
 
 def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: datetime) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         "INSERT OR REPLACE INTO wiki_ingests (item_id, ts, pages) VALUES (?, ?, ?)",
         (item_id, format_time(ts), json.dumps(pages, ensure_ascii=False)),
@@ -1103,6 +1198,7 @@ def get_ai(conn: sqlite3.Connection, item_id: int, kind: str) -> dict | None:
 def set_ai(
     conn: sqlite3.Connection, item_id: int, kind: str, data: dict, model: str | None, ts: datetime
 ) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         """
         INSERT INTO item_ai (item_id, kind, data, model, created_at) VALUES (?, ?, ?, ?, ?)
@@ -1156,17 +1252,18 @@ def item_by_canonical(conn: sqlite3.Connection, url_canonical: str) -> int | Non
            UNION SELECT item_id FROM item_sources WHERE canonical = ? LIMIT 1""",
         (url_canonical, url_canonical),
     ).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def item_by_hash(conn: sqlite3.Connection, content_hash: str) -> int | None:
     row = conn.execute(
         "SELECT id FROM items WHERE content_hash = ? LIMIT 1", (content_hash,)
     ).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def set_reading_state(conn: sqlite3.Connection, item_id: int, state: str) -> None:
+    require_canonical(conn, item_id)
     if state not in ("unread", "reading", "read"):
         raise ValueError(f"非法阅读状态：{state}")
     conn.execute(
@@ -1182,6 +1279,7 @@ def set_reading_state(conn: sqlite3.Connection, item_id: int, state: str) -> Non
 
 def mark_read(conn: sqlite3.Connection, item_id: int, ts: datetime) -> None:
     """显式已读，不添加或覆盖评价。"""
+    require_canonical(conn, item_id)
     conn.execute(
         "UPDATE items SET read_at = COALESCE(read_at, ?), reading_state = 'read' WHERE id = ?",
         (format_time(ts), item_id),
@@ -1202,16 +1300,17 @@ def record_homepage(conn: sqlite3.Connection, source_id: str, homepage: str) -> 
 
 def item_by_doi(conn: sqlite3.Connection, doi: str) -> int | None:
     row = conn.execute("SELECT id FROM items WHERE doi = ? LIMIT 1", (doi.lower(),)).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def item_by_arxiv(conn: sqlite3.Connection, arxiv_id: str) -> int | None:
     row = conn.execute("SELECT id FROM items WHERE arxiv_id = ? LIMIT 1", (arxiv_id,)).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def fill_ids(conn: sqlite3.Connection, item_id: int, doi: str | None, arxiv_id: str | None) -> None:
     """补上缺失的 doi / arxiv_id（已有的不覆盖）。"""
+    require_canonical(conn, item_id)
     conn.execute(
         "UPDATE items SET doi = COALESCE(doi, ?), arxiv_id = COALESCE(arxiv_id, ?) WHERE id = ?",
         (doi.lower() if doi else None, arxiv_id, item_id),
@@ -1228,6 +1327,8 @@ def incomplete_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         SELECT i.id, i.title, i.url, i.source_id, i.extract_method,
                length(i.content) AS content_len, i.doi, i.arxiv_id
         FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS (
+            SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id
+        ) AND NOT EXISTS (
             SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
         ) ORDER BY i.id DESC
         """
@@ -1238,6 +1339,7 @@ def incomplete_ids(conn: sqlite3.Connection) -> set[int]:
     return {
         r[0] for r in conn.execute(
             f"SELECT i.id FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS ("
+            "SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id) AND NOT EXISTS ("
             "SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1)"
         )
     }
@@ -1283,6 +1385,7 @@ def is_trashed(conn: sqlite3.Connection, item_id: int) -> bool:
 
 def acknowledge_lifecycle(conn: sqlite3.Connection, item_id: int, revision: int) -> bool:
     """只确认同步所见的版本；不提交事务，不覆盖同步期间的新操作。"""
+    require_canonical(conn, item_id)
     changed = conn.execute(
         """UPDATE material_lifecycle SET synced_revision = ?
            WHERE item_id = ? AND revision = ?""",
@@ -1293,3 +1396,55 @@ def acknowledge_lifecycle(conn: sqlite3.Connection, item_id: int, revision: int)
     return revision == 0 and item_exists(conn, item_id) and conn.execute(
         "SELECT 1 FROM material_lifecycle WHERE item_id = ?", (item_id,)
     ).fetchone() is None
+
+
+def resolve_material_id(conn: sqlite3.Connection, item_id: int) -> int:
+    seen = set()
+    while item_id not in seen:
+        seen.add(item_id)
+        row = conn.execute(
+            "SELECT canonical_id FROM material_aliases WHERE alias_id = ?", (item_id,)
+        ).fetchone()
+        if row is None:
+            return item_id
+        item_id = row[0]
+    raise ValueError("材料归并映射存在循环")
+
+
+def require_canonical(conn: sqlite3.Connection, item_id: int) -> None:
+    canonical = resolve_material_id(conn, item_id)
+    if canonical != item_id:
+        raise MaterialMergedError(item_id, canonical)
+
+
+def material_bibliography(conn: sqlite3.Connection, item_id: int) -> dict:
+    row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        return {}
+    facts = {}
+    for source in material_origins(conn, item_id):
+        record = json.loads(source["metadata_json"]).get("bibliography") or {}
+        conflicts = compare_bibliography(facts, record)["conflicts"]
+        if conflicts:
+            raise ValueError(f"材料 #{item_id} 的来源书目冲突：" + "、".join(conflicts))
+        evidence = list(dict.fromkeys([*facts.get("evidence", []), *record.get("evidence", [])]))
+        facts.update({key: value for key, value in record.items() if value})
+        if evidence:
+            facts["evidence"] = evidence
+    # Only identifier-backed stored metadata supplies bibliographic evidence.
+    stored = {"doi": row["doi"], "arxiv_id": row["arxiv_id"]}
+    if row["doi"] or row["arxiv_id"]:
+        stored.update(
+            title=row["title"], authors=split_authors(row["author"] or ""),
+            year=(int(row["published_at"][:4]) if row["published_at"] and not (
+                facts.get("preprint_year") and not facts.get("year")
+            ) else None),
+            evidence=["stored:public-identifier"],
+        )
+    conflicts = compare_bibliography(facts, stored)["conflicts"]
+    if conflicts:
+        raise ValueError(f"材料 #{item_id} 的保存书目冲突：" + "、".join(conflicts))
+    for key, value in stored.items():
+        if value and not facts.get(key):
+            facts[key] = value
+    return facts

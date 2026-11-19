@@ -25,7 +25,7 @@ POST = "https://blog.example.com/post"
 OTHER = "https://blog.example.com/other"
 DOWN = "https://down.example.com/paywalled"
 LONG_HTML = (
-    "<html><head><title>A long arXiv paper</title></head><body><article>"
+    "<html><head><title>Speculative Decoding at Scale</title></head><body><article>"
     + "".join(
         f"<p>Section {n}: speculative decoding detail number {n} and KV cache.</p>"
         for n in range(60)
@@ -39,6 +39,7 @@ ROUTES = {
         200, content=fixture_bytes("arxiv_api.xml")
     ),
     "https://arxiv.org/html/2611.01234": httpx.Response(200, content=LONG_HTML),
+    "https://arxiv.org/html/2611.01234v3": httpx.Response(200, content=LONG_HTML),
 }
 
 

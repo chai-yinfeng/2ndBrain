@@ -12,7 +12,7 @@ from conftest import fast_settings, make_pdf
 from secondbrain import config, db, ops, papers
 from secondbrain.llm.base import LLMError, Usage
 from secondbrain.llm.fake import FakeBackend
-from secondbrain.models import ModelPrice
+from secondbrain.models import ModelPrice, RawEntry
 from secondbrain.net import FetchError, HttpClient
 from secondbrain.wiki.graph import build_graph
 from secondbrain.wiki.store import open_wiki
@@ -645,3 +645,243 @@ def test_paper_fulltext_result_and_origin_share_acquisition(monkeypatch):
         assert provenance["actual_url"] == acquisition["actual_url"]
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("short_title", ["Bounded", "Bounded Material"])
+def test_shared_identifier_merges_short_and_complete_provider_titles(monkeypatch, short_title):
+    short = candidate(title=short_title)
+    complete = candidate(provider="crossref")
+    monkeypatch.setattr(papers, "_s2", lambda *_: [short])
+    monkeypatch.setattr(papers, "_crossref", lambda *_: [complete])
+    for provider in ("_arxiv", "_openalex", "_usenix"):
+        monkeypatch.setattr(papers, provider, lambda *_: [])
+    found, errors, _ = papers._search(TITLE, None)
+    assert errors == [] and len(found) == 1
+    assert found[0]["title"] == TITLE
+    assert {record["title"] for record in found[0]["records"]} == {short_title, TITLE}
+    assert papers._description_match(TITLE, found[0])
+    assert papers._description_match(short_title, found[0])
+
+
+@pytest.mark.parametrize("change", [
+    {"doi": "10.1234/other"}, {"doi": None}, {"authors": ["Bob Other"]},
+    {"year": 2023}, {"version": "v2"},
+])
+def test_short_titles_do_not_hide_identifier_author_year_or_version_conflicts(change):
+    first = candidate(title="Bounded", version="v1")
+    second = candidate(**change)
+    assert not papers._same_record(first, second)
+
+
+def test_grouped_metadata_keeps_conflicts_from_original_provider_records():
+    first = candidate(year=None, authors=[])
+    first["records"].append(candidate(year=2023))
+    assert not papers._same_record(first, candidate(year=2024))
+
+
+def bibliographic_fetch(**changes):
+    bibliography = {
+        "title": TITLE, "authors": ["Alice Example"], "year": 2024, "venue": "OSDI",
+        "doi": DOI, "arxiv_id": None, "kind": "paper", "verified": True,
+        "evidence": ["physical_page_header"],
+        **changes,
+    }
+    entry = RawEntry(url=PDF, title=bibliography["title"], bibliography=bibliography)
+    return ops.ManualFetched(entry, BODY, "pdf", URL, completeness="full")
+
+
+def test_downloaded_complete_bibliographic_title_survives_short_provider_metadata():
+    fetched = bibliographic_fetch()
+    papers._check_identity(candidate(title="Bounded"), fetched)
+    assert fetched.entry.title == TITLE
+    assert fetched.entry.bibliography["title"] == TITLE
+    assert fetched.entry.bibliography["verified"] is True
+
+
+@pytest.mark.parametrize("changes", [
+    {"authors": ["Bob Other"]}, {"year": 2023}, {"doi": "10.1234/other"},
+])
+def test_downloaded_bibliographic_conflicts_reject_even_a_shared_title(changes):
+    with pytest.raises(ValueError, match="身份冲突"):
+        papers._check_identity(candidate(), bibliographic_fetch(**changes))
+
+
+def test_short_and_full_download_titles_without_shared_identifier_are_not_proof():
+    fetched = bibliographic_fetch(doi=None)
+    with pytest.raises(ValueError, match="身份冲突"):
+        papers._check_identity(candidate(title="Bounded", doi=None), fetched)
+
+
+def test_full_local_material_is_reused_without_network_and_records_selection(monkeypatch):
+    search(monkeypatch, [candidate(version="published")])
+    with client() as http:
+        first = papers.import_by_name(TITLE, lambda _: None, client=http)
+    assert first["status"] == "imported"
+    requested = []
+    with client(lambda request: requested.append(str(request.url)) or httpx.Response(503)) as http:
+        second = papers.import_by_name(TITLE, lambda _: None, client=http)
+    assert requested == []
+    assert second["material_id"] == first["material_id"]
+    assert second["search_id"] != first["search_id"]
+    assert second["acquisition"]["source"] == "existing_material"
+    assert second["acquisition"]["version"] == "unknown"
+    conn = db.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM paper_import_attempts").fetchone()[0] == 2
+        origins = db.material_origins(conn, first["material_id"])
+        assert len(origins) == 2
+        metadata = json.loads(origins[-1]["metadata_json"])
+        assert metadata["existing_material_id"] == first["material_id"]
+        assert metadata["actual_version"] == "unknown"
+        assert metadata["provider_version"] == "published"
+        assert metadata["source_acquisition"]["actual_url"] == PDF
+    finally:
+        conn.close()
+
+
+def test_explicit_arxiv_version_does_not_reuse_unknown_local_version(monkeypatch):
+    search(monkeypatch, [candidate()])
+    with client() as http:
+        first = papers.import_by_name(TITLE, lambda _: None, client=http)
+    conn = db.connect()
+    try:
+        assert first["status"] == "imported"
+        assert papers._reuse_candidate(candidate(version="v2"), conn) is None
+    finally:
+        conn.close()
+
+
+def test_structured_candidate_bibliography_retains_provider_evidence():
+    selected = candidate(doi=None, provider="openalex")
+    selected["records"].append(candidate(doi=None, provider="usenix"))
+    facts = papers._candidate_bibliography(selected)
+    assert facts["verified"] is True
+    assert facts["authors"] == ["Alice Example"]
+    assert facts["evidence"] == [f"openalex:{URL}", f"usenix:{URL}"]
+    assert papers._candidate_bibliography(candidate(authors=[]))["verified"] is False
+
+
+def test_download_without_header_keeps_evidenced_candidate_fields():
+    fetched = ops.ManualFetched(RawEntry(url=PDF, title=PDF), BODY, "pdf", URL)
+    papers._check_identity(candidate(doi=None), fetched)
+    assert fetched.entry.bibliography["authors"] == ["Alice Example"]
+    assert fetched.entry.bibliography["year"] == 2024
+    assert fetched.entry.bibliography["verified"] is True
+
+
+def test_metadata_only_fallback_persists_structured_bibliography(monkeypatch):
+    search(monkeypatch, [candidate()])
+    with client(lambda _: httpx.Response(403)) as http:
+        result = papers.import_by_name(TITLE, lambda _: None, client=http)
+    conn = db.connect()
+    try:
+        facts = db.material_bibliography(conn, result["material_id"])
+        assert facts["verified"] is True
+        assert facts["evidence"] == [f"semantic_scholar:{URL}"]
+        assert facts["doi"] == DOI
+    finally:
+        conn.close()
+
+
+def test_identifier_free_evidenced_fulltext_reuses_same_identity(monkeypatch):
+    search(monkeypatch, [candidate(doi=None, provider="openalex")])
+    with client() as http:
+        first = papers.import_by_name(TITLE, lambda _: None, client=http)
+    requested = []
+    with client(lambda request: requested.append(str(request.url)) or httpx.Response(503)) as http:
+        second = papers.import_by_name(TITLE, lambda _: None, client=http)
+    assert first["status"] == second["status"] == "imported"
+    assert requested == []
+    assert first["material_id"] == second["material_id"]
+
+
+def test_local_reuse_preserves_actual_version_and_original_body_source():
+    conn = db.connect()
+    try:
+        fetched = bibliographic_fetch()
+        fetched.acquisition = {
+            "requested_url": URL, "actual_url": PDF, "status": "full",
+            "method": "pdf", "version": "v1", "attempts": [],
+        }
+        _, _, fs = ops._settings()
+        material_id, _, _ = db.persist_material(
+            conn, ops._material(fetched, fs), NOW,
+        )
+        conn.commit()
+        reused, provenance, errors = papers._reuse_candidate(candidate(version="published"), conn)
+        assert errors == []
+        assert reused.content == BODY
+        assert reused.acquisition["version"] == "v1"
+        assert reused.acquisition["actual_url"] == PDF
+        assert provenance["existing_material_id"] == material_id
+        assert provenance["provider_version"] == "published"
+        assert provenance["actual_version"] == "v1"
+        assert provenance["source_acquisition"] == fetched.acquisition
+    finally:
+        conn.close()
+
+
+def test_local_reuse_binds_selected_identifier_before_a_conflicting_choice():
+    conn = db.connect()
+    try:
+        _, _, fs = ops._settings()
+        source = bibliographic_fetch(doi=None)
+        material_id, _, _ = db.persist_material(conn, ops._material(source, fs), NOW)
+        conn.commit()
+        reused, _, _ = papers._reuse_candidate(candidate(), conn)
+        assert reused.entry.doi == DOI
+        assert reused.entry.bibliography["doi"] == DOI
+        selected_id, _, _ = db.persist_material(conn, ops._material(reused, fs), NOW)
+        conn.commit()
+        assert selected_id == material_id
+        assert db.item_detail(conn, material_id)["doi"] == DOI
+        assert papers._reuse_candidate(candidate(doi="10.1234/another-edition"), conn) is None
+    finally:
+        conn.close()
+
+
+def test_arxiv_candidate_dates_do_not_conflict_with_publication_year():
+    preprint = candidate(provider="arxiv", year=2023, arxiv_id="2301.12345")
+    published = candidate(provider="crossref", year=2024, arxiv_id="2301.12345")
+    assert papers._same_record(preprint, published)
+    preprint["records"].append(published)
+    facts = papers._candidate_bibliography(preprint)
+    assert facts["year"] == 2024
+    assert facts["preprint_year"] == 2023
+
+
+def test_selected_publication_year_upgrades_only_the_preprint_date():
+    fetched = bibliographic_fetch(year=None, preprint_year=2022)
+    fetched.entry.published_at = datetime(2022, 11, 30, tzinfo=UTC)
+    papers._check_identity(candidate(year=2024), fetched)
+    assert fetched.entry.published_at == datetime(2024, 1, 1, tzinfo=UTC)
+    assert fetched.entry.bibliography["preprint_year"] == 2022
+    assert fetched.entry.bibliography["year"] == 2024
+
+
+def test_arxiv_record_keeps_physical_publication_year():
+    fetched = bibliographic_fetch(year=2024)
+    fetched.entry.published_at = datetime(2024, 5, 1, tzinfo=UTC)
+    papers._check_identity(candidate(provider="arxiv", year=2023), fetched)
+    assert fetched.entry.published_at == datetime(2024, 5, 1, tzinfo=UTC)
+    assert fetched.entry.bibliography["year"] == 2024
+    assert fetched.entry.bibliography["preprint_year"] == 2023
+
+
+@pytest.mark.parametrize("second_id,expected", [(None, "2401.12345"), ("2402.12345", None)])
+def test_openalex_explicit_arxiv_locations_provide_only_unique_identity(second_id, expected):
+    locations = [{"landing_page_url": "http://arxiv.org/abs/2401.12345"}]
+    if second_id:
+        locations.append({"landing_page_url": f"https://arxiv.org/abs/{second_id}"})
+    data = {"results": [{
+        "display_name": TITLE, "publication_year": 2024, "doi": DOI,
+        "authorships": [{"author": {"display_name": "Alice M. Example"}}],
+        "locations": locations,
+    }]}
+    with client(lambda _: httpx.Response(200, json=data)) as http:
+        selected = papers._openalex(TITLE, http)[0]
+    assert selected["arxiv_id"] == expected
+    if expected:
+        fetched = bibliographic_fetch(doi=None, arxiv_id=expected)
+        papers._check_identity(selected, fetched)
+        assert fetched.entry.arxiv_id == expected

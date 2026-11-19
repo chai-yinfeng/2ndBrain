@@ -489,3 +489,25 @@ def test_running_task_cannot_be_closed_from_feedback(paper_env):
     finally:
         gate.set()
         task.thread.join(timeout=10)
+
+
+def test_cli_shared_identifier_short_metadata_is_one_saved_candidate(paper_env, monkeypatch):
+    short = papers._candidate(
+        title="Surface", provider="crossref", authors=["Ada Example"], year=2024,
+        doi="10.1234/surface-one", url="https://doi.org/10.1234/surface-one",
+        version="published",
+    )
+    monkeypatch.setattr(papers, "_crossref", lambda *_: [short])
+    result = CliRunner().invoke(cli_app, ["paper", "add", TITLE])
+    assert result.exit_code == 0, result.output
+    assert "abstract_only" in result.output
+    conn = db.connect()
+    try:
+        saved = conn.execute("SELECT candidates_json FROM paper_searches").fetchone()
+        candidates = json.loads(saved["candidates_json"])
+        assert len(candidates) == 1
+        assert candidates[0]["title"] == TITLE
+        assert {record["title"] for record in candidates[0]["records"]} == {TITLE, "Surface"}
+        assert len(rows()) == 1
+    finally:
+        conn.close()

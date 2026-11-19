@@ -403,3 +403,31 @@ def test_source_added_during_ingestion_keeps_shared_concept_visible(env, monkeyp
     node = next(node for node in build_graph(wiki, TODAY)["nodes"] if node["id"] == page.slug)
     assert node["material_sync_status"] == "review" and added[0] in node["sources"]
     assert page.slug in {p.slug for p in due_concepts(wiki, TODAY)}
+
+
+def test_sync_never_recompiles_or_restores_a_merged_historical_material(env, monkeypatch):
+    conn, wiki = env
+    canonical, duplicate = material(conn, "main"), material(conn, "old")
+    compiled(wiki, conn, canonical)
+    historical = compiled(wiki, conn, duplicate)
+    historical.meta.update(
+        merged_into=canonical, sources=[canonical],
+        material_sync={"status": "withdrawn", "merged_into": canonical},
+    )
+    wiki.save_metadata(historical)
+    before = historical.path.read_bytes()
+    conn.execute("INSERT INTO material_aliases VALUES (?, ?, ?)",
+                 (duplicate, canonical, NOW.isoformat()))
+    conn.commit()
+    no_model(monkeypatch)
+    assert sync.preview_sync()["changes"] == []
+    lifecycle(conn, canonical, True)
+    assert {change["item_id"] for change in sync.preview_sync()["changes"]} == {canonical}
+    apply()
+    lifecycle(conn, canonical, False)
+    apply()
+    wiki.reload_pages()
+    assert historical.path.read_bytes() == before
+    assert wiki.pages[historical.slug].material_sync_status == "withdrawn"
+    assert not wiki.pages[historical.slug].is_visible
+    assert sync.preview_sync()["changes"] == []

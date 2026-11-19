@@ -131,3 +131,30 @@ def test_clear_finished_history_retains_running_and_waiting_and_survives_restart
     assert restarted.state.tasks.get(done.id).dismissed
     assert restarted.state.tasks.get(failed.id).dismissed
     assert not restarted.state.tasks.get(waiting.id).dismissed
+
+
+def test_merged_material_redirects_old_links_and_rejects_stale_writes(monkeypatch):
+    monkeypatch.setenv("SB_LLM_BACKEND", "fake")
+    canonical, duplicate = reference("canonical"), reference("duplicate")
+    with closing(db.connect()) as conn:
+        conn.execute(
+            "INSERT INTO material_aliases VALUES (?, ?, ?)",
+            (duplicate, canonical, "2026-11-18T00:00:00+00:00"),
+        )
+        conn.commit()
+        before = dict(db.item_detail(conn, canonical))
+    with TestClient(create_app()) as client:
+        response = client.get(f"/item/{duplicate}", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == f"/item/{canonical}"
+        assert f'data-item-id="{duplicate}"' not in client.get("/materials").text
+        assert client.post(f"/reading/{duplicate}/add").status_code == 409
+        assert client.post(
+            f"/item/{duplicate}/reading", data={"state": "reading"}
+        ).status_code == 409
+        assert client.post(
+            f"/item/{duplicate}/reading", data={"state": "read"}
+        ).status_code == 409
+    with closing(db.connect()) as conn:
+        assert dict(db.item_detail(conn, canonical)) == before
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0

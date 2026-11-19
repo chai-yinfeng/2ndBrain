@@ -8,7 +8,8 @@
   </header>
   <p class="meta">
     {{ item.source_id or "主动导入" }}{% if item.source_id %}（trust {{ item.trust }} · {{ item.role }}）{% endif %}
-    {% if item.author %}· {{ item.author }}{% endif %}
+    · <span class="tag">{{ {"paper":"论文","document":"文档","blog":"博客","video":"视频"}.get(material_form, "材料") }}</span>
+    {% if item.author %}· <span title="{{ item.author }}">{{ item.author|truncate(180, false, "…") }}</span>{% endif %}
     · 发布 {{ item.published_at or "未知" }} · 正文 {{ item.content_len }} 字符
     {% if item.duration_seconds %}· 时长 {{ (item.duration_seconds / 60) | round | int }} 分钟{% endif %}
     {% if item.extract_method == "no_transcript" %}· <span class="tag">无字幕</span>{% endif %}
@@ -16,6 +17,13 @@
     · <span class="tag reading-state" data-reading-state="{{ item.reading_state }}">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(item.reading_state, item.reading_state) }}</span>{% if item.read_at %} · {{ item.read_at }}{% endif %}
     {% if incomplete %}· <span class="tag warn" data-incomplete>正文不完整</span>{% endif %}
   </p>
+  {% if bibliography %}
+  <details class="panel"><summary>书目信息与身份依据</summary>
+    <p class="help">文档格式不等于论文身份；以下信息来自文档或公开书目记录，不表示已核验出版版本。</p>
+    <dl class="wiki-facts"><dt>书目标题</dt><dd>{{ bibliography.get("title") or "未知" }}</dd><dt>作者</dt><dd>{{ bibliography.get("authors", [])|join("、") or "未知" }}</dd><dt>年份 / 出版信息</dt><dd>{{ bibliography.get("year") or "未知" }} · {{ bibliography.get("venue") or "未取得" }}</dd><dt>DOI / arXiv</dt><dd>{{ bibliography.get("doi") or "—" }} / {{ bibliography.get("arxiv_id") or "—" }}</dd></dl>
+    {% if bibliography.get("evidence") %}<ul class="meta break-anywhere">{% for evidence in bibliography.evidence %}<li>{{ evidence }}</li>{% endfor %}</ul>{% endif %}
+  </details>
+  {% endif %}
   {% if lifecycle.trashed %}<section class="panel"><h2>材料已在回收区</h2><p>原件、阅读记录和笔记仍保留。恢复后可继续阅读、补全文或整理；知识变更需单独预览同步。</p><form method="post" action="/materials/manage"><input type="hidden" name="item_ids" value="{{ item.id }}"><button class="fb" name="action" value="restore">恢复到默认列表</button></form>{% if notes %}<details><summary>保留的个人笔记</summary><pre class="original-content">{{ notes }}</pre></details>{% endif %}</section>{% elif lifecycle.hidden %}<p class="meta">此材料已从默认列表隐藏；阅读与知识内容保持不变。</p>{% endif %}
   {% if not lifecycle.trashed %}
   <section id="register-read" class="panel form-panel">

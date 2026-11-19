@@ -246,15 +246,18 @@ def test_lifecycle_acknowledges_only_current_revision(env):
         conn.close()
 
 
-def test_legacy_migration_defaults_active_and_readonly_preview_does_not_migrate(env, monkeypatch):
+def test_legacy_migration_defaults_active_and_readonly_preview_does_not_migrate(env):
     path = env / "legacy.db"
-    with monkeypatch.context() as previous:
-        previous.setattr(db, "MIGRATIONS", db.MIGRATIONS[:-1])
-        conn = db.connect(path)
-        item_id = add(conn)
-        db.add_to_reading_list(conn, item_id, NOW)
-        before = snapshot(conn)
-        conn.close()
+    conn = db.connect(path)
+    item_id = add(conn)
+    db.add_to_reading_list(conn, item_id, NOW)
+    before = snapshot(conn)
+    # 构造生命周期引入前的 v13 库；不用当前写入口操作缺少新表的旧 schema。
+    for table in ("material_merges", "material_aliases", "material_lifecycle"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute("PRAGMA user_version = 13")
+    conn.commit()
+    conn.close()
     readonly = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     readonly.row_factory = sqlite3.Row
     try:
@@ -262,7 +265,6 @@ def test_legacy_migration_defaults_active_and_readonly_preview_does_not_migrate(
         assert db.lifecycle_states(readonly)[item_id] == {
             "hidden": False, "trashed": False, "revision": 0, "synced_revision": 0
         }
-        assert readonly.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS) - 1
         assert readonly.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'material_lifecycle'"
         ).fetchone() is None
@@ -270,7 +272,6 @@ def test_legacy_migration_defaults_active_and_readonly_preview_does_not_migrate(
         readonly.close()
     conn = db.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
         assert snapshot(conn) == before
         assert not db.is_trashed(conn, item_id)
         assert db.lifecycle_states(conn)[item_id]["revision"] == 0

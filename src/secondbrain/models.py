@@ -112,6 +112,7 @@ class RawEntry:
     # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
     page_meta: bool = False
     categories: list[str] = field(default_factory=list)
+    bibliography: dict = field(default_factory=dict)
 
 
 # ---------- M2：LLM 与过滤 / 分级设置 ----------

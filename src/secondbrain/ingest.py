@@ -12,6 +12,7 @@ from typing import Literal
 from pypdf.errors import PyPdfError
 
 from secondbrain import db
+from secondbrain.bibliography import apply_bibliography, entry_bibliography
 from secondbrain.extract import transcript
 from secondbrain.extract.html import extract_main_text, html_fragment_to_text
 from secondbrain.extract.pdf import extract_pdf_text
@@ -99,6 +100,8 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
     if not isinstance(client, ContentCapture):
         client = ContentCapture(client)
     if entry.arxiv_id:
+        if not entry.bibliography and entry.author:
+            apply_bibliography(entry, entry_bibliography(entry, evidence="arxiv:api"))
         try:
             resp = client.get(f"https://arxiv.org/html/{entry.arxiv_id}",
                               max_bytes=fs.pdf_max_bytes)
@@ -110,6 +113,8 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
             text = None if blocked else extract_main_text(resp.text, url=str(resp.url))
             if text and len(text) >= MIN_ARXIV_HTML_CHARS:
                 client.select(resp, raw_data=resp.content, completeness="full")
+                if entry.doi or entry.arxiv_id:
+                    apply_bibliography(entry, entry_bibliography(entry, evidence="arxiv:api"))
                 return text, "arxiv_html"
         except FetchError:
             pass
@@ -117,6 +122,7 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
             text = _pdf_text(client, f"https://arxiv.org/pdf/{entry.arxiv_id}", fs)
             if text:
                 client.select(client.last_response)
+                apply_bibliography(entry, client.pdf_metadata.get("bibliography", {}))
                 return text, "pdf"
         except (FetchError, PyPdfError):
             pass
@@ -134,6 +140,7 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
                 entry.published_at = page.published_at or entry.published_at
             entry.doi = entry.doi or page.doi
             entry.arxiv_id = entry.arxiv_id or page.arxiv_id
+            apply_bibliography(entry, page.bibliography)
             if text:
                 return text, method
         except (FetchError, PyPdfError, ManualFetchError):
@@ -213,6 +220,10 @@ def collect(
                 notes.append(note)
         else:
             text, method = extract_content(entry, capture, fs)
+        if capture.pdf_data:
+            apply_bibliography(entry, capture.pdf_metadata.get("bibliography", {}))
+        if not entry.bibliography and (entry.doi or entry.arxiv_id):
+            apply_bibliography(entry, entry_bibliography(entry, evidence="structured-source"))
         original = text
         maximum = fs.transcript_max_chars if entry.video_id else fs.content_max_chars
         text = original[:maximum]
@@ -230,6 +241,8 @@ def collect(
         provenance = {} if entry.video_id else {
             "acquisition": _acquisition(entry.url, capture, method, completeness)
         }
+        if entry.bibliography:
+            provenance["bibliography"] = entry.bibliography
         items.append(
             db.NewItem(
                 source_id=source.id,

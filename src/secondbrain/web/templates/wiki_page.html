@@ -10,7 +10,8 @@
 <article class="detail wiki-article" data-wiki-page="{{ page.slug }}">
   <nav class="wiki-breadcrumb" aria-label="面包屑"><a href="/wiki">知识库</a><span aria-hidden="true">/</span><span>{{ page.type }}</span><span aria-hidden="true">/</span><span>{{ page.title }}</span></nav>
   <header class="page-header"><div><p class="eyebrow">{{ page.type }} / KNOWLEDGE PAGE</p><h1>{{ page.title }}</h1><p class="meta">{{ {"recorded":"来源材料已登记阅读，不代表掌握","draft":"机器草稿（未登记阅读）","legacy":"历史知识页（未记录登记状态）"}.get(page.knowledge_status) }}</p></div><div class="page-actions"><a class="fb" href="/wiki/graph?focus={{ page.slug|urlencode }}{% if not page.is_visible %}&amp;drafts=1{% endif %}">在知识网络中定位</a><a class="fb" href="/wiki/graph{% if not page.is_visible %}?drafts=1{% endif %}">全局概览</a></div></header>
-  {% if page.material_sync_status %}<p class="refresh panel" role="status">{{ {'withdrawn':'来源材料已回收，此自动材料页已从正式目录撤下；正文和个人内容仍保留。','unsupported':'没有有效来源，此机器内容保留待复核，不进入正式知识网络。','review':'部分来源已回收；共享知识保留，内容需要复核。'}.get(page.material_sync_status) }} <a href="/wiki/sync">查看知识变更</a></p>{% endif %}
+  {% if page.meta.get("merged_into") %}<p class="refresh panel" role="status">此历史材料页已归并，正文与人工内容仍保留；正式知识网络使用 <a href="/item/{{ page.meta.merged_into }}">主材料 #{{ page.meta.merged_into }}</a>。旧页面链接继续可用。</p>
+  {% elif page.material_sync_status %}<p class="refresh panel" role="status">{{ {'withdrawn':'来源材料已回收，此自动材料页已从正式目录撤下；正文和个人内容仍保留。','unsupported':'没有有效来源，此机器内容保留待复核，不进入正式知识网络。','review':'部分来源已回收；共享知识保留，内容需要复核。'}.get(page.material_sync_status) }} <a href="/wiki/sync">查看知识变更</a></p>{% endif %}
   <div class="wiki-page-layout">
     <div class="wiki-reading-column">
       <section class="wiki-body panel wiki-prose">{{ body_html | safe }}</section>

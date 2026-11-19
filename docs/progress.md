@@ -943,3 +943,49 @@
 - 按服务实际状态确认无执行中任务后停服，完整备份到 `~/Library/Application Support/SecondBrain/migration-backups/before-material-management-20261118-133940`：92文件摘要一致，两份SQLite完整性正常。业务库13→14仅新增生命周期表，所有旧表记录逐项一致，生命周期行0；所有知识正文、raw和notes字节保持，只重新生成派生index以去掉冗余标签。
 - 新服务 **`sb-managed-personal-preview`** 继续8765及既有持久工作区，必要key仍只读注入进程，不改原.env、launchd或启动Obsidian。材料/回收区/知识页/同步预览/历史/高级图谱均HTTP200；默认9份材料、清单6条、生命周期0行、用量15条，与升级前一致。本轮没有自动隐藏、回收、清理用户历史或调用真实模型。
 - 验收服务/浏览器关闭后，隔离目录、脚本和临时截图已清理；持久数据与明确命名的升级前备份保留。M14原生验收缺口保持，仅本地提交，不merge/push/PR。
+
+## PDF 书目身份、Zap 归并与课程论文（ADR 0028）
+
+**实现与验证**
+
+- PDF物理首页布局提取题名、作者和出版信息，跳过封面、机构、脚注及垃圾Info；HTML保留逐条citation作者，低质量标题可回退可见标题。arXiv API失败可读官方abs的标准citation元数据；不加单站规则或OCR。预印本年与出版年分开，明确出版年冲突不放松。论文名候选保留共同公共标识及原provider记录；实际下载与本地全文复用都校验书目并保存所选标识，不将未知文件版本改称出版版本。
+- schema v15追加旧ID映射与归并记录。`items merge 主ID 重复ID`先给检查点，应用保留原件、反馈、笔记和历史机器正文（含CRLF）；不同非空笔记或过期检查点拒绝。主材料pending并递增revision，旧ID链接跳转、修改请求409；同步不复活旧页。提交后重建派生索引，失败明确“归并已提交，请reindex”，不声称回滚。材料列表与详情显示论文/文档和书目依据，多作者摘要紧凑显示，完整名单仍在详情。
+- `uv run pytest -q tests/test_material_management_web.py tests/test_wiki_sync.py tests/test_material_lifecycle.py tests/test_m10.py` **69 passed**。书目/导入分组（`test_bibliographic_identity / test_paper_search / test_paper_surfaces / test_public_fulltext / test_paper_import / test_manual_add / test_materials / test_material_web`）首轮 **161 passed、1 failed**；失败为显式v3请求的旧夹具只有无版本HTML地址，补真实v3响应后该项 **1 passed**。随后标识绑定、出版/预印本日期、已有正文/版本保持与归并的定向 **7 passed**；OpenAlex明确arXiv地址提取 **2 passed**。相关Python Ruff问题逐项修正后通过，未跑全套。
+- 真实公开响应下载后在隔离库回放，初次40格为22待选择、6仅摘要、4冲突、8导入，不是20/20自动成功；保留初次与修复后的定向结果。修正PDF作者提取、所选ID未绑定、预印本/出版年混用、OpenAlex丢失明确arXiv标识等根因。无共同标识的真实姓名差异、错误作者或不同出版记录仍不自动合并。
+- 隔离个人副本实际CLI预览/应用8←10，Zap保留主ID8并从摘要补成90843字符全文、旧10保留，模型用量24条不变。实际浏览器1280/390验证书目、旧链接跳转与历史页提示；真实库上线后材料27项、清单8项可见，无应用脚本错误。TPU多作者行从桌面241px收敛到87px，窄屏页面宽390无横溢，详情仍保留Daniel Killebrew。
+
+**课程逐篇结果**
+
+用户声明前18篇已读，最后两篇稍后读。以下“标题入口”是缓存公开响应的双顺序回放及必要候选选择，不是20篇在线全provider可用性测量；未缓存响应显式失败，不据此推断公网不可得。S2/arXiv标题API/USENIX搜索没有完整缓存，Crossref/OpenAlex缓存为前5条，不能声称测到运行时前8条全量结果。KVM/Zap使用已存原件快照，不伪造本次HTTP200；原课程前4个HTTP地址的跳转可用性未测，使用已核实HTTPS地址。
+
+| 材料ID | 课程条目 | 标题入口的实际边界 |
+|---|---|---|
+| 11 | An Evaluation of the Ninth SOSP Submissions | 1983原文与1988再版待选择；候选正文未缓存。按可见原件人工补全书目，不套1988 DOI |
+| 12 | The Task of the Referee | 多候选/缓存摘要；人工核对原文姓名、1990版权与Crossref记录，明确补入DOI |
+| 2 | KVM/ARM | 多DOI；选择正确ASPLOS标识后同ID/全文，冲突候选不覆盖 |
+| 8 | Zap | 多DOI；选定身份可同ID/全文，不把不同DOI静默当同一出版记录 |
+| 13 | Borg | 本次候选仅摘要；原课程PDF403，另取官方作者档案全文；不宣称标题能发现所有作者主页 |
+| 14 | Twine | 无共同公共ID的真实作者姓名差异仍拒绝自动合并；主要PDF可导入 |
+| 15 | Google File System | 多出版候选，候选正文地址未缓存；主要PDF可导入 |
+| 16 | Bigtable | 多候选/缓存摘要，部分身份冲突；主要PDF可导入 |
+| 17 | Dynamo | 正确候选同ID/全文，绑定所选ID后不同DOI不能再次静默复用 |
+| 18 | Spanner | 多候选，候选正文未缓存；主要PDF可导入 |
+| 19 | Scaling Memcache | 候选仅摘要，所指正文未缓存；USENIX PDF可导入 |
+| 20 | TAO | 候选仅摘要/姓名差异；USENIX PDF可导入，不放宽无ID匹配 |
+| 21 | TPU | 原PDF比官方abs多列Daniel Killebrew，严格URL导入拒绝作者冲突；人工核对官方PDF响应/摘要与原件后选原PDF，保留两份作者记录 |
+| 22 | NVIDIA Volta | 自动同ID，默认30页使初次正文partial；本批次单独解析全部66页后为全文，不改个人配置 |
+| 23 | Megatron-LM | 修正OpenAlex丢失真实arXiv标识后，双顺序自动同ID/全文 |
+| 24 | ZeRO | 双顺序自动同ID/全文 |
+| 25 | Orca | 待候选选择；已下载USENIX原PDF，不冒称标题入口自动通过 |
+| 26 | PagedAttention | 双顺序自动同ID/全文 |
+| 27 | Speculative Decoding | 双顺序自动同ID/全文；保留2022预印本年与2023出版年 |
+| 28 | DiffKV | 课程项目404且题名/全部作者有误；独立官方arXiv候选选择后同ID/全文，使用正式题名和作者 |
+
+**真实工作区交付**
+
+- 本轮起始10条物理材料、24条用量，只有1项等待候选选择，无执行中任务。停服完整备份到 `migration-backups/before-paper-identity-20261118-181637`：98文件摘要一致，两份SQLite完整性正常。个人配置、原件和笔记旧文件共25份在归并与课程导入后摘要仍一致；不清理已有25个关注或旧任务记录。
+- 在隔离副本验证后应用真实Zap归并，再通过统一材料持久化入口导入课程20份全文：保留KVM主ID2、Zap主ID8，新增18份；18已读移出清单，Speculative Decoding#27和DiffKV#28未读加入清单，原6条稍后阅读保留。最终28条物理记录含1条历史映射，默认27份材料、8条清单，SQLite完整性正常，用量仍24条。
+- 两篇HTML书目和TPU原PDF是显式人工复核，不混入自动识别成功率。Volta66页超过默认30页，本批次按已知最大页数66解析（上界100），只改变该批运行参数。full表示提取未触发页数限制，不保证图片/公式/OCR理解；本轮不进行批量LLM整理。已读新材料及补全Zap仍可在 `/wiki/sync` 预览费用与变更后显式整理，不假称新知识图谱已全部生成。
+- 原件与文本位于持久wiki/resources，结果位于 `data/course-import-results.json`、`data/material-merge-result.json`。初次/定向矩阵、最终交付书目、人工核对与公开HTML/元数据响应集中归档到 `data/import-audits/course-20261118/`；其中临时stage路径仅为历史诊断，不是运行依赖。
+- 恢复服务 **`sb-bibliographic-personal-preview`**，继续8765与原持久工作区；必要key仅从原.env只读注入进程。CLI `sb reading list` 与实际浏览器均看到新增两篇及原6条，未触发付费调用。M14原生Obsidian缺口不变，不启动Obsidian，不改launchd，不push/PR。
+- 实际 `/wiki/sync` 只读预览列出17份需增量整理的已读材料，并显示费用提示；没有点击付费同步。独立8771验收服务、验收浏览器已关闭，课程临时目录、脚本及本轮截图已清理；持久资料、升级前备份与导入证据保留。仅本地提交，不merge/push/PR。

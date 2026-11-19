@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from secondbrain import config, db, ingest
+from secondbrain.bibliography import apply_bibliography, entry_bibliography
 from secondbrain.llm.base import LLMError, Usage, make_backend
 from secondbrain.llm.usage import record_call
 from secondbrain.net import HttpClient
@@ -48,6 +49,10 @@ class OpsError(Exception):
 
 
 def _require_active(conn, item_id: int) -> None:
+    try:
+        db.require_canonical(conn, item_id)
+    except ValueError as exc:
+        raise OpsError(str(exc)) from exc
     if db.is_trashed(conn, item_id):
         raise OpsError(f"材料 #{item_id} 已回收，请先恢复后再处理")
 
@@ -339,6 +344,8 @@ def material_notes(item_id: int, text: str | None = None) -> str:
     try:
         if not db.item_exists(conn, item_id):
             raise OpsError(f"材料不存在：{item_id}")
+        if text is not None:
+            _require_active(conn, item_id)
     finally:
         conn.close()
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
@@ -805,6 +812,7 @@ class AddResult:
     title: str = ""
     message: str = ""
     acquisition: dict = field(default_factory=dict)
+    bibliography: dict = field(default_factory=dict)
 
 
 MAX_PDF_UPLOAD = 30 * 1024 * 1024
@@ -970,6 +978,8 @@ def _acquisition(url: str, capture, method="none", status="missing") -> dict:
 
 
 def _captured(fetched: ManualFetched, capture, requested: str) -> ManualFetched:
+    if fetched.method in ("pdf", "manual_pdf"):
+        apply_bibliography(fetched.entry, capture.pdf_metadata.get("bibliography", {}))
     fetched.pdf_data = capture.pdf_data if fetched.method in ("pdf", "manual_pdf") else None
     fetched.raw_data = capture.raw_data
     fetched.truncated = fetched.method == "pdf" and capture.pdf_truncated
@@ -1014,7 +1024,7 @@ def _pdf_text(client, url: str, fs, *, expected=None) -> str:
         return ""
 
 
-def _fetch_page(url: str, client, fs, *, expected=None):
+def _fetch_page(url: str, client, fs, *, expected=None, metadata_only=False):
     """通用公开页面与 citation_pdf_url，摘要页不冒充完整论文。"""
     from urllib.parse import urljoin
 
@@ -1036,6 +1046,7 @@ def _fetch_page(url: str, client, fs, *, expected=None):
             raise ManualFetchError(f"PDF 无法解析：{type(exc).__name__}") from exc
         if not text.strip():
             raise ManualFetchError("PDF 中没有可提取正文")
+        apply_bibliography(entry, client.pdf_metadata.get("bibliography", {}))
         if expected is not None:
             _identity(entry, text, expected)
         client.select(resp)
@@ -1059,12 +1070,22 @@ def _fetch_page(url: str, client, fs, *, expected=None):
             parse_iso_datetime(meta["date"].replace("/", "-")) or entry.published_at
         )
     entry.doi, entry.arxiv_id = meta.get("doi"), meta.get("arxiv_id")
+    if meta.get("title") and (meta.get("authors") or entry.doi or entry.arxiv_id):
+        facts = entry_bibliography(entry, evidence="html:citation-meta")
+        facts["venue"] = meta.get("venue")
+        if meta.get("preprint_year"):
+            facts["preprint_year"], facts["year"] = meta["preprint_year"], None
+            facts["evidence"].append("html:citation-preprint-date")
+        apply_bibliography(entry, facts)
     if expected is not None:
         _identity(entry, "", expected)
         if (meta.get("title") and expected.title and expected.title != expected.url
+                and not expected.title.startswith(("http://", "https://", "urn:"))
                 and re.findall(r"\w+", entry.title.casefold())
                 != re.findall(r"\w+", expected.title.casefold())):
             raise ValueError("材料身份冲突：落地页标题与请求不同")
+    if metadata_only:
+        return entry, "", "none"
     if meta.get("pdf_url"):
         pdf_url = urljoin(str(resp.url), meta["pdf_url"])
         pdf = _pdf_text(client, pdf_url, fs, expected=expected or entry)
@@ -1104,6 +1125,17 @@ def _fetch_arxiv(arxiv_id: str, client, fs, fallback_title: str, *, metadata_onl
             _identity(entry, "", expected)
     except FetchError:
         pass
+    if entry is None:
+        try:
+            page, _, _ = _fetch_page(
+                expected.url, client, fs, expected=expected, metadata_only=True
+            )
+            if page.bibliography:
+                entry = page
+        except ManualFetchError:
+            pass
+    if entry is not None and not entry.bibliography:
+        apply_bibliography(entry, entry_bibliography(entry, evidence="arxiv:api"))
     entry = entry or expected
     # 保留用户明确指定的版本；API 记录通常省略版本。
     entry.arxiv_id = arxiv_id
@@ -1161,6 +1193,8 @@ def _fetch_doi(doi: str, url: str, client, fs, *, metadata_only=False) -> Manual
     )
     entry = RawEntry(url=url, title=title, author=authors or None, summary=abstract or None,
                      published_at=published, doi=doi)
+    if s2 or cr:
+        apply_bibliography(entry, entry_bibliography(entry, evidence="doi:registry"))
     canonical = f"https://doi.org/{doi}"
     if not metadata_only:
         arxiv_id = ((s2 or {}).get("externalIds") or {}).get("ArXiv")
@@ -1294,7 +1328,8 @@ def _material(fetched: ManualFetched, fs, *, title: str | None = None, kind="url
         raw_data=fetched.raw_data,
         total_pages=fetched.total_pages,
         extracted_pages=fetched.extracted_pages,
-        provenance={"acquisition": fetched.acquisition},
+        provenance={"acquisition": fetched.acquisition, "bibliography": entry.bibliography,
+                    "display_title_custom": bool(title)},
     )
 
 
@@ -1444,6 +1479,9 @@ def add_manual(
                     fetched.total_pages = pdf_metadata.get("total_pages")
                     fetched.extracted_pages = pdf_metadata.get("extracted_pages")
                     fetched.completeness = "partial" if fetched.truncated else "full"
+                    apply_bibliography(fetched.entry, pdf_metadata.get("bibliography", {}))
+                    if not title and pdf_metadata.get("bibliography", {}).get("title"):
+                        fetched.entry.title = pdf_metadata["bibliography"]["title"]
                     fetched.acquisition.update(
                         status=fetched.completeness, method=fallback_method, actual_url=None
                     )
@@ -1468,8 +1506,9 @@ def add_manual(
                 message = refetch_note
                 if url and row is not None and must_fetch and not improved and not fallback:
                     message = message or REFETCH_NO_GAIN
-                if not url and not (material.doi or material.arxiv_id):
-                    message = "身份尚不确定：未发现 DOI/arXiv；仅按文件/正文指纹去重，不按标题合并"
+                if not url and not (material.doi or material.arxiv_id or
+                                    fetched.entry.bibliography.get("year")):
+                    message = "身份尚不确定：缺少足够书目证据，仅按文件/正文指纹去重"
                 if state in ("unread", "reading", "read"):
                     db.set_reading_state(conn, item_id, state)
                 if state == "later":
@@ -1478,7 +1517,7 @@ def add_manual(
                     db.add_feedback(conn, item_id, feedback, None, datetime.now(UTC))
                 row = db.item_detail(conn, item_id)
                 result = AddResult(label, status, item_id, row["title"], message,
-                                   fetched.acquisition)
+                                   fetched.acquisition, fetched.entry.bibliography)
             except Exception as exc:
                 conn.rollback()
                 result = AddResult(label, "失败", message=str(exc),
@@ -1563,6 +1602,7 @@ def complete_item(item_id: int, *, text: str | None = None, pdf: bytes | None = 
             total_pages=metadata.get("total_pages"),
             extracted_pages=metadata.get("extracted_pages"),
         )
+        apply_bibliography(fetched.entry, metadata.get("bibliography", {}))
         db.persist_material(
             conn, _material(fetched, fetch_fs, kind="pdf" if pdf else "text"),
             datetime.now(UTC), item_id=item_id,

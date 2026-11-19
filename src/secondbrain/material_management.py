@@ -28,7 +28,7 @@ def list_materials(
         raise OpsError("未知材料视图")
     if not isinstance(offset, int) or offset < 0:
         raise OpsError("分页位置必须为非负整数")
-    clauses, params = [], []
+    clauses, params = ["i.id NOT IN (SELECT alias_id FROM material_aliases)"], []
     query = query.strip()
     if query:
         clauses.append("(i.title LIKE ? OR i.author LIKE ?)")
@@ -70,6 +70,10 @@ def _manage(conn: sqlite3.Connection, ids: list[int], action: str) -> dict:
     rows = {}
     # 先验证整个批次，再写入，任何不存在的 ID 均不会导致部分修改。
     for item_id in ids:
+        try:
+            db.require_canonical(conn, item_id)
+        except ValueError as exc:
+            raise OpsError(str(exc)) from exc
         row = conn.execute(
             """SELECT COALESCE(m.hidden, 0) AS hidden, COALESCE(m.trashed, 0) AS trashed,
                       COALESCE(m.revision, 0) AS revision
@@ -126,6 +130,7 @@ def _read_to_hide(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """SELECT i.*, 0 AS is_hidden, 0 AS is_trashed
            FROM items i LEFT JOIN material_lifecycle m ON m.item_id = i.id
            WHERE i.reading_state = 'read'
+             AND i.id NOT IN (SELECT alias_id FROM material_aliases)
              AND COALESCE(m.hidden, 0) = 0 AND COALESCE(m.trashed, 0) = 0
            ORDER BY i.id"""
     ).fetchall()

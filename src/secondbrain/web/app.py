@@ -211,12 +211,23 @@ def _schedule_checks(fs: FilterSettings, at: str) -> list[str]:
     ]
 
 
+def _material_form(row, bibliography: dict) -> str:
+    values = dict(row)
+    return filters.item_form(
+        values.get("source_type"), values.get("url"), values.get("extract_method"),
+        doi=values.get("doi"), arxiv_id=values.get("arxiv_id"), bibliography=bibliography,
+    )
+
+
 def _filtered_days(conn: sqlite3.Connection, form: str | None, ctype: str | None) -> list[dict]:
     """历史页：按形式 / 类型筛选后各日期各 lane 的条数（与 db.digest_dates 同样的列）。"""
     l1 = db.latest_assessments(conn, "L1")
     days: dict[str, dict] = {}
+    bibliographies = {}
     for r in db.digest_lane_rows(conn):
-        item_form = filters.item_form(r["source_type"], r["url"], r["extract_method"])
+        if r["item_id"] not in bibliographies:
+            bibliographies[r["item_id"]] = db.material_bibliography(conn, r["item_id"])
+        item_form = _material_form(r, bibliographies[r["item_id"]])
         content_type = l1.get(r["item_id"], {}).get("content_type")
         if not filters.matches(item_form, content_type, form, ctype):
             continue
@@ -458,6 +469,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     app = FastAPI(title="Second Brain", docs_url=None, redoc_url=None, openapi_url=None)
     allowed = LOCAL_HOSTS | {_hostname(h) for h in extra_hosts}
 
+    @app.exception_handler(db.MaterialMergedError)
+    async def merged_material(request: Request, exc: db.MaterialMergedError):
+        return PlainTextResponse(str(exc), status_code=409)
+
     @app.middleware("http")
     async def same_origin_only(request: Request, call_next):
         h = request.headers
@@ -466,6 +481,17 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         )
         if problem:
             return PlainTextResponse(f"403 Forbidden：{problem}", status_code=403)
+        if request.method.upper() not in SAFE_METHODS:
+            target = re.fullmatch(r"/(?:item|reading)/(\d+)(?:/.*)?", request.url.path)
+            if target:
+                item_id = int(target[1])
+                with _conn() as conn:
+                    canonical_id = db.resolve_material_id(conn, item_id)
+                if canonical_id != item_id:
+                    return PlainTextResponse(
+                        f"材料 #{item_id} 已归并至主材料 #{canonical_id}，请对主 ID 操作",
+                        status_code=409,
+                    )
         response = await call_next(request)
         if request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-cache"
@@ -531,9 +557,15 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             rows = list_materials(**filters, offset=offset)
         except (ValueError, ops.OpsError) as exc:
             raise HTTPException(400, str(exc)) from exc
+        with _conn() as conn:
+            bibliographies = {
+                row["id"]: db.material_bibliography(conn, row["id"]) for row in rows[:50]
+            }
+        forms = {row["id"]: _material_form(row, bibliographies[row["id"]]) for row in rows[:50]}
         return templates.TemplateResponse(
             request, "materials.html",
             {**filters, "rows": rows[:50], "offset": offset,
+             "bibliographies": bibliographies, "material_forms": forms,
              "next_offset": offset + 50 if len(rows) > 50 else None,
              "filter_url": materials_location(request.query_params),
              "notice": request.query_params.get("notice", "")},
@@ -648,13 +680,16 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             later = len(db.reading_list_items(conn))
             summarized = db.ai_item_ids(conn, "summary")
             to_ingest = len(pending_items(conn))
+            bibliographies = {
+                row["item_id"]: db.material_bibliography(conn, row["item_id"]) for row in rows
+            }
         form, ctype = filters.clean_filters(
             request.query_params.get("form"), request.query_params.get("ctype")
         )
         lanes: dict[str, list[dict]] = {}
         for row in rows:
             content_type = l1.get(row["item_id"], {}).get("content_type")
-            item_form = filters.item_form(row["source_type"], row["url"], row["extract_method"])
+            item_form = _material_form(row, bibliographies[row["item_id"]])
             if not filters.matches(item_form, content_type, form, ctype):
                 continue  # 筛选只影响显示，不改 digest / 预算
             entry = _entry(
@@ -701,10 +736,14 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     def item(request: Request, item_id: int) -> HTMLResponse:
         profile = _profile()
         with _conn() as conn:
+            canonical_id = db.resolve_material_id(conn, item_id)
+            if canonical_id != item_id:
+                return RedirectResponse(f"/item/{canonical_id}", status_code=307)
             row = db.item_detail(conn, item_id)
             if row is None:
                 raise HTTPException(404, "条目不存在")
             lifecycle = db.lifecycle_states(conn).get(item_id, {})
+            bibliography = db.material_bibliography(conn, item_id)
             l1 = db.item_assessment(conn, item_id, "L1")
             l2 = db.item_assessment(conn, item_id, "L2")
             history = db.feedback_for(conn, item_id)
@@ -735,6 +774,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             {
                 "item": row,
                 "lifecycle": lifecycle,
+                "bibliography": bibliography,
+                "material_form": _material_form(row, bibliography),
                 "l1": l1,
                 "l2": l2,
                 "key_points": _key_points(l2, row["url"]),

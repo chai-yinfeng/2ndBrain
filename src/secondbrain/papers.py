@@ -17,7 +17,8 @@ from urllib.parse import quote, urljoin, urlsplit
 import feedparser
 import httpx
 
-from secondbrain import config, db, ops
+from secondbrain import config, db, material_identity, ops
+from secondbrain.bibliography import compare_bibliography
 from secondbrain.ingest import ContentCapture
 from secondbrain.models import RawEntry
 from secondbrain.net import FetchError, HttpClient
@@ -152,6 +153,13 @@ def _openalex(query, client):
         pdfs = [loc["pdf_url"] for loc in locations if _public_url(loc.get("pdf_url"))]
         urls = [loc["landing_page_url"] for loc in locations
                 if _public_url(loc.get("landing_page_url"))]
+        # Explicit arXiv locations are identifier evidence, not a title-based
+        # guess. Preserve ambiguity if a provider lists different arXiv works.
+        aids = {
+            aid for url in urls
+            if urlsplit(url).hostname in ("arxiv.org", "www.arxiv.org", "export.arxiv.org")
+            if (aid := arxiv.parse_arxiv_id(url)) and _ARXIV.fullmatch(aid)
+        }
         # 优先公开会议正文页，不猜测 USENIX slug 或硬编码题目。
         urls.sort(key=lambda u: "usenix.org" not in (urlsplit(u).hostname or ""))
         inverted = row.get("abstract_inverted_index") or {}
@@ -162,7 +170,8 @@ def _openalex(query, client):
                      for a in row.get("authorships") or []],
             year=row.get("publication_year"),
             venue=(primary.get("source") or {}).get("display_name"),
-            doi=row.get("doi"), url=urls[0] if urls else row.get("doi"),
+            doi=row.get("doi"), arxiv_id=next(iter(aids)) if len(aids) == 1 else None,
+            url=urls[0] if urls else row.get("doi"),
             pdf_url=pdfs[0] if pdfs else None, abstract=" ".join(w for _, w in positions),
             version=best.get("version") or primary.get("version") or "",
             provider_id=row.get("id"), alternate_urls=urls, alternate_pdf_urls=pdfs,
@@ -272,15 +281,18 @@ def _metadata_terms(candidate):
 
 
 def _description_match(query, candidate):
-    if _normal(query) == _normal(candidate["title"]):
-        return True
-    words, title = _terms(query), _terms(candidate["title"])
-    metadata = _metadata_terms(candidate)
-    return (
-        bool((words & title) - _QUERY_WORDS)
-        and bool(words & (metadata - title - _QUERY_WORDS))
-        and words <= title | metadata | _QUERY_WORDS
-    )
+    for record in candidate.get("records") or [candidate]:
+        if _normal(query) == _normal(record["title"]):
+            return True
+        words, title = _terms(query), _terms(record["title"])
+        metadata = _metadata_terms(record)
+        if (
+            bool((words & title) - _QUERY_WORDS)
+            and bool(words & (metadata - title - _QUERY_WORDS))
+            and words <= title | metadata | _QUERY_WORDS
+        ):
+            return True
+    return False
 
 
 def _relevant(query, candidate):
@@ -296,23 +308,23 @@ def _relevant(query, candidate):
 
 
 def _same_record(left, right):
-    # 标题从不证明身份。共享明确标识才可合并 provider 记录；作者/年份差异留给用户。
+    # 题名不证明身份，也不应把同一明确 ID 的短题名拆成第二篇论文。
     shared = any(left.get(key) and left.get(key) == right.get(key)
                  for key in ("doi", "arxiv_id"))
-    conflict = any(left.get(key) and right.get(key) and left[key] != right[key]
-                   for key in ("doi", "arxiv_id", "year"))
-    # 已共享标识的记录允许名字缩写/连字符差异；不同作者仍保留为待选择候选。
-    def author_key(name):
-        parts = _normal(name.replace("-", "")).split()
-        if len(parts) > 1:
-            return parts[-1], parts[0][0]
-        return (parts[0], "") if parts else ("", "")
+    if not shared:
+        return False
 
-    authors_left = {author_key(a) for a in left["authors"]}
-    authors_right = {author_key(a) for a in right["authors"]}
-    if authors_left and authors_right and authors_left != authors_right:
-        conflict = True
-    return shared and not conflict and _normal(left["title"]) == _normal(right["title"])
+    # 对每一条原始记录复核，防止不完整的中间记录掩盖已有冲突。
+    for record in left.get("records") or [left]:
+        if compare_bibliography(
+            _candidate_bibliography(record), _candidate_bibliography(right)
+        )["conflicts"]:
+            return False
+        versions = [record.get("version", ""), right.get("version", "")]
+        if all(re.fullmatch(r"v\d+", version) for version in versions):
+            if versions[0] != versions[1]:
+                return False
+    return True
 
 
 def _search(query, client):
@@ -336,8 +348,10 @@ def _search(query, client):
             old = next((c for c in candidates if _same_record(c, candidate)), None)
             if old:
                 old["records"].extend(candidate["records"])
-                for key in ("doi", "arxiv_id", "abstract", "pdf_url"):
+                for key in ("doi", "arxiv_id", "abstract", "pdf_url", "year", "venue", "authors"):
                     old[key] = old[key] or candidate[key]
+                if _terms(old["title"]) < _terms(candidate["title"]):
+                    old["title"] = candidate["title"]
             elif len(candidates) < MAX_CANDIDATES:
                 candidates.append(candidate)
     candidates.sort(key=lambda c: not _description_match(query, c))
@@ -363,24 +377,76 @@ def _save_result(conn, result):
     return result
 
 
+def _candidate_bibliography(candidate):
+    records = candidate.get("records") or [candidate]
+    evidence = list(dict.fromkeys(
+        f"{record['provider']}:{record['url']}" for record in records
+    ))
+    year = preprint_year = None
+    for record in records:
+        if record["provider"] == "arxiv":
+            preprint_year = preprint_year or record.get("preprint_year") or record.get("year")
+        else:
+            year = year or record.get("year")
+            preprint_year = preprint_year or record.get("preprint_year")
+    # These are structured academic records, not facts inferred from the user's
+    # query. Preserve their evidence even when no public identifier was assigned.
+    verified = (
+        candidate["provider"] in {"semantic_scholar", "crossref", "arxiv", "openalex", "usenix"}
+        and bool(candidate.get("title") and candidate.get("authors"))
+        and bool(candidate.get("doi") or candidate.get("arxiv_id")
+                 or candidate.get("year") or candidate.get("venue"))
+    )
+    return {
+        key: candidate.get(key)
+        for key in ("title", "authors", "venue", "doi", "arxiv_id")
+    } | {
+        "year": year, "preprint_year": preprint_year,
+        "kind": "paper", "verified": verified, "evidence": evidence,
+    }
+
+
 def _check_identity(candidate, fetched):
     entry = fetched.entry
     doi, aid = db.discover_ids(fetched.content)
+    expected = _candidate_bibliography(candidate)
+    actual = dict(entry.bibliography)
+    actual["doi"] = actual.get("doi") or entry.doi or doi
+    actual["arxiv_id"] = actual.get("arxiv_id") or entry.arxiv_id or aid
+    comparison = compare_bibliography(expected, actual)
+    if comparison["conflicts"]:
+        raise ValueError("材料身份冲突：" + "；".join(comparison["conflicts"]))
     ops._identity(entry, fetched.content, RawEntry(
         url=candidate["url"], title=candidate["title"],
         doi=candidate["doi"], arxiv_id=candidate["arxiv_id"],
     ))
-    if entry.title and _public_url(entry.title) is None:
-        if _normal(entry.title) != _normal(candidate["title"]):
+    actual_title = actual.get("title") or entry.title
+    if actual_title and _public_url(actual_title) is None:
+        if (_normal(actual_title) != _normal(candidate["title"])
+                and not comparison["match"]):
             raise ValueError("材料身份冲突：下载记录标题与所选候选不同")
-    # 远端 PDF 常无元数据；仅在冲突检查后补上所选记录的标识。
-    entry.doi = candidate["doi"] or entry.doi or doi
-    entry.arxiv_id = candidate["arxiv_id"] or entry.arxiv_id or aid
-    entry.title = candidate["title"]
+    # 真实书目题名不被检索提供者的缩写、缺字或弱元数据覆盖。
+    entry.title = (
+        actual_title if actual_title and _public_url(actual_title) is None else candidate["title"]
+    )
+    entry.doi = actual["doi"] or candidate["doi"]
+    entry.arxiv_id = actual["arxiv_id"] or candidate["arxiv_id"]
     entry.author = entry.author or ", ".join(candidate["authors"]) or None
     entry.summary = max((entry.summary or "", candidate["abstract"]), key=len) or None
-    if entry.published_at is None and candidate["year"]:
-        entry.published_at = datetime(candidate["year"], 1, 1, tzinfo=UTC)
+    publication_year = actual.get("year") or expected.get("year")
+    if publication_year and (
+        entry.published_at is None
+        or (actual.get("preprint_year") == entry.published_at.year
+            and publication_year != entry.published_at.year)
+    ):
+        entry.published_at = datetime(publication_year, 1, 1, tzinfo=UTC)
+    entry.bibliography = {
+        **expected, **{key: value for key, value in actual.items() if value not in (None, "", [])},
+        "title": entry.title,
+        "doi": entry.doi, "arxiv_id": entry.arxiv_id,
+        "verified": bool(expected["verified"] or actual.get("verified")),
+        "evidence": list(dict.fromkeys([*(actual.get("evidence") or []), *expected["evidence"]])),
+    }
 
 
 def _fetch_candidate(candidate, client, fs):
@@ -482,6 +548,7 @@ def _fetch_candidate(candidate, client, fs):
                      author=", ".join(candidate["authors"]) or None, summary=candidate["abstract"],
                      published_at=datetime(candidate["year"], 1, 1, tzinfo=UTC)
                      if candidate["year"] else None)
+    entry.bibliography = _candidate_bibliography(candidate)
     acquisition.update(status="abstract", method="abstract_only")
     fetched = ops.ManualFetched(entry, candidate["abstract"], "abstract_only",
                                ops.manual_canonical(candidate["url"]), note="仅摘要",
@@ -489,10 +556,69 @@ def _fetch_candidate(candidate, client, fs):
     return result(fetched, candidate)
 
 
+def _reuse_candidate(candidate, conn):
+    """仅复用唯一身份的现有全文；来源/实际版本不变成 provider 的声明版本。"""
+    material_id = material_identity.resolve_existing(conn, _candidate_bibliography(candidate))
+    if material_id is None:
+        return None
+    row = db.item_detail(conn, material_id)
+    if row is None or row["content_completeness"] != "full" or not row["original_text"]:
+        return None
+    requested_versions = {
+        record.get("version") for record in candidate.get("records") or [candidate]
+        if re.fullmatch(r"v\d+", record.get("version", ""))
+    }
+    origins = db.material_origins(conn, material_id)
+    fingerprint = db.text_fingerprint(row["original_text"])
+    origin = next((
+        source for source in reversed(origins)
+        if source["completeness"] == "full" and source["text_hash"] == fingerprint
+    ), None)
+    metadata = json.loads(origin["metadata_json"]) if origin is not None else {}
+    original_acquisition = dict(metadata.get("acquisition") or {})
+    actual_version = original_acquisition.get("version", "unknown")
+    if requested_versions and requested_versions != {actual_version}:
+        return None
+    acquisition = {
+        **original_acquisition,
+        "requested_url": candidate["url"],
+        "actual_url": original_acquisition.get("actual_url"),
+        "status": "full", "method": row["extract_method"], "version": actual_version,
+        "attempts": [], "source": "existing_material", "reused_material_id": material_id,
+        "reused_origin_id": origin["id"] if origin is not None else None,
+    }
+    entry = RawEntry(
+        url=candidate["url"], title=row["title"], author=row["author"], summary=row["summary"],
+        published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
+        doi=row["doi"], arxiv_id=row["arxiv_id"],
+        bibliography=db.material_bibliography(conn, material_id),
+    )
+    fetched = ops.ManualFetched(
+        entry, row["original_text"], row["extract_method"], row["url_canonical"],
+        completeness="full", acquisition=acquisition,
+        total_pages=origin["total_pages"] if origin is not None else None,
+        extracted_pages=origin["extracted_pages"] if origin is not None else None,
+    )
+    # A weak bibliographic match may upgrade a previously identifier-free item.
+    # Bind the selected identifier just as for a download, so a later conflicting
+    # DOI cannot repeatedly reuse the same unidentified body under different IDs.
+    _check_identity(candidate, fetched)
+    return fetched, {
+        "requested_url": candidate["url"], "actual_url": acquisition["actual_url"],
+        "requested_version": candidate.get("version", ""), "actual_version": actual_version,
+        "provider_version": candidate.get("version", ""), "responses": [],
+        "existing_material_id": material_id,
+        "existing_origin_id": acquisition["reused_origin_id"],
+        "source_acquisition": original_acquisition,
+    }, []
+
+
 def _import(session, candidate, conn, client, fs, echo, ingest):
     errors = list(session["errors"])
     try:
-        fetched, provenance, fetch_errors = _fetch_candidate(candidate, client, fs)
+        fetched, provenance, fetch_errors = (
+            _reuse_candidate(candidate, conn) or _fetch_candidate(candidate, client, fs)
+        )
         errors.extend(fetch_errors)
         item = ops._material(fetched, fs, kind="paper_search")
         item.provenance.update({"search_id": session["id"], "query": session["query"],

@@ -29,7 +29,7 @@
   <label class="material-select"><input type="checkbox" name="item_ids" value="{{ row.id }}" form="material-actions" aria-label="选择 {{ row.title }}"></label>
   <div class="row-main">
     <h2><a href="/item/{{ row.id }}">{{ row.title }}</a><span class="tag reading-state" data-reading-state="{{ row.reading_state }}">{{ {"unread":"未读","reading":"阅读中","read":"已读"}.get(row.reading_state, row.reading_state) }}</span>{% if row.is_trashed %}<span class="tag warn">已回收</span>{% elif row.is_hidden %}<span class="tag">已隐藏</span>{% endif %}</h2>
-    <p class="meta">{{ row.author or "作者未知" }} · {{ {"pending":"未整理/待整理","processed":"已整理"}.get(row.processing_status, row.processing_status) }} · {{ {"full":"全文","partial":"正文不完整","abstract":"仅摘要","missing":"无正文/仅引用"}.get(row.content_completeness, row.content_completeness) }}</p>
+    <p class="meta"><span class="tag">{{ {"paper":"论文","document":"文档","blog":"博客","video":"视频"}.get(material_forms[row.id], "材料") }}</span> <span title="{{ row.author or '' }}">{{ (row.author or "作者未知")|truncate(100, false, "…") }}</span>{% if bibliographies[row.id].get("year") %} · {{ bibliographies[row.id].year }}{% endif %} · {{ {"pending":"未整理/待整理","processed":"已整理"}.get(row.processing_status, row.processing_status) }} · {{ {"full":"全文","partial":"正文不完整","abstract":"仅摘要","missing":"无正文/仅引用"}.get(row.content_completeness, row.content_completeness) }}</p>
   </div>
   {% if not row.is_trashed %}<div class="row-actions"><form method="post" action="/reading/{{ row.id }}/add"><button class="fb small" type="submit">加入阅读列表</button></form></div>{% endif %}
 </article>
