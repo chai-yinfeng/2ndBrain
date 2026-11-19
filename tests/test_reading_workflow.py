@@ -2,7 +2,6 @@
 
 import json
 import shutil
-import sqlite3
 from datetime import UTC, datetime
 
 import httpx
@@ -388,13 +387,15 @@ def test_invalid_discussion_url_has_safe_error_and_no_changes(workflow, url):
 def test_copied_v11_migration_only_queues_latest_later_and_preserves_records(workflow):
     root, _, _ = workflow
     original = root / "original-v11.db"
-    conn = sqlite3.connect(original)
-    for script in db.MIGRATIONS[:11]:
-        conn.executescript(script)
-    conn.execute("PRAGMA user_version = 11")
-    conn.row_factory = sqlite3.Row
+    conn = db.connect(original)
     for item_id in range(1, 6):
         add_material(key=f"legacy-{item_id}", body=BODY + str(item_id), conn=conn)
+    for table in (
+        "material_merges", "material_aliases", "material_lifecycle",
+        "source_analyses", "source_catalog_hidden", "reading_list",
+    ):
+        conn.execute(f"DROP TABLE {table}")
+    conn.execute("PRAGMA user_version = 11")
     conn.executemany(
         "INSERT INTO feedback(item_id,kind,note,ts) VALUES(?,?,?,?)",
         [

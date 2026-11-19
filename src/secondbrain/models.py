@@ -244,12 +244,7 @@ class WikiSettings(BaseModel):
     index_max_chars: int = Field(default=8_000, ge=500)  # 送入 ingest 的 index.md 上限
     related_pages: int = Field(default=5, ge=0)  # 送入 ingest 的候选相关页面数
     related_page_chars: int = Field(default=2_000, ge=200)  # 每个相关页面的截断长度
-    known_max_chars: int = Field(default=2_000, ge=0)  # L1 "已知知识"段的上限（0 关闭）
-    review_minutes: int = Field(default=5, ge=1)  # 概念复习在时间预算中的估计耗时
-    review_slots: int = Field(default=1, ge=0)  # 每天最多放入温故栏的到期概念数
-    recent_days: int = Field(default=30, ge=1)  # 为到期概念找"近期相关条目"的时间窗
-    first_review_days: int = Field(default=3, ge=1)  # 新建概念页的首次复习间隔（ADR 0013）
-    mastered_interval_days: int = Field(default=30, ge=1)  # 复习时点"已扎实"后的最短间隔
+    related_max_chars: int = Field(default=2_000, ge=0)  # L1 wiki 内容参考上限（0 关闭）
 
 
 class SummarySettings(BaseModel):

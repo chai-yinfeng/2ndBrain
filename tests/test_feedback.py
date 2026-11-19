@@ -1,5 +1,4 @@
-"""M7：文章反馈的两组语义（ADR 0013）——当前状态与撤销、稍后再看、积压、L1 样例与前置知识、
-信源调整、wiki 队列，以及概念复习的"需要回炉 / 已扎实"。全部离线。"""
+"""文章反馈、稍后读、积压与前置知识；全部离线。"""
 
 import shutil
 from datetime import UTC, date, datetime, timedelta
@@ -23,8 +22,7 @@ from secondbrain.profile.tune import feedback_distribution
 from secondbrain.urls import content_hash
 from secondbrain.web.app import create_app
 from secondbrain.wiki.ingest import pending_items
-from secondbrain.wiki.review import GRADES, due_concepts, review, schedule
-from secondbrain.wiki.store import Page, new_meta, open_wiki
+from secondbrain.wiki.store import open_wiki
 
 NOW = datetime(2026, 11, 4, 12, tzinfo=UTC)
 TODAY = date(2026, 11, 4)
@@ -113,7 +111,8 @@ def test_overridden_feedback_is_not_a_signal(conn):
     db.add_feedback(conn, item, "gained", None, NOW - timedelta(hours=2))
     db.add_feedback(conn, item, "clear", None, NOW - timedelta(hours=1))
     assert recent_feedback(conn, NOW, 30, 50) == []
-    assert pending_items(conn) == [item]  # 撤销偏好不撤销已登记的阅读事实。
+    wiki = open_wiki(config.wiki_dir(), config.raw_dir())
+    assert pending_items(conn, wiki) == [item]  # 撤销偏好不撤销已登记的阅读事实。
 
 
 # ---------- 稍后再看与积压 ----------
@@ -234,38 +233,3 @@ def test_feedback_distribution_counts_every_kind(conn):
     }
 
 
-# ---------- 概念复习：需要回炉 / 已扎实 ----------
-
-
-def test_schedule_new_grades():
-    assert schedule(10, 2.5, "扎实", "needs_refresh") == (0, 2.5, "想回炉")
-    assert schedule(4, 2.5, "接触过", "mastered") == (30, 2.5, "扎实")
-    assert schedule(20, 2.5, "想回炉", "mastered") == (50, 2.5, "扎实")
-    assert schedule(4, 2.5, "接触过", "mastered", mastered_days=45)[0] == 45
-
-
-def test_review_needs_refresh_is_due_immediately(env):
-    wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    meta = new_meta("KV cache", "concept", TODAY - timedelta(days=1), mastery="扎实")
-    meta["interval_days"] = 20
-    wiki.save_page(Page("kv-cache", meta, "# KV cache"))
-    assert due_concepts(wiki, TODAY) == []
-    out = review(wiki, wiki.pages["kv-cache"], "needs_refresh", TODAY)
-    assert (out.mastery_after, out.interval_after, out.next_due) == ("想回炉", 0, TODAY)
-    reloaded = open_wiki(config.wiki_dir(), config.raw_dir())
-    assert [p.slug for p in due_concepts(reloaded, TODAY)] == ["kv-cache"]
-    out = review(reloaded, reloaded.pages["kv-cache"], "mastered", TODAY, mastered_days=40)
-    assert (out.mastery_after, out.interval_after) == ("扎实", 40)
-
-
-def test_review_buttons_include_new_grades(env):
-    wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    wiki.save_page(Page("kv-cache", new_meta("KV cache", "concept", TODAY), "# KV cache"))
-    client = TestClient(create_app())
-    page = client.get("/wiki/page/kv-cache").text
-    for label in GRADES.values():
-        assert label in page
-    assert 'title="想系统回炉' in page
-    resp = client.post("/wiki/review", data={"slug": "kv-cache", "grade": "mastered"})
-    assert resp.status_code == 200 and "已记录：已扎实" in resp.text
-    assert "掌握度 — → 扎实" in resp.text and "间隔 1 → 30 天" in resp.text

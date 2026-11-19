@@ -10,9 +10,11 @@
   <input id="reading-search" type="search" placeholder="搜索标题或来源…" data-list-filter="reading-list" data-filter-status="reading-count" aria-controls="reading-list">
   <span id="reading-count" class="list-count" role="status">{{ rows | length }} 份待读材料</span>
 </div>
+<form id="reading-manage" method="post" action="/reading/remove" class="toolbar"><button class="fb" type="submit">移出所选</button><span class="help">只移出阅读列表，保留材料和学习记录。</span></form>
 <div class="compact-list" id="reading-list">
 {% for r in rows %}
 <article class="list-row" data-item-id="{{ r.id }}" data-filter-row data-filter-text="{{ r.title }} {{ r.source_id or '主动添加' }}">
+  <input type="checkbox" name="item_ids" value="{{ r.id }}" form="reading-manage" aria-label="选择 {{ r.title }}">
   <div class="row-main">
     <h3><a href="/item/{{ r.id }}">{{ r.title }}</a>{% if r.id in incomplete %}<span class="tag warn">正文待补充</span>{% endif %}</h3>
     <p class="meta">{{ r.source_id or "主动添加" }}<span aria-hidden="true"> · </span>{{ r.added_at[:10] }} 加入</p>

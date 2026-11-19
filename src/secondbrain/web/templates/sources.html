@@ -59,6 +59,7 @@
         {% if home %}<a class="fb ghost small" href="{{ home }}" target="_blank" rel="noopener noreferrer" aria-label="浏览 {{ s.name or s.id }} 主页">主页 ↗</a>{% endif %}
         <button type="button" class="fb small" hx-post="/sources/{{ s.id }}/peek" hx-target="#peek-{{ s.id }}" hx-indicator="#preview-loading-{{ s.id }}" data-dialog-open="preview-{{ s.id }}" aria-haspopup="dialog" aria-controls="preview-{{ s.id }}">预览选文</button>
         <button type="button" class="fb small" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}">设置</button>
+        <form method="post" action="/sources/{{ s.id }}/delete"><button class="fb ghost small" type="submit">删除信源…</button></form>
       </div>
     </div>
     {% with source=s, can_edit=True %}{% include "_source_preview_dialog.html" %}{% endwith %}
@@ -68,7 +69,7 @@
       <nav class="source-actions" aria-label="来源维护">
         <form hx-post="/sources/{{ s.id }}/repair" hx-target="#task-source-repair-{{ s.id }}" hx-swap="outerHTML"><button class="fb small" name="apply" value="false" type="submit">检查</button><button class="fb small" name="apply" value="true" type="submit">修复采集</button></form>
         <form method="post" action="/sources/{{ s.id }}/toggle"><button class="fb small" type="submit">{{ "停用" if s.enabled else "启用" }}</button></form>
-        <form method="post" action="/sources/{{ s.id }}/delete"><button class="fb ghost small" type="submit">取消关注</button></form>
+        <form method="post" action="/sources/{{ s.id }}/delete"><button class="fb ghost small" type="submit">删除信源…</button></form>
       </nav>
       {% with kind="source-repair-" ~ s.id, task=repair_tasks.get(s.id), message=None %}{% include "_task.html" %}{% endwith %}
       <section class="source-visual-settings" aria-label="来源封面">

@@ -5,7 +5,7 @@
   const $ = id => document.getElementById(id);
   const status = $("graph-status");
   const typeFilters = [...document.querySelectorAll(".f-type")];
-  const masteryFilters = [...document.querySelectorAll(".f-mastery")];
+  const kinds = {concept: "概念", entity: "实体", paper: "论文", article: "文章与网页", video: "视频", other: "其他资料"};
   const knowledgeStatus = {recorded: "已登记阅读后的知识", draft: "机器草稿（未登记阅读）",
     legacy: "历史知识页（未记录登记状态）"};
 
@@ -20,7 +20,7 @@
         "text-background-color": color("--bg"), "text-background-opacity": 0.9,
         "text-background-padding": "3px", "border-width": 2, "border-color": color("--card"),
         "overlay-opacity": 0}},
-      {selector: "node[type = 'material']", style: {shape: "round-rectangle",
+      {selector: "node[type = 'material'], node[type = 'article'], node[type = 'video'], node[type = 'other']", style: {shape: "round-rectangle",
         "background-color": color("--graph-material")}},
       {selector: "node[type = 'paper']", style: {shape: "round-rectangle",
         "background-color": color("--graph-paper")}},
@@ -29,7 +29,6 @@
       {selector: "node.label-visible", style: {label: "data(label)"}},
       {selector: "edge", style: {width: 1.2, "line-color": color("--graph-edge"),
         "curve-style": "haystack", opacity: 0.5, "overlay-opacity": 0}},
-      {selector: "node[?due]", style: {"border-width": 3, "border-color": color("--warn")}},
       {selector: ".dimmed", style: {opacity: 0.15, "text-opacity": 0}},
       {selector: "edge.dimmed", style: {opacity: 0.07}},
       {selector: "node.one-hop", style: {"border-width": 3, "border-color": color("--accent")}},
@@ -92,7 +91,7 @@
         if (!searchTerms.get(node.id).includes(query)) continue;
         const option = document.createElement("option");
         option.value = node.id;
-        option.textContent = `${node.label} · ${node.type} · ${node.id}`;
+        option.textContent = `${node.label} · ${kinds[node.type] || node.type}`;
         option.title = option.textContent;
         option.selected = node.id === selected;
         fragment.append(option);
@@ -106,7 +105,7 @@
       }
       picker.replaceChildren(fragment);
       if (![...picker.options].some(option => option.value === selected)) picker.selectedIndex = -1;
-      $("node-results").textContent = `${matches} 个匹配 · 核对类型与稳定路径；列表包含筛选隐藏的页面。`;
+      $("node-results").textContent = `${matches} 个匹配 · 列表包含筛选隐藏的页面，同名可打开页面核对来源。`;
     }
 
     function updateLabels() {
@@ -152,8 +151,7 @@
 
     function updateVisibility(fit = false) {
       const types = new Set(typeFilters.filter(el => el.checked).map(el => el.value));
-      const mastery = new Set(masteryFilters.filter(el => el.checked).map(el => el.value));
-      visible = new Set(data.nodes.filter(node => types.has(node.type) && mastery.has(node.mastery || "无")
+      visible = new Set(data.nodes.filter(node => types.has(node.type)
         && (root === null || expanded.has(node.id))).map(node => node.id));
       cy.batch(() => {
         cy.nodes().forEach(node => node.style("display", visible.has(node.id()) ? "element" : "none"));
@@ -187,10 +185,10 @@
       $("node-detail").hidden = false;
       $("node-placeholder").hidden = true;
       $("node-title").textContent = node.label;
-      $("node-kind").textContent = `${node.type} · ${node.id}`;
+      $("node-kind").textContent = kinds[node.type] || node.type;
       $("node-aliases").textContent = node.aliases.length ? `别名：${node.aliases.join("、")}` : "暂无别名";
       const syncStatus = {withdrawn: "来源材料已回收", unsupported: "无有效来源，待复核", review: "部分来源待复核"}[node.material_sync_status];
-      $("node-state").textContent = `${syncStatus ? syncStatus + " · " : ""}${knowledgeStatus[node.knowledge_status] || "知识页"} · 掌握度 ${node.mastery || "未设置"}${node.due ? " · 已到期复习" : ""}`;
+      $("node-state").textContent = `${syncStatus ? syncStatus + " · " : ""}${knowledgeStatus[node.knowledge_status] || "知识页"}`;
       $("node-open").href = node.url;
       const sources = $("node-sources");
       sources.replaceChildren();
@@ -200,7 +198,7 @@
         const link = document.createElement("a");
         link.className = "fb";
         link.href = `/item/${encodeURIComponent(sid)}`;
-        link.textContent = `材料 #${sid}`;
+        link.textContent = (node.source_titles || {})[sid] || "来源材料";
         sources.append(link);
       }
       if (!sourceIds.size) sources.textContent = "未记录来源材料。";
@@ -216,7 +214,7 @@
         title.textContent = record.label;
         const kind = document.createElement("span");
         kind.className = "neighbor-kind";
-        kind.textContent = `${record.type} · ${record.id}`;
+        kind.textContent = kinds[record.type] || record.type;
         button.append(title, kind);
         button.addEventListener("click", () => choose(neighbor));
         links.append(button);
@@ -273,7 +271,7 @@
     $("graph-reset").addEventListener("click", () => {
       root = null;
       expanded.clear();
-      [...typeFilters, ...masteryFilters].forEach(el => { el.checked = true; });
+      typeFilters.forEach(el => { el.checked = true; });
       $("node-search").value = "";
       $("graph-labels").value = "auto";
       cy.nodes().positions(node => initialPositions.get(node.id()));
@@ -294,7 +292,7 @@
       zoomFrame = requestAnimationFrame(() => { zoomFrame = null; updateLabels(); });
     });
     $("graph-labels").addEventListener("change", updateLabels);
-    [...typeFilters, ...masteryFilters].forEach(el =>
+    typeFilters.forEach(el =>
       el.addEventListener("change", () => updateVisibility(true)));
     document.addEventListener("secondbrain:themechange", () => {
       cy.style(graphStyle());

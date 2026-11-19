@@ -69,10 +69,17 @@ def filter_machine_links(wiki: Wiki, source: Page, text: str) -> str:
     edits = []
     for match in WIKILINK_RE.finditer(masked):
         targets = wiki.resolve(match[1], source=source)
-        if any(relation_blocked(wiki, source, target) for target in targets):
-            original = text[match.start():match.end()]
+        original = text[match.start():match.end()]
+        if any(target.is_trashed or relation_blocked(wiki, source, target) for target in targets):
             label = original[2:-2].split("|", 1)[-1].split("#", 1)[0]
+            if len(targets) == 1 and "|" not in original:
+                label = targets[0].title
+            if any(target.is_trashed for target in targets):
+                label += "（已回收）"
             edits.append((match.start(), match.end(), label))
+        elif (len(targets) == 1 and targets[0].type in {"material", "paper"}
+              and "|" not in original):
+            edits.append((match.start(), match.end(), f"[[{match[1]}|{targets[0].title}]]"))
     for start, end, label in reversed(edits):
         text = text[:start] + label + text[end:]
     return text
@@ -105,7 +112,24 @@ def _remove_machine_links(wiki: Wiki, source: Page, target: Page) -> None:
                 original = source.body[match.start():match.end()]
                 label = original[2:-2].split("|", 1)[-1].split("#", 1)[0]
                 edits.append((match.start(), match.end(), label))
-    for start, end, label in reversed(edits):
+    for block in re.finditer(
+        r"<!-- wiki-ingest:start (?P<key>material-\d+:[0-9a-f]{20}) -->"
+        r".*?<!-- wiki-ingest:end (?P=key) -->", masked, re.S,
+    ):
+        for match in WIKILINK_RE.finditer(masked, block.start(), block.end()):
+            if target in wiki.resolve(match[1], source=source):
+                original = source.body[match.start():match.end()]
+                label = original[2:-2].split("|", 1)[-1].split("#", 1)[0]
+                edits.append((match.start(), match.end(), label))
+    for block in re.finditer(
+        r"<!-- wiki-rewrite:start -->.*?<!-- wiki-rewrite:end -->", masked, re.S,
+    ):
+        for match in WIKILINK_RE.finditer(masked, block.start(), block.end()):
+            if target in wiki.resolve(match[1], source=source):
+                original = source.body[match.start():match.end()]
+                label = original[2:-2].split("|", 1)[-1].split("#", 1)[0]
+                edits.append((match.start(), match.end(), label))
+    for start, end, label in sorted(set(edits), reverse=True):
         source.body = source.body[:start] + label + source.body[end:]
 
 

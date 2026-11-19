@@ -29,6 +29,13 @@ def _result_status(result: dict) -> str:
     return "partial" if failures or incomplete else "done"
 
 
+def _paper_identity(result: dict) -> str:
+    return json.dumps([
+        result.get("search_id"), (result.get("selected") or {}).get("id"),
+        result.get("status"), result.get("material_id"),
+    ], ensure_ascii=False)
+
+
 class TaskRunning(Exception):
     """同一类任务已在运行。"""
 
@@ -76,12 +83,23 @@ class TaskRegistry:
         self._tasks: dict[str, Task] = {}
         self._records: dict[str, Task] = {}
         self.path = path
+        self._deleted: set[str] = set()
+        self._deleted_papers: dict[str, str] = {}
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             with closing(sqlite3.connect(path)) as conn, conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, record TEXT NOT NULL)"
                 )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS deleted_tasks (id TEXT PRIMARY KEY)"
+                )
+                self._deleted = {row[0] for row in conn.execute("SELECT id FROM deleted_tasks")}
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS deleted_papers"
+                    " (signature TEXT PRIMARY KEY, search_id TEXT)"
+                )
+                self._deleted_papers = dict(conn.execute("SELECT * FROM deleted_papers"))
                 rows = conn.execute("SELECT record FROM tasks").fetchall()
             for (record,) in rows:
                 data = json.loads(record)
@@ -142,9 +160,50 @@ class TaskRegistry:
             task.save()
         return True
 
-    def dismiss_finished(self) -> int:
-        """批量收起已结束记录；复用单条保护，运行中和待选择任务始终保留。"""
-        return sum(self.dismiss(task.id) for task in self.records())
+
+    def delete_finished(self, task_ids: list[str] | None = None) -> int:
+        """真正删除任务历史；保留来源、材料、用量和重整会话，保护运行与待选。"""
+        with self._lock:
+            if task_ids is None:
+                selected = [
+                    task for task in self._records.values()
+                    if not task.running and task.status != "waiting"
+                ]
+            else:
+                selected = []
+                for task_id in dict.fromkeys(task_ids):
+                    task = self._records.get(task_id)
+                    if task is None:
+                        raise ValueError("任务记录不存在，请刷新列表")
+                    if task.running or task.status == "waiting":
+                        raise TaskRunning("运行中或等待选择的任务不能删除")
+                    selected.append(task)
+            paper_deletions = {
+                _paper_identity(task.result): str(task.result["search_id"])
+                for task in selected
+                if task.kind.startswith("paper-") and task.result.get("search_id")
+            }
+            if self.path is not None:
+                with closing(sqlite3.connect(self.path)) as conn, conn:
+                    conn.executemany("DELETE FROM tasks WHERE id = ?", [(t.id,) for t in selected])
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO deleted_tasks VALUES (?)",
+                        [(task.id,) for task in selected],
+                    )
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO deleted_papers VALUES (?, ?)",
+                        list(paper_deletions.items()),
+                    )
+            self._deleted_papers.update(paper_deletions)
+            for task in selected:
+                self._deleted.add(task.id)
+                self._records.pop(task.id)
+            self._tasks.clear()
+            for task in self._records.values():
+                current = self._tasks.get(task.kind)
+                if current is None or task.started >= current.started:
+                    self._tasks[task.kind] = task
+            return len(selected)
 
     def recover_papers(self, path: Path) -> None:
         """只读旧论文会话与尝试；原表不写、不删，候选仍交给原选择入口。"""
@@ -167,22 +226,19 @@ class TaskRegistry:
             if not t.id.startswith("legacy-")
         }
 
-        def paper_key(result: dict) -> tuple:
-            return (
-                result.get("search_id"), (result.get("selected") or {}).get("id"),
-                result.get("status"), result.get("material_id"),
-            )
 
         known_results = {
-            paper_key(task.result) for task in self._records.values()
+            _paper_identity(task.result) for task in self._records.values()
             if not task.id.startswith("legacy-")
         }
+        known_results.update(self._deleted_papers)
+        known_searches.update(self._deleted_papers.values())
         for row in attempts:
             result = json.loads(row["result_json"])
-            if paper_key(result) not in known_results:
+            if _paper_identity(result) not in known_results:
                 self._recover_paper(f"legacy-attempt-{row['id']}", row["created_at"], result)
         for row in searches:
-            if row["id"] in known_searches:
+            if row["id"] in known_searches or str(row["id"]) in known_searches:
                 continue
             candidates = json.loads(row["candidates_json"])
             self._recover_paper(f"legacy-search-{row['id']}", row["created_at"], {
@@ -197,7 +253,7 @@ class TaskRegistry:
             self._resolve_paper_waiters(task)
 
     def _recover_paper(self, task_id: str, stamp: str, result: dict) -> None:
-        if task_id in self._records:
+        if task_id in self._records or task_id in self._deleted:
             return
         started = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
         if started.tzinfo is None:

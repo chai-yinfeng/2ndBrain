@@ -39,7 +39,7 @@ def test_shared_concept_connects_blog_and_paper(wiki):
     paper = add_page(wiki, "paged-attention", "PagedAttention", "[[键值缓存#实现]]", "paper")
     wiki.reindex()
 
-    graph = build_graph(wiki, TODAY)
+    graph = build_graph(wiki)
     assert graph["edges"] == [
         {"source": "kv-cache", "target": "material-1"},
         {"source": "kv-cache", "target": "paged-attention"},
@@ -75,7 +75,7 @@ def test_chinese_filename_aliases_headings_and_exact_paths(wiki):
     links = page_connections(wiki, source)
     assert links["outgoing"] == [concept]
     assert links["missing"] == links["ambiguous"] == []
-    graph = build_graph(wiki, TODAY)
+    graph = build_graph(wiki)
     assert len(graph["edges"]) == 1
     assert all(node["url"].startswith("/wiki/page/") for node in graph["nodes"])
 
@@ -93,7 +93,7 @@ def test_duplicate_titles_and_aliases_require_selection(wiki):
     assert links["outgoing"] == []
     assert links["missing"] == ["缺失目标"]
     assert set(links["ambiguous"]) == {"共同标题", "共享别名"}
-    assert build_graph(wiki, TODAY)["edges"] == []
+    assert build_graph(wiki)["edges"] == []
     report = lint(wiki)
     assert set(report.ambiguous_links) == {"source"}
     assert set(report.ambiguous_links["source"]) == {"共同标题", "共享别名"}
@@ -124,7 +124,7 @@ def test_duplicate_stems_are_all_openable_and_write_to_original_paths(wiki):
     assert wiki.save_page(concept) == first.path
     assert second.path.read_bytes() == original_paper
     assert "新的个人笔记" in first.path.read_text(encoding="utf-8")
-    graph = build_graph(wiki, TODAY)
+    graph = build_graph(wiki)
     assert {node["id"] for node in graph["nodes"]} == ids
     assert all("/wiki/page/pages/" in node["url"] for node in graph["nodes"])
     client = TestClient(create_app())
@@ -163,7 +163,7 @@ def test_nested_external_markdown_and_resource_exclusion(wiki):
     links = page_connections(wiki, source)
     assert [page.slug for page in links["outgoing"]] == ["分块"]
     assert links["missing"] == []
-    assert len(build_graph(wiki, TODAY)["edges"]) == 2
+    assert len(build_graph(wiki)["edges"]) == 2
 
 
 def test_external_vault_root_pages_keep_unambiguous_paths(wiki):
@@ -183,7 +183,7 @@ def test_external_vault_root_pages_keep_unambiguous_paths(wiki):
     client = TestClient(create_app())
     assert all(
         client.get(node["url"]).status_code == 200
-        for node in build_graph(wiki, TODAY)["nodes"]
+        for node in build_graph(wiki)["nodes"]
     )
 
 
@@ -204,7 +204,7 @@ def test_code_examples_do_not_create_edges_or_diagnostics(wiki):
 
 
 def test_reindex_rebuilds_add_remove_delete_and_isolates_without_rewriting(wiki):
-    assert build_graph(wiki, TODAY) == {"nodes": [], "edges": []}
+    assert build_graph(wiki) == {"nodes": [], "edges": []}
     first = add_page(wiki, "first", "第一篇", "## 个人笔记\n\n保留原文。")
     first.meta.update({"mastery": "想回炉", "last_reviewed": "2026-11-01", "interval_days": 12})
     wiki.save_page(first)
@@ -212,21 +212,21 @@ def test_reindex_rebuilds_add_remove_delete_and_isolates_without_rewriting(wiki)
     before = first.path.read_bytes()
     metadata = dict(first.meta)
     wiki.reindex()
-    assert build_graph(wiki, TODAY)["edges"] == []
-    assert all(node["degree"] == 0 for node in build_graph(wiki, TODAY)["nodes"])
+    assert build_graph(wiki)["edges"] == []
+    assert all(node["degree"] == 0 for node in build_graph(wiki)["nodes"])
     assert first.path.read_bytes() == before
     assert wiki.find("first").meta == metadata
 
     # 外部编辑仅操作 Markdown；重建不可覆盖个人段落或复习状态。
     first.path.write_bytes(before + "\n[[第二篇]]\n".encode())
     wiki.reindex()
-    assert build_graph(wiki, TODAY)["edges"] == [{"source": "first", "target": "second"}]
+    assert build_graph(wiki)["edges"] == [{"source": "first", "target": "second"}]
     backlinks = page_connections(wiki, wiki.find("second"))["backlinks"]
     assert [page.slug for page in backlinks] == ["first"]
     assert wiki.find("first").meta == metadata
     first.path.write_bytes(before)
     wiki.reindex()
-    assert build_graph(wiki, TODAY)["edges"] == []
+    assert build_graph(wiki)["edges"] == []
     assert page_connections(wiki, wiki.find("second"))["backlinks"] == []
     second.path.unlink()
     wiki.reindex()
@@ -235,7 +235,7 @@ def test_reindex_rebuilds_add_remove_delete_and_isolates_without_rewriting(wiki)
     assert first.path.read_bytes() == before
     first.path.unlink()
     wiki.reindex()
-    assert build_graph(wiki, TODAY) == {"nodes": [], "edges": []}
+    assert build_graph(wiki) == {"nodes": [], "edges": []}
 
 
 def test_machine_links_preserve_chinese_aliases_paths_and_ambiguity(wiki):

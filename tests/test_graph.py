@@ -23,9 +23,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def seed(env: Path):
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    kv = new_meta("KV cache", "concept", TODAY - timedelta(days=5), mastery="想回炉")
+    kv = new_meta("KV cache", "concept", TODAY - timedelta(days=5))
     wiki.save_page(Page("kv-cache", kv, "# KV cache\n\n[[paged-attention]] [[ghost]]"))
-    later = new_meta("Batching", "concept", TODAY, mastery="扎实")
+    later = new_meta("Batching", "concept", TODAY)
     wiki.save_page(Page("batching", later, "# Batching\n\n[[kv-cache]] [[kv-cache]]"))
     paper = new_meta("PagedAttention", "paper", TODAY)
     wiki.save_page(Page("paged-attention", paper, "# P\n\n[[kv-cache]] [[batching]]"))
@@ -35,7 +35,7 @@ def seed(env: Path):
 
 
 def test_build_graph(env):
-    graph = build_graph(seed(env), TODAY)
+    graph = build_graph(seed(env))
     nodes = {n["id"]: n for n in graph["nodes"]}
     assert set(nodes) == {"kv-cache", "batching", "paged-attention", "vllm"}  # raw 不是节点
     assert graph["edges"] == [  # 无向、去重；指向不存在页面（ghost）的链接不画
@@ -44,8 +44,7 @@ def test_build_graph(env):
         {"source": "kv-cache", "target": "paged-attention"},
     ]
     assert nodes["kv-cache"]["degree"] == 2 and nodes["vllm"]["degree"] == 0
-    assert nodes["kv-cache"]["due"] and not nodes["batching"]["due"]  # 到期高亮
-    assert nodes["paged-attention"]["due"] is False  # 只有概念页参与复习
+    assert all("due" not in node and "mastery" not in node for node in nodes.values())
     assert nodes["batching"]["url"] == "/wiki/page/batching"
 
 
@@ -54,8 +53,7 @@ def test_graph_endpoints(env):
     client = TestClient(create_app())
     data = json.loads(client.get("/wiki/graph.json").text)
     assert len(data["nodes"]) == 4 and len(data["edges"]) == 3
-    page = client.get("/wiki/graph").text
-    assert 'src="/static/cytoscape.min.js"' in page and "cdn" not in page.lower()
+    assert client.get("/wiki/graph").status_code == 200
     assert 'href="/wiki/graph"' in client.get("/wiki").text
 
 

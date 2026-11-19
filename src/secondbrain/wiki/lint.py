@@ -41,6 +41,8 @@ def lint(wiki: Wiki) -> LintReport:
     report = LintReport()
     connections = link_index(wiki)
     for slug, page in sorted(wiki.pages.items()):
+        if page.is_trashed:
+            continue
         missing = [f for f in REQUIRED_FIELDS if f not in page.meta]
         if missing:
             report.missing_fields[slug] = missing

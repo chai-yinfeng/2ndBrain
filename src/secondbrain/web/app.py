@@ -47,18 +47,18 @@ from secondbrain.pipeline.summary import (
 )
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
-from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
+from secondbrain.profile.loader import Profile, load_profile, parse_profile
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
 from secondbrain.sources.homepage import safe_url, source_homepage
 from secondbrain.web import filters
 from secondbrain.web.render import render_markdown
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
+from secondbrain.wiki.classification import classify_material, migrate_machine_blocks
 from secondbrain.wiki.graph import build_graph, page_connections
 from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
-from secondbrain.wiki.loop import wiki_refresh_link
-from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
+from secondbrain.wiki.management import KIND_TITLES, manage_pages, removal_impact, set_kind
 from secondbrain.wiki.store import Wiki, WikiError, open_wiki
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -91,15 +91,24 @@ def _static_asset(context, name: str) -> str:
     return str(context["request"].url_for("static", path=name).include_query_params(v=digest))
 
 
+@pass_context
+def _wiki_title(context, slug: str) -> str:
+    request = context["request"]
+    if not hasattr(request.state, "wiki_titles"):
+        request.state.wiki_titles = {page.slug: page.title for page in _wiki().pages.values()}
+    return request.state.wiki_titles.get(slug, "知识页")
+
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.globals.update(
     feedback_kinds=db.FEEDBACK_KINDS,
     feedback_hints=db.FEEDBACK_HINTS,
     feedback_groups=(("读之前", db.BEFORE_READ_KINDS), ("读完后", db.AFTER_READ_KINDS)),
-    grade_hints=GRADE_HINTS,
+    knowledge_kinds=KIND_TITLES,
     lane_titles=LANE_TITLES,
     version=__version__,
     static_asset=_static_asset,
+    wiki_title=_wiki_title,
 )
 
 
@@ -136,26 +145,56 @@ def _wiki() -> Wiki:
     return open_wiki(config.wiki_dir(), config.raw_dir())
 
 
-def refresh_hints(
-    prereqs: list[str], profile: Profile, wiki: Wiki | None
-) -> tuple[list[tuple[str, str | None]], list[str]]:
-    """前置知识分成 (建议先回炉 [(概念, wiki 链接或 None)], 其余)。
-
-    命中 wiki 中掌握度不是"扎实"的概念页 → 链接到该页；否则命中 profile 中不扎实的领域 → 无链接。"""
-    weak_profile = set(weak_prerequisites(profile, prereqs))
-    refresh, rest = [], []
-    for prereq in prereqs:
-        page, needs = wiki_refresh_link(wiki, prereq)
-        if page is not None:
-            if needs:
-                refresh.append((prereq, f"/wiki/page/{page.slug}"))
-            else:
-                rest.append(prereq)
-        elif prereq in weak_profile:
-            refresh.append((prereq, None))
+def related_prerequisites(
+    prereqs: list[str], wiki: Wiki | None
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """已有知识仅提供参考链接，不推断掌握程度或复习需要。"""
+    related, rest = [], []
+    for name in prereqs:
+        page = wiki.find(name) if wiki else None
+        if page is not None and page.is_visible:
+            related.append((name, f"/wiki/page/{page.slug}"))
         else:
-            rest.append(prereq)
-    return refresh, rest
+            rest.append(name)
+    return related, rest
+
+
+def _page_kind(page, conn: sqlite3.Connection) -> str:
+    override = page.meta.get("knowledge_kind") or page.meta.get("material_kind")
+    if override in KIND_TITLES:
+        return override
+    if page.type != "material":
+        return page.type if page.type in KIND_TITLES else "other"
+    item_id = page.meta.get("material_id")
+    if not item_id:
+        match = re.fullmatch(r"material-(\d+)", page.slug)
+        item_id = int(match[1]) if match else None
+    row = db.item_detail(conn, int(item_id)) if item_id else None
+    return classify_material(row, db.material_bibliography(conn, int(item_id))) if row else "other"
+
+
+def _source_links(page, conn: sqlite3.Connection) -> list[dict]:
+    ids = list(page.meta.get("sources") or [])
+    if page.meta.get("material_id"):
+        ids.append(page.meta["material_id"])
+    result = []
+    for item_id in dict.fromkeys(ids):
+        row = db.item_detail(conn, int(item_id))
+        if row is not None:
+            result.append({"id": item_id, "title": row["title"]})
+    return result
+
+
+def _graph_data(wiki: Wiki, *, include_drafts: bool = False) -> dict:
+    graph = build_graph(wiki, include_drafts=include_drafts)
+    with _conn() as conn:
+        for node in graph["nodes"]:
+            page = wiki.pages[node["id"]]
+            node["type"] = _page_kind(page, conn)
+            node["source_titles"] = {
+                source["id"]: source["title"] for source in _source_links(page, conn)
+            }
+    return graph
 
 
 def _entry(
@@ -163,11 +202,10 @@ def _entry(
     l1: dict,
     l2: dict | None,
     state: str | None,
-    profile: Profile,
     wiki: Wiki | None = None,
 ) -> dict:
     prereqs = (l2 or {}).get("prerequisites", [])
-    refresh, rest = refresh_hints(prereqs, profile, wiki)
+    related, rest = related_prerequisites(prereqs, wiki)
     return {
         "item_id": row["item_id"],
         "title": row["title"],
@@ -181,7 +219,7 @@ def _entry(
         "tldr": (l2 or {}).get("tldr"),
         "reason": (l2 or {}).get("why_for_you") or l1.get("one_line_reason", ""),
         "content_type": l1.get("content_type"),
-        "refresh_first": refresh,
+        "related_prerequisites": related,
         "prerequisites": rest,
         "state": state,
         "has_l2": l2 is not None,
@@ -307,7 +345,7 @@ def _active_sources() -> int:
 
 def _ingest_task(task: Task) -> dict:
     with _conn() as conn:
-        ids = pending_items(conn)
+        ids = pending_items(conn, _wiki())
     task.log(f"待编进 wiki：{len(ids)} 条")
     s = ops.ingest_items(ids, task.log)
     return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
@@ -489,7 +527,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                     canonical_id = db.resolve_material_id(conn, item_id)
                 if canonical_id != item_id:
                     return PlainTextResponse(
-                        f"材料 #{item_id} 已归并至主材料 #{canonical_id}，请对主 ID 操作",
+                        "此材料已归并，请打开主材料后操作",
                         status_code=409,
                     )
         response = await call_next(request)
@@ -514,7 +552,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         kind = task.kind if task else kind
         paper_page = None
         if task and kind.startswith("paper-") and task.result.get("material_id"):
-            paper_page = _wiki().find(f"material-{task.result['material_id']}")
+            paper_page = _wiki().material_page(task.result["material_id"])
         response = templates.TemplateResponse(
             request,
             "_task.html",
@@ -525,7 +563,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
         if refresh and task is not None and not task.running and (
-            task.status == "done" or kind == "wiki-sync"
+            task.status == "done" or kind == "wiki-sync" or kind.startswith("rewrite-")
         ):
             response.headers["HX-Refresh"] = "true"
         return response
@@ -647,12 +685,12 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             rows = queue[:8]
             count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
             unread = len(queue)
-            to_ingest = len(pending_items(conn))
+            to_ingest = len(pending_items(conn, wiki))
             later_count = len(queue)
         return templates.TemplateResponse(
             request, "home.html",
             {"rows": rows, "count": count, "unread": unread,
-             "pages": len(build_graph(wiki, datetime.now().date())["nodes"]),
+             "pages": len(build_graph(wiki)["nodes"]),
              "sources_count": len(config.load_sources()),
              "to_ingest": to_ingest, "later": later_count, "hints": CostHints(_settings()),
              "ingest_task": tasks.get("wiki_ingest")},
@@ -666,20 +704,18 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 date.fromisoformat(day)
             except ValueError as exc:
                 raise HTTPException(400, "date 格式应为 YYYY-MM-DD") from exc
-        profile = _profile()
         wiki = _wiki()
         with _conn() as conn:
             latest = db.latest_digest_date(conn)
             day = day or latest
             rows = db.digest_rows(conn, day) if day else []
-            concept_rows = db.digest_concepts(conn, day) if day else []
             l1 = db.latest_assessments(conn, "L1")
             l2 = db.latest_assessments(conn, "L2")
             states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
             later = len(db.reading_list_items(conn))
             summarized = db.ai_item_ids(conn, "summary")
-            to_ingest = len(pending_items(conn))
+            to_ingest = len(pending_items(conn, wiki))
             bibliographies = {
                 row["item_id"]: db.material_bibliography(conn, row["item_id"]) for row in rows
             }
@@ -697,13 +733,11 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 l1.get(row["item_id"], {}),
                 l2.get(row["item_id"]),
                 states[row["item_id"]],
-                profile,
                 wiki,
             )
             entry["has_summary"] = row["item_id"] in summarized
             lanes.setdefault(row["lane"], []).append(entry)
         used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
-        used += sum(c["est_minutes"] for c in concept_rows)
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -724,8 +758,6 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "to_ingest": to_ingest,
                 "ingest_task": tasks.get("wiki_ingest"),
                 "archived": len(lanes.get("archived", [])),
-                "concepts": [] if (form or ctype) else concept_rows,
-                "grades": GRADES,
                 "filter_bar": _filter_bar(
                     "/recommendations", {"date": request.query_params.get("date")}, form, ctype
                 ),
@@ -734,7 +766,6 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/item/{item_id}", response_class=HTMLResponse)
     def item(request: Request, item_id: int) -> HTMLResponse:
-        profile = _profile()
         with _conn() as conn:
             canonical_id = db.resolve_material_id(conn, item_id)
             if canonical_id != item_id:
@@ -782,7 +813,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "history": history,
                 "state": state,
                 "digests": lanes,
-                "refresh_first": refresh_hints(prereqs, profile, _wiki())[0],
+                "related_prerequisites": related_prerequisites(prereqs, _wiki())[0],
                 "summary": summary,
                 "summary_points": _summary_points(summary, row["url"]),
                 "summary_task": tasks.get(f"summary-{item_id}"),
@@ -792,7 +823,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "hints": CostHints(_settings()),
                 "origins": origins,
                 "notes": ops.material_notes(item_id),
-                "material_page": _wiki().find(f"material-{item_id}"),
+                "material_page": _wiki().material_page(item_id),
                 "wiki_task": tasks.get(f"wiki-{item_id}"),
                 "queued": queued,
                 "read_task": tasks.get(f"read-{item_id}"),
@@ -898,6 +929,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                     t.running or t.status == "waiting" for t in tasks.records()
                 ),
                 "read_kinds": {k: db.FEEDBACK_KINDS[k] for k in ops.READ_FEEDBACK},
+                "prefill_url": request.query_params.get("url", ""),
+                "remedy": request.query_params.get("remedy") == "1",
             },
         )
 
@@ -966,7 +999,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         task = tasks.get(kind)
         paper_page = None
         if task.result.get("material_id"):
-            paper_page = _wiki().find(f"material-{task.result['material_id']}")
+            paper_page = _wiki().material_page(task.result["material_id"])
         return templates.TemplateResponse(
             request, "paper_result.html",
             {"kind": kind, "task": task, "paper_page": paper_page, "detail": True},
@@ -1037,7 +1070,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 return result
 
         try:
-            tasks.start("manual_add", f"导入材料 {len(urls) or 1} 篇", run)
+            tasks.start(
+                "manual_add", f"导入材料 {len(urls) or 1} 篇", run,
+                initial_result={"submitted_urls": urls},
+            )
         except TaskRunning as exc:
             return task_fragment(request, "manual_add", str(exc))
         return task_fragment(request, "manual_add")
@@ -1070,6 +1106,21 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             conn.commit()
         return RedirectResponse("/later", status_code=303)
 
+    @app.post("/reading/remove")
+    async def reading_remove_many(request: Request):
+        form = await request.form()
+        try:
+            ids = list(dict.fromkeys(int(value) for value in form.getlist("item_ids")))
+        except ValueError as exc:
+            raise HTTPException(400, "请选择有效材料") from exc
+        if not ids:
+            raise HTTPException(400, "请先选择材料")
+        with _conn() as conn:
+            for item_id in ids:
+                db.remove_from_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
     @app.post("/reading/import", response_class=HTMLResponse)
     async def reading_import(request: Request) -> HTMLResponse:
         form = await request.form()
@@ -1092,7 +1143,9 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 )
 
         try:
-            tasks.start("manual_add", "添加到阅读列表", run)
+            tasks.start(
+                "manual_add", "添加到阅读列表", run, initial_result={"submitted_urls": [url]},
+            )
         except TaskRunning as exc:
             return task_fragment(request, "manual_add", str(exc))
         return task_fragment(request, "manual_add")
@@ -1250,6 +1303,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
 
+    @app.post("/profile/reject", response_class=HTMLResponse)
+    def profile_reject():
+        return HTMLResponse('<p class="meta">已拒绝提案，个人画像未修改。</p>')
+
     @app.post("/deep", response_class=HTMLResponse)
     def deep(request: Request, item_id: str = Form(...)) -> HTMLResponse:
         """按需精读单条（与 sb deep 同一逻辑），返回 TL;DR 片段。"""
@@ -1295,16 +1352,30 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             "cleared": request.query_params.get("cleared"),
         })
 
-    @app.post("/task-history/clear", response_class=HTMLResponse)
-    async def task_clear_finished(request: Request):
+    @app.post("/task-history/delete", response_class=HTMLResponse)
+    async def task_delete_finished(request: Request):
         form = await request.form()
+        delete_all = form.get("all") == "yes"
+        ids = list(dict.fromkeys(str(value) for value in form.getlist("task_ids")))
+        if not delete_all and not ids:
+            raise HTTPException(400, "请先选择已结束任务")
+        records = tasks.records(include_dismissed=True)
+        selected = records if delete_all else [t for t in records if t.id in ids]
+        if not delete_all and len(selected) != len(ids):
+            raise HTTPException(404, "任务记录不存在")
+        protected = [t for t in selected if t.running or t.status == "waiting"]
+        if protected and not delete_all:
+            raise HTTPException(409, "运行中或等待选择的任务不能删除")
+        finished = [t for t in selected if not t.running and t.status != "waiting"]
         if form.get("confirm") != "yes":
-            records = tasks.records()
-            finished = sum(not t.running and t.status != "waiting" for t in records)
             return templates.TemplateResponse(request, "task_history_clear.html", {
-                "finished_count": finished, "retained_count": len(records) - finished,
+                "records": finished, "finished_count": len(finished),
+                "retained_count": len(protected), "delete_all": delete_all,
             })
-        count = tasks.dismiss_finished()
+        try:
+            count = tasks.delete_finished(None if delete_all else ids)
+        except (ValueError, TaskRunning) as exc:
+            raise HTTPException(409, str(exc)) from exc
         return RedirectResponse(f"/task-history?cleared={count}", status_code=303)
 
     @app.get("/task-history/{task_id}/fragment", response_class=HTMLResponse)
@@ -1332,7 +1403,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         if task is None:
             raise HTTPException(404, "任务记录不存在")
         paper_page = (
-            _wiki().find(f"material-{task.result['material_id']}")
+            _wiki().material_page(task.result["material_id"])
             if task.kind.startswith("paper-") and task.result.get("material_id") else None
         )
         return templates.TemplateResponse(request, "paper_result.html", {
@@ -1366,7 +1437,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         known = (
             kind in TASKS or kind in {"manual_add", "wiki-sync"}
             or re.fullmatch(r"(summary|wiki|read)-\d+", kind)
-            or (re.fullmatch(r"paper-[0-9a-f]{32}", kind) and tasks.get(kind) is not None)
+            or (kind.startswith(("paper-", "rewrite-")) and tasks.get(kind) is not None)
             or (
                 re.fullmatch(r"source-(profile|repair)-[a-z0-9][a-z0-9-]*", kind)
                 or kind == "sources-repair"
@@ -1393,7 +1464,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             return {"item_id": item_id, "cost": out.cost, "cached": out.cached}
 
         try:
-            tasks.start(kind, f"深度速读 #{item_id}", run)
+            tasks.start(kind, "生成深度速读", run)
         except TaskRunning as exc:
             return task_fragment(request, kind, str(exc))
         return task_fragment(request, kind)
@@ -1852,9 +1923,11 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.get("/wiki", response_class=HTMLResponse)
     def wiki_index(request: Request) -> HTMLResponse:
         wiki = _wiki()
-        today = datetime.now().date()
-        due = [{"page": p, "due": due_date(p)} for p in due_concepts(wiki, today)]
-        index_html = render_markdown(wiki.index_path.read_text(encoding="utf-8"), wiki)
+        query = request.query_params.get("q", "").strip()
+        kind = request.query_params.get("kind", "")
+        view = request.query_params.get("view", "active")
+        if (kind and kind not in KIND_TITLES) or view not in {"active", "trash", "all"}:
+            raise HTTPException(400, "未知知识页筛选条件")
         with _conn() as conn:
             pending_read = conn.execute(
                 "SELECT id, title, processing_status FROM items"
@@ -1863,13 +1936,179 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 " WHERE m.item_id = items.id AND m.trashed = 1)"
                 " ORDER BY id DESC"
             ).fetchall()
+            entries = []
+            available_kinds = set()
+            for page in wiki.pages.values():
+                trashed = bool(page.meta.get("trashed"))
+                if (view == "trash" and not trashed) or (view == "active" and not page.is_visible):
+                    continue
+                page_kind = _page_kind(page, conn)
+                available_kinds.add(page_kind)
+                if kind and page_kind != kind:
+                    continue
+                if query and query.casefold() not in " ".join(
+                    [page.title, *page.aliases, str(page.meta.get("summary") or "")]
+                ).casefold():
+                    continue
+                entries.append({"page": page, "kind": page_kind})
+            entries.sort(key=lambda entry: entry["page"].title.casefold())
         return templates.TemplateResponse(
             request,
             "wiki.html",
-            {"index_html": index_html, "due": due, "grades": GRADES,
-             "count": len(build_graph(wiki, today)["nodes"]),
-             "pending_read": pending_read},
+            {"entries": entries, "count": len(entries), "query": query, "kind": kind,
+             "view": view, "available_kinds": available_kinds,
+             "notice": request.query_params.get("notice", ""), "pending_read": pending_read},
         )
+
+    @app.post("/wiki/manage", response_class=HTMLResponse)
+    async def wiki_manage(request: Request):
+        form = await request.form()
+        slugs = [str(value) for value in form.getlist("slugs")]
+        action = str(form.get("action") or "")
+        wiki = _wiki()
+        try:
+            if action not in {"trash", "restore"}:
+                raise WikiError("未知知识页管理操作")
+            impact = removal_impact(wiki, slugs)
+            if action == "trash" and form.get("confirm") != "yes":
+                return templates.TemplateResponse(request, "wiki_manage_confirm.html", {
+                    "impact": impact, "slugs": slugs,
+                })
+            changed = manage_pages(wiki, slugs, action)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse("/wiki?" + urlencode({
+            "view": "trash" if action == "trash" else "active",
+            "notice": f"已{'回收' if action == 'trash' else '恢复'} {len(changed)} 个知识页",
+        }), status_code=303)
+
+    @app.post("/wiki/category")
+    def wiki_category(slug: str = Form(...), kind: str = Form(...)):
+        try:
+            set_kind(_wiki(), slug, kind)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}", status_code=303)
+
+    def rewrite_kind(slug: str) -> str:
+        return "rewrite-" + hashlib.sha256(slug.encode()).hexdigest()[:20]
+
+    def rewrite_result(session: dict) -> dict:
+        # 会话正文只保存在会话库，任务记录仅保留可恢复的引用与执行结果。
+        return {
+            "session_id": session["id"], "slug": session["slug"],
+            "status": session["status"], "cost": session["cost"], "errors": session["errors"],
+        }
+
+    @app.post("/wiki/rewrite/start")
+    def wiki_rewrite_start(slug: str = Form(...), context: str = Form(...)):
+        from secondbrain.wiki.rewrite import start_session
+
+        if not context.strip():
+            raise HTTPException(422, "请输入本轮临时语境")
+        if slug not in _wiki().pages:
+            raise HTTPException(404, "知识页不存在")
+        try:
+            tasks.start(
+                rewrite_kind(slug), "按临时语境重整知识页",
+                lambda task: rewrite_result(start_session(slug, context.strip(), echo=task.log)),
+                initial_result={"slug": slug},
+            )
+        except TaskRunning as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/continue")
+    def wiki_rewrite_continue(session_id: str = Form(...), message: str = Form(...)):
+        from secondbrain.wiki.rewrite import continue_session, get_session
+
+        try:
+            session = get_session(session_id)
+            if not message.strip():
+                raise WikiError("请输入继续讨论的内容")
+            tasks.start(
+                rewrite_kind(session["slug"]), "继续知识页重整会话",
+                lambda task: rewrite_result(
+                    continue_session(session_id, message.strip(), echo=task.log)
+                ),
+                initial_result={"slug": session["slug"], "session_id": session_id},
+            )
+        except (WikiError, TaskRunning) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(
+            f"/wiki/page/{session['slug']}?" + urlencode({"session": session_id}) + "#rewrite",
+            status_code=303,
+        )
+
+    @app.post("/wiki/rewrite/apply")
+    def wiki_rewrite_apply(session_id: str = Form(...)):
+        from secondbrain.wiki.rewrite import apply_revision, get_session
+
+        try:
+            session = get_session(session_id)
+            task = tasks.get(rewrite_kind(session["slug"]))
+            if task and task.running:
+                raise WikiError("草稿生成中，请等待完成后再采用")
+            apply_revision(session_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(
+            f"/wiki/page/{session['slug']}?" + urlencode({"session": session_id}) + "#rewrite",
+            status_code=303,
+        )
+
+    @app.post("/wiki/rewrite/restore")
+    def wiki_rewrite_restore(slug: str = Form(...), revision_id: str = Form(...)):
+        from secondbrain.wiki.rewrite import restore_revision
+
+        try:
+            task = tasks.get(rewrite_kind(slug))
+            if task and task.running:
+                raise WikiError("重整生成中，请等待完成后再回退")
+            restore_revision(slug, revision_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/delete", response_class=HTMLResponse)
+    def wiki_rewrite_delete(
+        request: Request, session_id: str = Form(...), confirm: str = Form(""),
+    ):
+        from secondbrain.wiki.rewrite import delete_session, get_session
+
+        try:
+            session = get_session(session_id)
+            task = tasks.get(rewrite_kind(session["slug"]))
+            if task and task.running:
+                raise WikiError("生成中不能删除会话，请等待任务结束")
+            if confirm != "yes":
+                return templates.TemplateResponse(request, "wiki_rewrite_confirm.html", {
+                    "slug": session["slug"], "session_id": session_id,
+                    "action": "delete", "count": 1,
+                })
+            delete_session(session_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{session['slug']}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/clear-history", response_class=HTMLResponse)
+    def wiki_rewrite_clear_history(
+        request: Request, slug: str = Form(...), confirm: str = Form(""),
+    ):
+        from secondbrain.wiki.rewrite import clear_history, history
+
+        try:
+            task = tasks.get(rewrite_kind(slug))
+            if task and task.running:
+                raise WikiError("生成中不能清空版本历史，请等待任务结束")
+            if confirm != "yes":
+                return templates.TemplateResponse(request, "wiki_rewrite_confirm.html", {
+                    "slug": slug, "action": "clear-history", "count": len(history(slug)),
+                })
+            clear_history(slug)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
 
     @app.get("/wiki/sync", response_class=HTMLResponse)
     def wiki_sync_preview(request: Request) -> HTMLResponse:
@@ -1902,13 +2141,13 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/wiki/graph.json")
     def wiki_graph_json(drafts: bool = False) -> JSONResponse:
-        return JSONResponse(build_graph(_wiki(), datetime.now().date(), include_drafts=drafts))
+        return JSONResponse(_graph_data(_wiki(), include_drafts=drafts))
 
     @app.get("/wiki/graph", response_class=HTMLResponse)
     def wiki_graph(request: Request) -> HTMLResponse:
         wiki = _wiki()
         include_drafts = request.query_params.get("drafts") == "1"
-        graph = build_graph(wiki, datetime.now().date(), include_drafts=include_drafts)
+        graph = _graph_data(wiki, include_drafts=include_drafts)
         types = sorted({node["type"] for node in graph["nodes"]})
         return templates.TemplateResponse(
             request, "wiki_graph.html",
@@ -1955,36 +2194,39 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         page = candidates[0]
         connections = page_connections(wiki, page, include_drafts=not page.is_visible)
         from secondbrain.wiki.relations import relation_controls
+        from secondbrain.wiki.rewrite import get_session, history, list_sessions
+
+        sessions = list_sessions(page.slug)
+        session_id = request.query_params.get("session")
+        session = None
+        try:
+            if session_id:
+                session = get_session(session_id)
+                if session["slug"] != page.slug:
+                    raise WikiError("会话不属于当前知识页")
+            elif sessions:
+                session = get_session(sessions[0]["id"])
+        except WikiError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        with _conn() as conn:
+            page_kind = _page_kind(page, conn)
+            source_links = _source_links(page, conn)
 
         return templates.TemplateResponse(
             request,
             "wiki_page.html",
             {
                 "page": page,
-                "body_html": render_markdown(page.body, wiki, page),
+                "body_html": render_markdown(migrate_machine_blocks(page.body), wiki, page),
                 "connections": connections,
-                "due": due_date(page),
-                "grades": GRADES,
+                "page_kind": page_kind, "source_links": source_links,
+                "rewrite_task": tasks.get(rewrite_kind(page.slug)),
+                "rewrite_session": session, "rewrite_sessions": sessions,
+                "revisions": history(page.slug),
                 "relation_controls": relation_controls(wiki, page),
             },
         )
 
-    @app.post("/wiki/review", response_class=HTMLResponse)
-    def wiki_review(
-        request: Request, slug: str = Form(...), grade: str = Form(...)
-    ) -> HTMLResponse:
-        if grade not in GRADES:
-            raise HTTPException(400, f"未知的复习结果：{grade}")
-        wiki = _wiki()
-        page = wiki.pages.get(slug)
-        if page is None or page.type != "concept" or not page.is_visible:
-            raise HTTPException(404, "概念页不存在")
-        outcome = review(
-            wiki, page, grade, datetime.now().date(), _settings().wiki.mastered_interval_days
-        )
-        return templates.TemplateResponse(
-            request, "_review.html", {"outcome": outcome, "grades": GRADES, "page": page}
-        )
 
     return app
 

@@ -66,7 +66,7 @@ def material(conn, *, read=False, title="External learning", text="Original mate
 
 
 def page(wiki, slug, *, title=None, body="", status=None, aliases=None):
-    meta = new_meta(title or slug, "concept", TODAY, aliases=aliases, mastery="陌生")
+    meta = new_meta(title or slug, "concept", TODAY, aliases=aliases)
     if status:
         meta["knowledge_status"] = status
     result = Page(slug, meta, body or f"# {title or slug}\n")
@@ -97,10 +97,10 @@ def test_unread_drafts_are_opt_in_and_do_not_break_index_lint(env):
     row = material(conn)
     compile_plan(wiki, row)
     assert {p.knowledge_status for p in wiki.pages.values()} == {"draft"}
-    assert build_graph(wiki, TODAY) == {"nodes": [], "edges": []}
+    assert build_graph(wiki) == {"nodes": [], "edges": []}
     assert link_index(wiki) == {}
     assert wiki.concepts() == []
-    full = build_graph(wiki, TODAY, include_drafts=True)
+    full = build_graph(wiki, include_drafts=True)
     assert {node["knowledge_status"] for node in full["nodes"]} == {"draft"}
     assert len(full["nodes"]) == 2 and len(full["edges"]) == 1
     assert page_connections(wiki, wiki.pages["concept-a"])["backlinks"] == []
@@ -118,7 +118,7 @@ def test_recorded_links_to_hidden_drafts_are_not_missing(env):
     wiki.rebuild_index()
     connections = page_connections(wiki, recorded)
     assert connections["outgoing"] == connections["missing"] == []
-    assert {node["id"] for node in build_graph(wiki, TODAY)["nodes"]} == {"recorded"}
+    assert {node["id"] for node in build_graph(wiki)["nodes"]} == {"recorded"}
     assert lint(wiki).index_missing == []
     assert lint(wiki).broken_links == {}
     assert page_connections(wiki, recorded, include_drafts=True)["outgoing"] == [draft]
@@ -130,13 +130,13 @@ def test_read_compilation_records_but_never_promotes_mastery_or_downgrades(env):
     compile_plan(wiki, row)
     concept = wiki.pages["concept-a"]
     assert all(p.knowledge_status == "recorded" for p in wiki.pages.values())
-    assert concept.meta["mastery"] == "陌生"
-    assert concept.meta["last_reviewed"] is None
+    assert "mastery" not in concept.meta
+    assert "last_reviewed" not in concept.meta
     conn.execute("UPDATE items SET reading_state = 'unread' WHERE id = ?", (row["id"],))
     conn.commit()
     compile_plan(wiki, db.item_detail(conn, row["id"]))
     assert all(p.knowledge_status == "recorded" for p in wiki.pages.values())
-    assert wiki.pages["concept-a"].meta["mastery"] == "陌生"
+    assert "mastery" not in wiki.pages["concept-a"].meta
 
 
 def test_unmarked_legacy_page_is_truthful_and_never_rewritten(env):
@@ -146,7 +146,7 @@ def test_unmarked_legacy_page_is_truthful_and_never_rewritten(env):
     wiki.reindex()
     assert wiki.pages["legacy"].knowledge_status == "legacy"
     assert "knowledge_status" not in wiki.pages["legacy"].meta
-    node = build_graph(wiki, TODAY)["nodes"][0]
+    node = build_graph(wiki)["nodes"][0]
     assert node["knowledge_status"] == "legacy"
     assert "历史页：阅读状态未知" in wiki.index_path.read_text(encoding="utf-8")
     assert legacy.path.read_bytes() == original
@@ -252,7 +252,7 @@ def test_block_hides_both_directions_without_deleting_user_prose(env):
     assert wiki.pages["b"].body == original_b
     assert b.path.read_bytes() == b_bytes
     assert human_relations(wiki.pages["a"])[0]["reason"] == reason
-    assert build_graph(wiki, TODAY)["edges"] == []
+    assert build_graph(wiki)["edges"] == []
     assert page_connections(wiki, a)["outgoing"] == []
     assert page_connections(wiki, b)["backlinks"] == []
     assert lint(wiki).broken_links == {}
@@ -271,7 +271,7 @@ def test_blocks_reject_new_machine_text_links_and_automatic_material_edges(env):
             text=f"机器推断：反向也不允许 [[{material_slug}]]。",
         ),
     ])
-    assert build_graph(wiki, TODAY)["edges"] == []
+    assert build_graph(wiki)["edges"] == []
     assert wiki.pages[material_slug].links() == set()
     assert wiki.pages["concept-a"].links() == set()
     assert "Concept A" in wiki.pages[material_slug].body
@@ -300,7 +300,7 @@ def test_block_keeps_code_and_unrelated_links_and_reset_does_not_restore_old_mac
     set_relation(wiki, "b", "a", "reset", today=TODAY)
     assert human_relations(wiki.pages["a"]) == []
     assert human_relations(wiki.pages["b"]) == []
-    edges = build_graph(wiki, TODAY)["edges"]
+    edges = build_graph(wiki)["edges"]
     assert edges == [{"source": "a", "target": "c"}]
     a = wiki.pages["a"]
     assert _apply_update(wiki, a, PageUpdate(slug="a", action="add_links", links=["b"]), 42) is None
@@ -357,11 +357,11 @@ def test_manual_reason_is_durable_but_prompt_context_is_bounded(env):
 
 
 def test_batch_queue_uses_read_registration_without_gained_feedback(env):
-    conn, _ = env
+    conn, wiki = env
     unread = material(conn, title="Unread")
     read = material(conn, read=True, title="Registered read", text="Registered material facts")
-    assert read["id"] in pending_items(conn)
-    assert unread["id"] not in pending_items(conn)
+    assert read["id"] in pending_items(conn, wiki)
+    assert unread["id"] not in pending_items(conn, wiki)
 
 
 def test_relation_display_includes_reverse_control_and_canonical_target_survives_collisions(env):
@@ -381,7 +381,7 @@ def test_relation_display_includes_reverse_control_and_canonical_target_survives
     target = wiki.find("pages/concepts/b.md")
     assert relation_controls(wiki, target)[0]["target"] == "pages/concepts/b.md"
     assert page_connections(wiki, wiki.pages["a"])["outgoing"] == []
-    assert build_graph(wiki, TODAY)["edges"] == []
+    assert build_graph(wiki)["edges"] == []
 
 
 def test_missing_original_uses_only_learning_notes_and_empty_input_never_calls_model(env):

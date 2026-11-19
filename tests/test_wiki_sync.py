@@ -13,8 +13,7 @@ from secondbrain.wiki import sync
 from secondbrain.wiki.graph import build_graph
 from secondbrain.wiki.ingest import ingest_item, material_input_hash, pending_items
 from secondbrain.wiki.lint import lint
-from secondbrain.wiki.loop import known_knowledge, wiki_refresh_link
-from secondbrain.wiki.review import due_concepts
+from secondbrain.wiki.loop import related_knowledge
 from secondbrain.wiki.store import Page, WikiError, new_meta, open_wiki
 
 TODAY = date(2026, 11, 18)
@@ -59,7 +58,8 @@ def compiled(wiki, conn, iid):
 
 
 def concept(wiki, sources, *, slug="shared-concept", generated=True):
-    meta = new_meta("Shared concept", "concept", TODAY, mastery="想回炉")
+    meta = new_meta("Shared concept", "concept", TODAY)
+    meta["mastery"] = "想回炉"
     meta.update(sources=sources, knowledge_status="recorded", last_reviewed="2020-01-01",
                 human_relations={"blocked": ["do-not-remove"]})
     if generated:
@@ -166,11 +166,10 @@ def test_trash_preserves_personal_content_and_restore_clears_markers(env, monkey
     assert wiki.pages[shared.slug].meta["human_relations"] == relations
     assert raw.read_bytes() == raw_bytes and notes.read_text() == "独立个人笔记\n"
     assert sync.preview_sync()["changes"] == []
-    assert build_graph(wiki, TODAY)["nodes"] == []
-    assert len(build_graph(wiki, TODAY, include_drafts=True)["nodes"]) == 2
-    assert due_concepts(wiki, TODAY) == []
-    assert wiki_refresh_link(wiki, "Shared concept") == (None, False)
-    assert known_knowledge(wiki, [db.item_detail(conn, iid)], 500, 2000) == ""
+    assert build_graph(wiki)["nodes"] == []
+    assert len(build_graph(wiki, include_drafts=True)["nodes"]) == 2
+    assert not wiki.find("Shared concept").is_visible
+    assert related_knowledge(wiki, [db.item_detail(conn, iid)], 500, 2000) == ""
     assert not lint(wiki).index_missing
     lifecycle(conn, iid, False)
     assert sync.preview_sync()["changes"][0]["action"] == "restore"
@@ -198,7 +197,7 @@ def test_multi_source_concept_is_review_and_manual_page_is_untouched(env, monkey
     assert shared.material_sync_status == "review"
     assert shared.meta["material_sync"]["removed_sources"] == [first]
     assert manual.path.read_bytes() == original
-    assert shared.slug in {node["id"] for node in build_graph(wiki, TODAY)["nodes"]}
+    assert shared.slug in {node["id"] for node in build_graph(wiki)["nodes"]}
     assert "待复核" in wiki.index_path.read_text()
     assert "〔已登记〕" not in wiki.index_path.read_text()
     lifecycle(conn, second, True)
@@ -281,7 +280,7 @@ def test_trashed_material_is_not_pending_or_sent_to_model(env):
     conn, wiki = env
     iid = material(conn, "trashed")
     lifecycle(conn, iid, True)
-    assert iid not in pending_items(conn)
+    assert iid not in pending_items(conn, wiki)
     with pytest.raises(WikiError, match="回收站"):
         ingest_item(conn, wiki, FakeBackend(), None, db.item_detail(conn, iid),
                     FilterSettings(), TODAY)
@@ -400,9 +399,9 @@ def test_source_added_during_ingestion_keeps_shared_concept_visible(env, monkeyp
     page = wiki.pages[shared.slug]
     assert page.material_sync_status == "review"
     assert page.meta["material_sync"]["removed_sources"] == [old_id, updating_id]
-    node = next(node for node in build_graph(wiki, TODAY)["nodes"] if node["id"] == page.slug)
+    node = next(node for node in build_graph(wiki)["nodes"] if node["id"] == page.slug)
     assert node["material_sync_status"] == "review" and added[0] in node["sources"]
-    assert page.slug in {p.slug for p in due_concepts(wiki, TODAY)}
+    assert page.is_visible
 
 
 def test_sync_never_recompiles_or_restores_a_merged_historical_material(env, monkeypatch):

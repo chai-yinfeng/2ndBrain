@@ -45,7 +45,7 @@ daily_budget_minutes: 105
 lanes:
   must_read: 3
   worth_it: 10
-  refresher: 2      # 温故：讲得好的 explainer / survey 或到期复习概念，不占 must_read 名额
+  refresher: 2      # 温故：讲得好的 explainer / survey，不占 must_read 名额
   serendipity: 1    # 意外：高质量但与 profile 相关性较低，或来自 role: expansion 信源
 
 # 为温故 / 意外栏保留的预算（分钟，ADR 0007）：必读 / 值得读不能占用；
@@ -148,7 +148,7 @@ personalize:
   low_yield_min_items: 5         # 窗口内入库 ≥ 该数但进入推荐为 0 → "低产出，建议停用"
 
 # 经典回补（M5，ADR 0009）：backfill: true 的信源的历史条目进入回补池，
-# 每天挑少量（优先 explainer / survey、与"接触过 / 想回炉"领域相关的）经 L1 / L2 后放进温故栏。
+# 每天挑少量（优先 explainer / survey、按内容价值排序）经 L1 / L2 后放进温故栏。
 backfill:
   daily_limit: 1                 # 每天最多放入温故栏的回补条目
   screen_size: 10                # 回补池中保持多少条已粗筛的候选
@@ -159,9 +159,4 @@ wiki:
   index_max_chars: 8000          # 送入 ingest 的 index.md 上限
   related_pages: 5               # 送入 ingest 的候选相关页面数
   related_page_chars: 2000       # 每个相关页面的截断长度
-  known_max_chars: 2000          # L1 中"已知知识"段的上限（0 关闭）
-  review_minutes: 5              # 到期概念复习在时间预算中的估计耗时
-  review_slots: 1                # 每天最多放入温故栏的到期概念数
-  recent_days: 30                # 为到期概念附上近期相关条目的时间窗
-  first_review_days: 3           # 新建概念页（掌握度从"接触过"起步）的首次复习间隔
-  mastered_interval_days: 30     # 复习时点"已扎实"后的最短复习间隔
+  related_max_chars: 2000        # L1 中相关知识内容参考的上限（0 关闭）

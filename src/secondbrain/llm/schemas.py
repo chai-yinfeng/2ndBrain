@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from secondbrain.llm.base import format_validation_error
 
@@ -44,17 +44,6 @@ class L2Response(BaseModel):
 # ---------- M4：profile 修改提案 ----------
 
 
-class MasteryChange(BaseModel):
-    """对掌握度表的一处修改。update / remove 用 row（1 起，对应输入中的行号），add 用 domain。"""
-
-    action: Literal["update", "add", "remove"]
-    row: int | None = None
-    domain: str | None = None
-    mastery: str | None = None
-    priority: str | None = None
-    note: str | None = None
-    reason: str
-    evidence: list[int]  # 反馈 id
 
 
 class SectionEdit(BaseModel):
@@ -68,8 +57,9 @@ class SectionEdit(BaseModel):
 
 
 class ProfileProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     summary: str = ""
-    mastery_changes: list[MasteryChange] = Field(default_factory=list)
     section_edits: list[SectionEdit] = Field(default_factory=list)
 
 
@@ -88,7 +78,7 @@ class ChunkNotes(BaseModel):
 
 # ---------- M6：wiki ingest / lint ----------
 
-PageType = Literal["concept", "entity", "paper", "material"]
+PageType = Literal["concept", "entity", "material"]
 
 
 class PageCreate(BaseModel):

@@ -227,7 +227,7 @@ def test_deep_read_cards_offer_summary(env):
 @pytest.fixture
 def prereq_item(env):
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    meta = new_meta("KV cache", "concept", date.today(), mastery="想回炉")
+    meta = new_meta("KV cache", "concept", date.today())
     wiki.save_page(Page("kv-cache", meta, "# KV cache"))
     wiki.rebuild_index()
     add_item(
@@ -264,8 +264,6 @@ def test_prereq_merges_sources_links_wiki_and_caches(prereq_item):
     assert out.exit_code == 0, out.output
     # 已有深度速读：只用速读的前置知识（3 个，带 why）
     assert out.output.count("## ") == 3 and "（算强度）" in out.output
-    assert "✓ wiki 已有：[[kv-cache]] KV cache（掌握度 想回炉）" in out.output
-    assert "AI 讲解（AI 生成）：（fake）PagedAttention" in out.output
     assert "讲解类条目 #1 Understanding the Roofline model" in out.output
     assert "本次新生成 2 条讲解" in out.output and calls("PREREQ") == 1
     again = runner.invoke(cli_app, ["prereq", str(prereq_item)])
@@ -279,14 +277,18 @@ def test_save_prereq_as_concept_page(prereq_item, env):
     early = client.post(f"/prereq/{prereq_item}/save", data={"name": "PagedAttention"}).text
     assert "请先点「补前置」" in early
     html = client.post(f"/prereq/{prereq_item}").text
-    assert "AI 生成" in html and "存为概念页" in html and 'href="/wiki/page/kv-cache"' in html
+    assert 'href="/wiki/page/kv-cache"' in html
     saved = client.post(f"/prereq/{prereq_item}/save", data={"name": "PagedAttention"}).text
     assert "已存为概念页" in saved and 'href="/wiki/page/pagedattention"' in saved
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     page = wiki.pages["pagedattention"]
-    assert page.meta["mastery"] == "陌生" and page.meta["sources"] == [prereq_item]
-    assert page.meta["interval_days"] == 3 and "AI 生成" in page.body
-    assert "[[pagedattention]]" in wiki.index_path.read_text(encoding="utf-8")
+    assert "mastery" not in page.meta and page.meta["sources"] == [prereq_item]
+    assert "interval_days" not in page.meta and "<!-- wiki-ingest:start " in page.body
+    assert page.knowledge_status == "draft" and not page.is_visible
+    formal = client.get("/wiki/graph.json").json()["nodes"]
+    drafts = client.get("/wiki/graph.json?drafts=true").json()["nodes"]
+    assert "pagedattention" not in {node["id"] for node in formal}
+    assert "pagedattention" in {node["id"] for node in drafts}
     assert "] prereq | PagedAttention" in wiki.log_path.read_text(encoding="utf-8")
     assert lint(wiki).missing_fields == {}
     again = client.post(f"/prereq/{prereq_item}/save", data={"name": "PagedAttention"}).text

@@ -181,7 +181,8 @@ def test_reference_identity_is_not_title_only_and_drafts_are_not_knowledge(envir
                             title="Same title", state="later")
     assert first["results"][0]["item_id"] != second["results"][0]["item_id"]
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    meta = new_meta("Known-looking draft", "concept", date.today(), mastery="扎实")
+    meta = new_meta("Known-looking draft", "concept", date.today())
+    meta["mastery"] = "扎实"  # 历史字段不改变草稿的可见性。
     meta["knowledge_status"] = "draft"
     wiki.save_page(Page("draft", meta, "A draft"))
     out = CliRunner().invoke(cli_app, ["wiki", "graph", "--focus", "draft"])

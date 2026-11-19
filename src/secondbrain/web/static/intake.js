@@ -68,7 +68,7 @@
       }
       active = type;
     }
-    content.open = active !== "link";
+    content.open = active !== "link" || root.dataset.intakeRemedy === "true";
     contentLabel.hidden = active !== "link";
     contentLabel.textContent = "补充正文或 PDF（可选，单个链接；二选一）";
     sync();

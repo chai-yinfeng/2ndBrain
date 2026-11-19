@@ -82,7 +82,7 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
         notes = _notes(wiki, iid)
         digest = material_input_hash(row, notes)
         state = states.get(iid, {})
-        material = wiki.pages.get(f"material-{iid}")
+        material = wiki.material_page(iid)
         compiled = (
             material is not None and material.meta.get("input_hash") == digest
             and not (row["reading_state"] == "read" and material.knowledge_status == "draft")
@@ -90,6 +90,7 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
         )
         needs_ingest = (
             row["reading_state"] == "read" and not compiled and not state.get("trashed")
+            and not (material is not None and material.is_trashed)
         )
         lifecycle_pending = state.get("revision", 0) != state.get("synced_revision", 0)
         inputs[iid] = {
@@ -99,7 +100,8 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
         }
         pages = []
         for page in sorted(wiki.pages.values(), key=lambda p: p.slug):
-            if iid not in _sources(page) or page.meta.get("generated_by") != "wiki_ingest":
+            if (page.is_trashed or iid not in _sources(page)
+                    or page.meta.get("generated_by") != "wiki_ingest"):
                 continue
             marker = _marker(page, states, item_ids)
             if marker != page.meta.get("material_sync"):
@@ -249,7 +251,8 @@ def apply_sync(token: str, echo: Callable[[str], None]) -> dict:
                 }
                 for page in wiki.pages.values():
                     affected = _sources(page).intersection(compile_ids)
-                    if page.meta.get("generated_by") != "wiki_ingest" or not affected:
+                    if (page.is_trashed or page.meta.get("generated_by") != "wiki_ingest"
+                            or not affected):
                         continue
                     marker = _marker(page, states, current_ids)
                     if marker == page.meta.get("material_sync"):
@@ -279,7 +282,7 @@ def apply_sync(token: str, echo: Callable[[str], None]) -> dict:
                     failure(iid, SyncConflict("同步期间材料或笔记变化，仍保留待同步"))
                     continue
                 if change["needs_ingest"]:
-                    material = wiki.pages.get(f"material-{iid}")
+                    material = wiki.material_page(iid)
                     if (material is None or material.meta.get("input_hash") != digest
                             or row["processing_status"] != "processed"):
                         continue

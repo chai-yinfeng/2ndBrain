@@ -13,6 +13,7 @@
     <textarea name="new_text" hidden>{{ result.new_text }}</textarea>
     <button type="submit" class="fb">应用（自动备份旧版本）</button>
   </form>
+  <button type="button" class="fb" hx-post="/profile/reject" hx-target="#proposal" hx-swap="innerHTML">拒绝提案（不修改画像）</button>
   {% else %}
   <p class="meta">提案没有可应用的修改，profile 不变。</p>
   {% endif %}

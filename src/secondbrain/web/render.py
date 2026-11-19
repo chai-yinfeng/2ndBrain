@@ -19,11 +19,14 @@ from markdown.extensions.toc import TocExtension, slugify_unicode
 from markdown.inlinepatterns import InlineProcessor
 from markdown.util import AtomicString
 
-from secondbrain.wiki.store import PAGE_TYPES, Page, Wiki
+from secondbrain.wiki.store import PAGE_TYPES, Page, Wiki, markdown_without_code
 
 _RESOURCE_SUFFIXES = {".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-_HINTS = {"missing": "目标不存在", "ambiguous": "目标有歧义", "unsafe": "不安全的链接"}
+_HINTS = {
+    "missing": "目标不存在", "ambiguous": "目标有歧义",
+    "unsafe": "不安全的链接", "trashed": "目标已回收",
+}
 _WIKILINK = r"(!?)\[\[([^\]\n]+)\]\]"
 _MATH = r"(?<!\\)(?:\$\$([\s\S]+?)(?<!\\)\$\$|\$([^\n$]+?)(?<!\\)\$)"
 
@@ -72,6 +75,10 @@ def _destination(
     if not image and re.fullmatch(r"/(?:wiki/page/[^?#]+|item/\d+)", url.path):
         if any(part in {".", ".."} for part in url.path.split("/")):
             return None, "unsafe"
+        if url.path.startswith("/wiki/page/"):
+            matches = wiki.resolve(url.path.removeprefix("/wiki/page/"))
+            if len(matches) == 1 and matches[0].meta.get("trashed"):
+                return None, "trashed"
         return quote(url.path, safe="/") + suffix, ""
     # Raw links carry a stable material ID even in older vault layouts; mapping
     # the ID never serves a filesystem path outside the current vault.
@@ -88,6 +95,8 @@ def _destination(
         if len(matches) > 1:
             return None, "ambiguous"
         if matches and not image:
+            if matches[0].meta.get("trashed"):
+                return None, "trashed"
             return "/wiki/page/" + quote(matches[0].slug, safe="/") + suffix, ""
         if source is None:
             base = root
@@ -170,6 +179,8 @@ class _WikiInline(InlineProcessor):
             label += " › " + heading
         if len(matches) > 1:
             destination, status = None, "ambiguous"
+        elif matches and matches[0].meta.get("trashed"):
+            destination, status = None, "trashed"
         elif matches:
             destination = "/wiki/page/" + quote(matches[0].slug, safe="/")
             if heading:
@@ -281,6 +292,15 @@ class _SafeHTML(HTMLParser):
 
 def render_markdown(text: str, wiki: Wiki, page: Page | None = None) -> str:
     """Render a vault document without executing HTML or selecting ambiguous pages."""
+    masked = markdown_without_code(text)
+    internal = re.finditer(
+        r"(?m)^<!-- (?:wiki-rewrite:(?:start|end)|"
+        r"wiki-ingest:(?:start|end) material-\d+:[0-9a-f]+|"
+        r"material-\d+:[0-9a-f]+) -->[ \t]*$",
+        masked,
+    )
+    for marker in reversed(list(internal)):
+        text = text[:marker.start()] + text[marker.end():]
     rendered = markdown.markdown(
         text,
         extensions=[

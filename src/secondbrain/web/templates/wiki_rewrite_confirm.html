@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}重整记录管理 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><h1>{{ '删除本轮会话' if action == 'delete' else '清空正文版本历史' }}？</h1></header>
+<section class="panel">
+{% if action == 'delete' %}<p>删除本轮临时语境、对话与未采用草稿，不能恢复。已采用的页面正文、独立版本历史和用量记录保留。</p>{% else %}<p>永久删除此页的 {{ count }} 个回退点，之后不能回到这些历史正文。当前页面、个人笔记、来源、重整会话和用量记录不变。</p>{% endif %}
+<form method="post" action="/wiki/rewrite/{{ action }}" class="toolbar"><input type="hidden" name="confirm" value="yes">{% if action == 'delete' %}<input type="hidden" name="session_id" value="{{ session_id }}">{% else %}<input type="hidden" name="slug" value="{{ slug }}">{% endif %}<button class="fb" type="submit">确认{{ '删除会话' if action == 'delete' else '清空版本历史' }}</button><a class="fb" href="/wiki/page/{{ slug }}#rewrite">取消</a></form>
+</section>
+{% endblock %}

@@ -1,7 +1,6 @@
 """材料管理与手动同步的 Web 边界；只用隔离数据和 fake 模型。"""
 
 import re
-import threading
 from contextlib import closing
 
 from fastapi.testclient import TestClient
@@ -94,43 +93,6 @@ def test_web_sync_requires_preview_and_preserves_notes_on_trash_restore(monkeypa
             assert note_path.read_bytes() == note_bytes
         with closing(db.connect()) as conn:
             assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == calls
-
-
-def test_clear_finished_history_retains_running_and_waiting_and_survives_restart(monkeypatch):
-    monkeypatch.setenv("SB_LLM_BACKEND", "fake")
-    app = create_app()
-    registry = app.state.tasks
-    done = registry.start("manual_add", "finished", lambda _: {"results": []})
-    done.thread.join(5)
-
-    def fail(_):
-        raise RuntimeError("controlled failure")
-
-    failed = registry.start("controlled-failure", "failed", fail)
-    failed.thread.join(5)
-    waiting = registry.start("paper-" + "a" * 32, "waiting", lambda _: {
-        "status": "ambiguous", "search_id": "pending-reference", "candidates": [],
-    })
-    waiting.thread.join(5)
-    gate = threading.Event()
-    running = registry.start("run", "running", lambda _: {"cost": 0, "waited": gate.wait(10)})
-    try:
-        with TestClient(app) as client:
-            assert client.post("/task-history/clear").status_code == 200
-            assert not registry.get(done.id).dismissed
-            response = client.post("/task-history/clear", data={"confirm": "yes"})
-            assert response.status_code == 200
-            assert {t.id for t in registry.records()} == {waiting.id, running.id}
-            assert registry.get(failed.id).error == "controlled failure"
-            assert running.running and running.thread.is_alive()
-            assert f'data-task-record="{done.id}"' in client.get("/task-history?closed=1").text
-    finally:
-        gate.set()
-        running.thread.join(5)
-    restarted = create_app()
-    assert restarted.state.tasks.get(done.id).dismissed
-    assert restarted.state.tasks.get(failed.id).dismissed
-    assert not restarted.state.tasks.get(waiting.id).dismissed
 
 
 def test_merged_material_redirects_old_links_and_rejects_stale_writes(monkeypatch):

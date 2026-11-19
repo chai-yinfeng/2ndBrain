@@ -22,24 +22,21 @@ PAGE_TYPES = {
     "concept": "concepts", "entity": "entities", "paper": "papers", "material": "materials",
 }
 TYPE_TITLES = {
-    "concept": "Concepts",
-    "entity": "Entities",
-    "paper": "Papers",
-    "material": "Materials",
+    "concept": "概念",
+    "entity": "实体",
+    "paper": "论文",
+    "article": "文章与网页",
+    "video": "视频",
+    "other": "其他资料",
 }
 REQUIRED_FIELDS = (
     "title",
     "type",
     "aliases",
     "sources",
-    "mastery",
-    "last_reviewed",
-    "interval_days",
-    "ease",
     "created",
     "updated",
 )
-DEFAULT_EASE = 2.5
 WIKILINK_RE = re.compile(r"\[\[([^\]\n|#]*)(?:#[^\]\n|]*)?(?:\|[^\]\n]*)?\]\]")
 _SLUG_RE = re.compile(r"[\W_]+")
 MAX_SLUG = 80
@@ -119,6 +116,21 @@ class Page:
         return self.meta.get("type", "concept")
 
     @property
+    def kind(self) -> str:
+        """展示类别与稳定文件类型分离；人工分类优先。"""
+        manual = self.meta.get("knowledge_kind")
+        if manual in TYPE_TITLES:
+            return manual
+        if self.type == "material":
+            kind = self.meta.get("material_kind")
+            return kind if kind in {"paper", "article", "video", "other"} else "other"
+        return self.type if self.type in TYPE_TITLES else "other"
+
+    @property
+    def is_trashed(self) -> bool:
+        return self.meta.get("trashed") is True
+
+    @property
     def title(self) -> str:
         return self.meta.get("title") or self.slug
 
@@ -143,7 +155,8 @@ class Page:
     def is_visible(self) -> bool:
         """正式知识视图；人工正文始终留在文件中，来源失效只影响机器页可见性。"""
         return (
-            self.knowledge_status != "draft"
+            not self.is_trashed
+            and self.knowledge_status != "draft"
             and self.material_sync_status not in {"withdrawn", "unsupported"}
         )
 
@@ -268,7 +281,7 @@ class Wiki:
             self.pages[slug] = parse_page(path.read_text(encoding="utf-8"), slug, path)
 
     def reindex(self) -> None:
-        """仅重读页面并重建派生目录；不重写页面、复习状态或用户内容。"""
+        """仅重读页面并重建派生目录；不重写页面或用户内容。"""
         self.reload_pages()
         self.rebuild_index()
 
@@ -289,12 +302,14 @@ class Wiki:
     def rebuild_index(self) -> None:
         lines = ["# Wiki Index", "", "由 `sb wiki` 根据页面自动生成，请勿手动编辑。"]
         for page_type, heading in TYPE_TITLES.items():
-            lines += ["", f"## {heading}", ""]
             entries = sorted(
                 (p for p in self.pages.values()
-                 if p.type == page_type and p.is_visible),
+                 if p.kind == page_type and p.is_visible),
                 key=lambda p: p.slug,
             )
+            if not entries:
+                continue
+            lines += ["", f"## {heading}", ""]
             for p in entries:
                 summary = (p.meta.get("summary") or "").replace("\n", " ").strip()
                 label = "〔历史页：阅读状态未知〕" if p.knowledge_status == "legacy" else ""
@@ -302,8 +317,6 @@ class Wiki:
                     label += "〔来源已变化：待复核〕"
                 suffix = f" {label}" if label else ""
                 lines.append(f"- [[{p.slug}]]{suffix}" + (f" — {summary}" if summary else ""))
-            if not entries:
-                lines.append("（暂无）")
         self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # ---------- 查询 ----------
@@ -348,6 +361,21 @@ class Wiki:
         """只返回唯一匹配；缺失与歧义均不猜测。"""
         matches = self.resolve(name, source)
         return matches[0] if len(matches) == 1 else None
+
+    def material_page(self, item_id: int) -> Page | None:
+        """按来源身份复用旧 paper 页，不按标题合并，不改变稳定路径。"""
+        direct = self.pages.get(f"material-{item_id}")
+        if direct is not None:
+            return direct
+        matches = [
+            page for page in self.pages.values()
+            if page.type in {"material", "paper"}
+            and (page.meta.get("material_id") == item_id
+                 or (page.type == "paper" and item_id in (page.meta.get("sources") or [])))
+        ]
+        if len(matches) > 1:
+            raise WikiError("同一材料有多个知识页，请先处理身份冲突")
+        return matches[0] if matches else None
 
     def is_resource_link(self, name: str, source: Page | None = None) -> bool:
         """原文与附件不是知识节点，也不是缺失知识页。"""
@@ -448,9 +476,7 @@ def new_meta(
     *,
     summary: str = "",
     aliases: list[str] | None = None,
-    mastery: str | None = None,
     sources: list[int] | None = None,
-    interval_days: int = 1,
 ) -> dict:
     return {
         "title": title,
@@ -458,10 +484,6 @@ def new_meta(
         "summary": summary,
         "aliases": aliases or [],
         "sources": sources or [],
-        "mastery": mastery,
-        "last_reviewed": today.isoformat(),
-        "interval_days": interval_days,
-        "ease": DEFAULT_EASE,
         "created": today.isoformat(),
         "updated": today.isoformat(),
     }

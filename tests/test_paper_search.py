@@ -386,7 +386,7 @@ def test_paper_to_material_wiki_and_graph_without_feedback(monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM llm_calls WHERE stage = 'WIKI'").fetchone()[0] == 1
     conn.close()
-    graph = build_graph(wiki, NOW.date(), include_drafts=True)
+    graph = build_graph(wiki, include_drafts=True)
     assert any(node["id"] == slug for node in graph["nodes"])
 
 

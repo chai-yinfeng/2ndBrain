@@ -1,4 +1,4 @@
-"""从任意材料整理 wiki；机器处理不代表用户已读、已复习或已掌握。"""
+"""从任意材料整理 wiki；阅读登记独立于知识内容。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from secondbrain.models import FilterSettings
 from secondbrain.pipeline.l2_deep import chunk_text, map_messages, notes_text
 from secondbrain.pipeline.run import PROMPTS_DIR
 from secondbrain.profile.loader import Profile
+from secondbrain.wiki.classification import classify_material
 from secondbrain.wiki.relations import (
     filter_machine_links,
     page_identity,
@@ -36,7 +37,6 @@ from secondbrain.wiki.store import (
 
 # 对每段提要显式限长；超限报错，不截断。汇总输入与费用预检因此都有确定上界。
 MAX_MAP_NOTES_CHARS = 6000
-NEW_CONCEPT_MASTERY = "陌生"
 
 
 @dataclass
@@ -82,16 +82,16 @@ def _user_notes(wiki: Wiki, item_id: int, notes: str | None = None) -> str:
 
 
 def promote_material(wiki: Wiki, item_id: int) -> list[str]:
-    """登记已有编译结果，不调用模型、不修改掌握度、复习状态或个人文字。"""
+    """登记已有编译结果，不调用模型、不修改个人文字或回收状态。"""
     wiki.reload_pages()
-    material = wiki.pages.get(f"material-{item_id}")
-    if material is None or material.type != "material":
+    material = wiki.material_page(item_id)
+    if material is None or material.type not in {"material", "paper"} or material.is_trashed:
         return []
     pages = [material]
     for name in material.meta.get("generated_pages") or []:
         page = wiki.find(name)
         if (
-            page is not None and page.type in {"concept", "entity"}
+            page is not None and not page.is_trashed and page.type in {"concept", "entity"}
             and page.meta.get("generated_by") == "wiki_ingest"
             and item_id in (page.meta.get("sources") or [])
         ):
@@ -152,7 +152,10 @@ def ingest_messages(
 ) -> list[dict]:
     system = (PROMPTS_DIR / "wiki_ingest.md").read_text(encoding="utf-8")
     related = [page for page in related if page.is_visible]
-    index = wiki.index_path.read_text(encoding="utf-8")[: s.wiki.index_max_chars]
+    index = "\n".join(
+        f"- [[{page.slug}|{page.title}]] — {page.meta.get('summary') or ''}"
+        for page in sorted(wiki.pages.values(), key=lambda page: page.slug) if page.is_visible
+    )[:s.wiki.index_max_chars]
     pages = [
         {
             "slug": p.slug,
@@ -168,7 +171,7 @@ def ingest_messages(
         for p in related
     ]
     relevant = list(related)
-    material = wiki.pages.get(payload["material_slug"])
+    material = wiki.material_page(payload["id"])
     if material is not None and material.is_visible:
         relevant.append(material)
     guidance = []
@@ -217,7 +220,6 @@ def _append_machine(
     page: Page, item_id: int, text: str, *, wiki: Wiki
 ) -> None:
     """只追加有来源的机器内容，并强制人工关系约束。"""
-    text = filter_machine_links(wiki, page, text)
     text = text.strip()
     if not text:
         return
@@ -225,17 +227,22 @@ def _append_machine(
     marker = f"<!-- material-{item_id}:{digest} -->"
     if marker in page.body:
         return
+    text = filter_machine_links(wiki, page, text).strip()
+    if not text:
+        return
     text = re.sub(r"(?m)^#{1,2} ", "### ", text)
-    material = wiki.pages.get(f"material-{item_id}")
-    basis = (
-        "仅依据用户学习记录；原文缺失，不代表原文结论。"
+    material = wiki.material_page(item_id)
+    warning = (
+        "> 仅依据用户学习记录；原文缺失，不代表原文结论。\n\n"
         if material is not None and material.meta.get("compilation_basis") == "user_notes_only"
-        else "材料陈述与机器推断分别标注。"
+        else ""
     )
+    key = f"material-{item_id}:{digest}"
     page.body = append_section(
         page.body,
-        f"机器整理 · 材料 {item_id}",
-        f"{marker}\n\n> 机器整理，未经用户核对；{basis}\n\n{text}",
+        "整理",
+        f"<!-- wiki-ingest:start {key} -->\n{marker}\n\n"
+        f"{warning}{text}\n\n<!-- wiki-ingest:end {key} -->",
     )
 
 
@@ -245,25 +252,26 @@ def apply_plan(
     row: sqlite3.Row,
     profile: Profile,
     today: date,
-    first_review_days: int = 3,
     *,
     provenance: list[dict] | None = None,
     user_notes: str | None = None,
+    bibliography: dict | None = None,
 ) -> IngestResult:
-    """保守追加并重建索引；Markdown 为事实来源，绝不覆盖个人内容或复习状态。"""
+    """保守追加并重建索引；Markdown 为事实来源，不覆盖个人内容或回收页。"""
     wiki.reload_pages()
     result = IngestResult(row["id"], row["title"])
     result.rejected.extend(f"解析时丢弃 {d}" for d in plan.dropped)
-    material_slug = f"material-{row['id']}"
+    material = wiki.material_page(row["id"])
+    material_slug = material.slug if material is not None else f"material-{row['id']}"
     notes = _user_notes(wiki, row["id"], user_notes)
     recorded = "reading_state" in row.keys() and row["reading_state"] == "read"
     status = "recorded" if recorded else "draft"
-    material = wiki.pages.get(material_slug)
-    if material is not None and material.type != "material":
+    if material is not None and material.is_trashed:
+        raise WikiError("知识页已回收，请先恢复再整理")
+    if material is not None and material.type not in {"material", "paper"}:
         raise WikiError(f"{material_slug} 已被非材料页面占用，不能覆盖")
     if material is None:
         meta = new_meta(row["title"], "material", today)
-        meta["last_reviewed"] = None
         meta["generated_by"] = "wiki_ingest"
         meta["knowledge_status"] = status
         material = Page(material_slug, meta, f"# {row['title']}\n\n## 个人笔记\n")
@@ -272,6 +280,8 @@ def apply_plan(
     else:
         result.updated.append(material_slug)
     material.meta["material_id"] = row["id"]
+    if not material.meta.get("material_kind"):
+        material.meta["material_kind"] = classify_material(row, bibliography)
     if recorded:
         material.meta["knowledge_status"] = "recorded"
     material.meta["input_hash"] = material_input_hash(row, notes)
@@ -307,7 +317,8 @@ def apply_plan(
     for op in plan.creates:
         try:
             slug = material_slug if op.type == "material" else slugify(op.slug)
-            wiki.page_path(slug, op.type)
+            if op.type != "material" or material is None:
+                wiki.page_path(slug, op.type)
         except WikiError as exc:
             result.rejected.append(f"create {op.slug!r}：{exc}")
             continue
@@ -316,9 +327,17 @@ def apply_plan(
             continue
         existing = wiki.pages.get(slug)
         if existing is None and op.type != "material":
+            if any(page.is_trashed for page in wiki.resolve(op.title)):
+                result.rejected.append(f"create {op.slug!r}：同名知识页已回收，请先恢复")
+                continue
             existing = wiki.find(op.title)
         if existing is not None:
-            if existing.type != op.type:
+            if existing.is_trashed:
+                result.rejected.append(f"create {op.slug!r}：已有知识页已回收")
+                continue
+            if existing.type != op.type and not (
+                op.type == "material" and existing is material and existing.type == "paper"
+            ):
                 result.rejected.append(f"create {op.slug!r}：已有页面类型为 {existing.type}")
                 continue
             _append_machine(existing, row["id"], op.body, wiki=wiki)
@@ -326,22 +345,13 @@ def apply_plan(
                 existing.meta["summary"] = op.summary.strip()
             mark_updated(existing)
             continue
-        if op.type == "paper":
-            result.rejected.append(
-                f"create {op.slug!r}：材料请使用 {material_slug}，保留旧 paper 链接"
-            )
-            continue
-        concept = op.type == "concept"
         meta = new_meta(
             op.title,
             op.type,
             today,
             summary=op.summary.strip(),
             aliases=op.aliases,
-            mastery=NEW_CONCEPT_MASTERY if concept else None,
-            interval_days=first_review_days if concept else 1,
         )
-        meta["last_reviewed"] = None
         meta["generated_by"] = "wiki_ingest"
         meta["knowledge_status"] = status
         page = Page(slug, meta, f"# {op.title}\n\n## 个人笔记\n")
@@ -357,6 +367,9 @@ def apply_plan(
             reason = "名称有歧义，请使用页面 ID/路径" if matches else "页面不存在"
             result.rejected.append(f"update {op.slug!r}：{reason}")
             continue
+        if page.is_trashed:
+            result.rejected.append(f"update {op.slug!r}：知识页已回收")
+            continue
         problem = _apply_update(wiki, page, op, row["id"])
         if problem:
             result.rejected.append(f"update {op.slug!r}（{op.action}）：{problem}")
@@ -369,22 +382,16 @@ def apply_plan(
         _append_machine(
             material, row["id"], f"材料陈述：{plan.summary}" if plan.summary else "", wiki=wiki
         )
-    notes_path = wiki.root / "notes" / f"{material_slug}-notes.md"
+    notes_slug = f"material-{row['id']}"
+    notes_path = wiki.root / "notes" / f"{notes_slug}-notes.md"
     if notes_path.is_file():
         material.body = add_list_items(
-            material.body, "个人笔记", [f"[独立个人笔记](../../notes/{material_slug}-notes.md)"]
+            material.body, "个人笔记", [f"[独立个人笔记](../../notes/{notes_slug}-notes.md)"]
         )
-    material.body = add_list_items(
-        material.body, "来源", [f"材料正文完整性：{completeness}（不代表用户已读）"]
-    )
-    for origin in provenance or []:
-        description = (
-            f"来源方式：{origin['kind']}；定位：{origin['locator']}；"
-            f"信源：{origin.get('source_id') or '—'}；完整性：{origin['completeness']}"
+    if completeness != "full":
+        material.body = add_list_items(
+            material.body, "来源", [f"原文完整性：{completeness}"]
         )
-        if origin.get("original_path"):
-            description += f"；[原始文件](../../{origin['original_path']})"
-        material.body = add_list_items(material.body, "来源", [description])
     legacy = [page for page in wiki.resolve(row["title"]) if page.type == "paper"]
     if len(legacy) == 1:
         _add_machine_links(wiki, material, [legacy[0].slug])
@@ -403,7 +410,7 @@ def apply_plan(
         for name in generated:
             page = wiki.find(name)
             if (
-                page is not None and page.type in {"concept", "entity"}
+                page is not None and not page.is_trashed and page.type in {"concept", "entity"}
                 and page.meta.get("generated_by") == "wiki_ingest"
                 and row["id"] in (page.meta.get("sources") or [])
                 and page.knowledge_status == "draft"
@@ -428,6 +435,8 @@ def _add_machine_links(wiki: Wiki, page: Page, names: list[str]) -> None:
 
 
 def _apply_update(wiki: Wiki, page: Page, op: PageUpdate, item_id: int) -> str | None:
+    if page.is_trashed:
+        return "知识页已回收"
     if op.action in ("append_section", "replace_section"):
         if not op.section or not op.text:
             return "需要 section 与 text"
@@ -446,15 +455,19 @@ def _apply_update(wiki: Wiki, page: Page, op: PageUpdate, item_id: int) -> str |
     return None
 
 
-def pending_items(conn: sqlite3.Connection) -> list[int]:
+def pending_items(conn: sqlite3.Connection, wiki: Wiki) -> list[int]:
     """批量整理已登记阅读的材料，不要求 gained、评分或掌握度。"""
     done = db.ingested_ids(conn)
+    wiki.reload_pages()
     rows = conn.execute(
         "SELECT id, processing_status FROM items WHERE reading_state = 'read' ORDER BY id"
     )
     return [
         row["id"] for row in rows
         if not db.is_trashed(conn, row["id"])
+        and not (
+            (page := wiki.material_page(row["id"])) is not None and page.is_trashed
+        )
         and (row["id"] not in done or row["processing_status"] == "pending")
     ]
 
@@ -481,8 +494,14 @@ def ingest_item(
     """
     if db.is_trashed(conn, row["id"]):
         raise WikiError("材料已在回收站，请先恢复再整理")
+    wiki.reload_pages()
+    material = wiki.material_page(row["id"])
+    if material is not None and material.is_trashed:
+        raise WikiError("知识页已回收，请先恢复再整理")
     learning_notes = _user_notes(wiki, row["id"], user_notes)
     payload = item_payload(row, None, s, user_notes=learning_notes)
+    if material is not None:
+        payload["material_slug"] = material.slug
     provenance = [dict(origin) for origin in db.material_origins(conn, row["id"])]
     payload["provenance"] = provenance
     content = payload["text"]
@@ -561,10 +580,18 @@ def ingest_item(
         error.stage = "WIKI"
         error.accounted = on_usage is not None
         raise error
+    wiki.reload_pages()
+    material = wiki.material_page(row["id"])
+    if material is not None and material.is_trashed:
+        error = LLMError("整理期间知识页已回收，未写入；请恢复后重新整理")
+        error.stage = "WIKI"
+        error.accounted = on_usage is not None
+        raise error
     wiki.write_raw(row["id"], row["title"], row["url"] or "", content)
     result = apply_plan(
-        wiki, plan, row, profile, today, s.wiki.first_review_days,
+        wiki, plan, row, profile, today,
         provenance=provenance, user_notes=learning_notes,
+        bibliography=db.material_bibliography(conn, row["id"]),
     )
     result.usage = usage
     result.calls = calls

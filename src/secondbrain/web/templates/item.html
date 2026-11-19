@@ -29,7 +29,7 @@
   <section id="register-read" class="panel form-panel">
     <div class="page-header"><div><h2>外部阅读与学习记录</h2><p class="help">记录你在原网站或 ChatGPT 中学到的内容；个人笔记由你维护，AI 不覆盖。</p></div></div>
     <p>登记状态：<strong data-reading-state="{{ item.reading_state }}">{{ {"unread":"未登记阅读","reading":"阅读中","read":"已登记阅读"}.get(item.reading_state, item.reading_state) }}</strong> · 知识整理：{{ item.processing_status }} · 正文：{{ item.content_completeness }}</p>
-    <p class="meta">你可以在原网站或 ChatGPT 中阅读；登记后移出稍后清单，由 AI 增量整理概念和关系。不以“已读”自动提升概念掌握度。</p>
+    <p class="meta">可在原网站或 ChatGPT 阅读，登记后移出清单，增量整理概念和关系。个人记录可清空后保存。</p>
     <div class="toolbar">{% if queued %}<form method="post" action="/reading/{{ item.id }}/remove"><button class="fb" type="submit">移出阅读列表（保留材料）</button></form>{% else %}<form method="post" action="/reading/{{ item.id }}/add"><button class="fb" type="submit">加入阅读列表</button></form>{% endif %}</div>
     <form id="notes" method="post" action="/item/{{ item.id }}/reading" class="add-form">
       <input type="hidden" name="state" value="read">
@@ -83,7 +83,7 @@
     <ul>{% for text, link in key_points %}<li>{% if link %}<a href="{{ link }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}</li>{% endfor %}</ul>
     <p class="reason"><b>为什么推荐</b> {{ l2.why_for_you }}</p>
     <p class="meta">预计 {{ l2.est_minutes }} 分钟</p>
-    {% if refresh_first %}<p class="refresh"><b>建议先回炉：</b>{% for name, link in refresh_first %}{% if link %}<a href="{{ link }}">{{ name }}</a>{% else %}{{ name }}{% endif %}{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
+    {% if related_prerequisites %}<p class="meta"><b>相关知识：</b>{% for name, link in related_prerequisites %}<a href="{{ link }}">{{ name }}</a>{% if not loop.last %}、{% endif %}{% endfor %}</p>{% endif %}
     {% if l2.prerequisites %}<p class="prereq"><b>前置知识：</b>{{ l2.prerequisites | join("、") }}</p>{% endif %}
   </section>
   {% endif %}
@@ -111,7 +111,7 @@
 
   <section id="prereq">
     <h2>补前置</h2>
-    <p class="meta">前置知识来自{% if summary %}深度速读{% else %} L2（生成深度速读后改用速读中更具体的前置知识）{% endif %}（共 {{ prereq_count }} 个）：wiki 已有的给出链接与掌握度；没有的用一次 strong 调用生成简短讲解（{{ hints.prereq(prereq_count) }}，约半分钟{% if prereq_cached %}；已有缓存的讲解不再调用{% endif %}），并列出库中讲这个知识点的文章。</p>
+    <p class="meta">前置知识来自{% if summary %}深度速读{% else %} L2{% endif %}，共 {{ prereq_count }} 个。已有知识页提供参考链接，缺少时用一次 strong 调用生成讲解（{{ hints.prereq(prereq_count) }}{% if prereq_cached %}；已有缓存不再调用{% endif %}）。</p>
     <button type="button" class="fb" hx-post="/prereq/{{ item.id }}" hx-target="#prereq-result" hx-swap="innerHTML" hx-indicator="#prereq-loading">补前置</button>
     <span id="prereq-loading" class="htmx-indicator meta">生成中…</span>
     <div id="prereq-result"></div>

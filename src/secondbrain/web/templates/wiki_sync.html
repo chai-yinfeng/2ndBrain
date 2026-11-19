@@ -3,7 +3,7 @@
 {% block content %}
 <header class="page-header"><div><p class="eyebrow">材料与知识</p><h1>预览知识变更</h1><p class="meta">预览只读、不调用模型。重新索引只更新目录，不能代替正文与来源变更同步。</p></div><div class="page-actions"><a class="fb" href="/wiki">知识页面</a><a class="fb" href="/materials">材料管理</a><a class="fb" href="/wiki/sync">重新预览</a></div></header>
 {% set model_changes = plan.changes|selectattr('needs_ingest')|list %}
-<p class="help">隐藏已读材料不影响知识。回收/恢复只调整机器页的来源状态，不删正文、个人笔记、掌握度或人工关联；共享概念不自动删除，无有效来源的机器内容撤出正式目录并保留待复核。</p>
+<p class="help">隐藏已读材料不影响知识。回收/恢复调整机器页的来源状态，不删正文、个人笔记或人工关联；共享概念不自动删除，无有效来源的机器内容保留待复核。手动回收的知识页不会被同步自动恢复。</p>
 {% if model_changes %}<p class="refresh">有 {{ model_changes|length }} 份已读材料需要按新正文或笔记增量整理，确认同步会调用模型；{{ hints.ingest() }}，沿用既有单次费用上限。预览列出现有受影响页面，新概念以实际整理结果为准。</p>{% else %}<p class="meta">当前变更仅涉及来源状态，无需模型调用。</p>{% endif %}
 <section class="panel">
 {% for change in plan.changes %}<article class="fyi" data-sync-item="{{ change.item_id }}"><h2><a href="/item/{{ change.item_id }}">{{ change.title }}</a></h2><p>{{ {'withdraw':'同步回收影响','restore':'同步恢复/来源状态','ingest':'增量整理正文与笔记'}.get(change.action, change.action) }} · {{ change.reason }}</p><ul>{% for page in change.pages %}<li><a href="/wiki/page/{{ page.slug|urlencode }}">{{ page.title }}</a> · {{ {'withdrawn':'撤下自动材料页','unsupported':'无有效来源，待复核','review':'部分来源失效，保留并待复核','restored':'恢复正式显示','ingest':'增量整理'}.get(page.effect, page.effect) }}</li>{% else %}<li class="meta">{% if change.needs_ingest %}按材料及现有知识增量整理；尚未生成的页面不能提前列出。{% else %}无需改变已有页面，将确认本次材料状态。{% endif %}</li>{% endfor %}</ul></article>{% else %}<p class="empty">材料与知识没有待同步变更。</p>{% endfor %}

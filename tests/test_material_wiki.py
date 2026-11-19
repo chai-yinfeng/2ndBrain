@@ -21,8 +21,7 @@ from secondbrain.wiki.ingest import (
     ingest_item,
     pending_items,
 )
-from secondbrain.wiki.loop import known_knowledge
-from secondbrain.wiki.review import due_concepts, review
+from secondbrain.wiki.loop import related_knowledge
 from secondbrain.wiki.store import Page, new_meta, open_wiki
 
 TODAY = date(2026, 11, 16)
@@ -136,16 +135,14 @@ def test_unread_material_ingests_without_feedback_l2_or_recommendation(material_
     assert conn.execute("SELECT COUNT(*) FROM digests").fetchone()[0] == 0
     assert db.ingested_ids(conn) == {item_id}
     assert all(page.type != "paper" for page in wiki.pages.values())
-    assert wiki.pages["kv-cache"].meta["mastery"] == "陌生"
-    assert wiki.pages["kv-cache"].meta["last_reviewed"] is None
-    assert due_concepts(wiki, TODAY) == []
-    assert known_knowledge(wiki, [row], 500, 2000) == ""
+    assert "mastery" not in wiki.pages["kv-cache"].meta
+    assert "last_reviewed" not in wiki.pages["kv-cache"].meta
+    assert related_knowledge(wiki, [row], 500, 2000) == ""
     from secondbrain import ops
 
     ops.register_read(item_id, lambda _: None)
     wiki.reload_pages()
-    review(wiki, wiki.pages["kv-cache"], "remembered", TODAY)
-    assert "KV cache（concept；掌握度：接触过）" in known_knowledge(wiki, [row], 500, 2000)
+    assert "KV cache（concept）" in related_knowledge(wiki, [row], 500, 2000)
 
 
 def test_stable_material_ids_and_repeat_do_not_duplicate_sections(material_env):
@@ -164,14 +161,15 @@ def test_stable_material_ids_and_repeat_do_not_duplicate_sections(material_env):
     assert wiki.pages["kv-cache"].meta["sources"] == [first, second]
     for item_id in (first, second):
         body = wiki.pages[f"material-{item_id}"].body
-        assert body.count(f"## 机器整理 · 材料 {item_id}") == 1
-        assert f"[[material-{item_id}]]" in wiki.pages["kv-cache"].body
+        assert body.count("## 整理") == 1
+        assert f"[[material-{item_id}|" in wiki.pages["kv-cache"].body
 
 
 def test_external_notes_mastery_and_legacy_paper_survive_reprocessing(material_env):
     conn, wiki = material_env
     item_id = add_material(conn, "notes", "KV cache details.", title="Legacy paper")
-    meta = new_meta("KV cache", "concept", TODAY, mastery="扎实", interval_days=45)
+    meta = new_meta("KV cache", "concept", TODAY)
+    meta.update(mastery="扎实", interval_days=45)
     meta["custom"] = {"personal": "保留"}
     original = "# KV cache\n\n## 个人笔记\n\n手写观察 [[legacy-paper|旧论文]]。\n"
     wiki.save_page(Page("kv-cache", meta, original))
@@ -207,7 +205,7 @@ def test_external_notes_mastery_and_legacy_paper_survive_reprocessing(material_e
     material = wiki.pages[f"material-{item_id}"]
     assert "[[kv-cache|键值缓存]]" in material.body
     assert f"(../../notes/material-{item_id}-notes.md)" in material.body
-    assert "[[legacy-paper]]" in material.body
+    assert "[[legacy-paper|Legacy paper]]" in material.body
     assert "model-invented-title" not in wiki.pages
     assert notes.read_bytes() == note_bytes
     assert legacy_path.read_bytes() == legacy_bytes
@@ -320,14 +318,14 @@ def test_completed_material_becomes_pending_again_after_content_improvement(mate
     item_id = add_material(conn, "improved", "KV cache abstract.", completeness="abstract")
     db.add_feedback(conn, item_id, "gained", None, NOW)
     conn.commit()
-    assert pending_items(conn) == [item_id]
+    assert pending_items(conn, wiki) == [item_id]
     ingest(conn, wiki, item_id)
-    assert pending_items(conn) == []
+    assert pending_items(conn, wiki) == []
     improved = "KV cache full text with detailed implementation.\nNew ending to preserve."
     assert add_material(conn, "improved", improved) == item_id
-    assert pending_items(conn) == [item_id]
+    assert pending_items(conn, wiki) == [item_id]
     ingest(conn, wiki, item_id)
-    assert pending_items(conn) == []
+    assert pending_items(conn, wiki) == []
     assert db.ingested_ids(conn) == {item_id}
     material = wiki.pages[f"material-{item_id}"]
     assert material.meta["content_completeness"] == "full"
@@ -366,7 +364,7 @@ def test_original_material_text_wins_over_cached_short_content(material_env):
     assert original in wiki.raw_path(item_id).read_text(encoding="utf-8")
 
 
-def test_nonconcept_pages_and_unfamiliar_concepts_are_not_known_knowledge(material_env):
+def test_related_content_is_not_filtered_by_old_mastery_or_page_type(material_env):
     conn, wiki = material_env
     item_id = add_material(conn, "knowledge", "KV cache connects vLLM and a material.")
     for slug, page_type, mastery in (
@@ -374,5 +372,9 @@ def test_nonconcept_pages_and_unfamiliar_concepts_are_not_known_knowledge(materi
         ("vllm", "entity", "扎实"),
         ("material", "material", "扎实"),
     ):
-        wiki.save_page(Page(slug, new_meta(slug, page_type, TODAY, mastery=mastery), f"# {slug}"))
-    assert known_knowledge(wiki, [db.item_detail(conn, item_id)], 500, 2000) == ""
+        meta = new_meta(slug, page_type, TODAY)
+        meta["mastery"] = mastery
+        wiki.save_page(Page(slug, meta, f"# {slug}"))
+    context = related_knowledge(wiki, [db.item_detail(conn, item_id)], 500, 2000)
+    assert "kv-cache" in context and "vllm" in context
+    assert "扎实" not in context and "陌生" not in context

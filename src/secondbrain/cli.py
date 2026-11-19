@@ -29,6 +29,7 @@ profile_app = typer.Typer(help="用户画像（profile.md）。", no_args_is_hel
 wiki_app = typer.Typer(help="知识 wiki（data/wiki，Obsidian 兼容）。", no_args_is_help=True)
 paper_app = typer.Typer(help="按论文名检索、消歧并导入材料。", no_args_is_help=True)
 reading_app = typer.Typer(help="自己维护的稍后清单与外部阅读登记。", no_args_is_help=True)
+rewrite_app = typer.Typer(help="按临时上下文调整知识页，显式采用并保留版本。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
@@ -37,6 +38,7 @@ app.add_typer(profile_app, name="profile")
 app.add_typer(wiki_app, name="wiki")
 app.add_typer(paper_app, name="paper")
 app.add_typer(reading_app, name="reading")
+wiki_app.add_typer(rewrite_app, name="rewrite")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -749,7 +751,6 @@ def digest_show(
         l1 = db.latest_assessments(conn, "L1")
         l2 = db.latest_assessments(conn, "L2")
         backlog = [d for _, d in db.past_must_reads(conn, day)]
-        concept_rows = db.digest_concepts(conn, day)
     finally:
         conn.close()
     if not rows:
@@ -766,13 +767,6 @@ def digest_show(
         typer.echo(f"## {LANE_TITLES[lane]}（{len(entries)}）")
         if not entries:
             typer.echo("（空）")
-        if lane == "refresher":
-            for c in concept_rows:
-                mastery = c["mastery"] or "—"
-                typer.echo(f"* 概念复习：{c['title']}（掌握度 {mastery}）· {c['est_minutes']} 分钟")
-                typer.echo(f"   wiki：[[{c['slug']}]]；复习：sb wiki review {c['slug']} <结果>")
-                if c["related_title"]:
-                    typer.echo(f"   相关条目：{c['related_title']}  {c['related_url']}")
         for position, row in enumerate(entries, start=1):
             item = row["item_id"]
             for line in _lane_line(position, row, l1.get(item, {}), l2.get(item)):
@@ -787,7 +781,6 @@ def digest_show(
         typer.echo(f"- …… 另有 {len(fyi) - FYI_SHOWN} 条")
     typer.echo(f"\n归档 {len(by_lane.get('archived', []))} 条")
     used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
-    used += sum(c["est_minutes"] for c in concept_rows)
     typer.echo(
         f"总耗时 {used} / 预算 {fs.daily_budget_minutes} 分钟；此前未读的必读积压 {len(backlog)} 条"
     )
@@ -1155,7 +1148,7 @@ def prereq(
     item_id: int = typer.Argument(..., help="条目 id"),
     force: bool = typer.Option(False, "--force", help="重新生成 AI 讲解"),
 ) -> None:
-    """补前置：列出该条目的前置知识；wiki 已有的给出页面与掌握度，没有的生成简短讲解。"""
+    """补前置：链接已有知识页，为缺少的知识点生成简短讲解。"""
     from secondbrain import ops
 
     try:
@@ -1166,11 +1159,9 @@ def prereq(
     for e in report.entries:
         typer.echo(f"\n## {e.name}" + (f"（{_flat(e.why)}）" if e.why else ""))
         if e.page_slug:
-            typer.echo(
-                f"{OK} wiki 已有：[[{e.page_slug}]] {e.page_title}（掌握度 {e.mastery or '—'}）"
-            )
+            typer.echo(f"{OK} wiki 已有：[[{e.page_slug}]] {e.page_title}")
         elif e.explanation:
-            typer.echo(f"AI 讲解（AI 生成）：{_flat(e.explanation)}")
+            typer.echo(_flat(e.explanation))
         else:
             typer.echo(f"{WARN} 没有生成讲解")
         for x in e.explainers:
@@ -1237,11 +1228,17 @@ def wiki_sync(
 @wiki_app.command("reindex")
 def wiki_reindex() -> None:
     """从同一 vault 的 Markdown 重建目录；图谱与反向链接实时派生。"""
+    from secondbrain.wiki.classification import sync_material_kinds
     from secondbrain.wiki.graph import build_graph
 
     wiki = _open_wiki()
+    conn = db.connect()
+    try:
+        sync_material_kinds(wiki, conn)
+    finally:
+        conn.close()
     wiki.rebuild_index()
-    graph = build_graph(wiki, datetime.now().date())
+    graph = build_graph(wiki)
     typer.echo(f"已重新索引：{len(graph['nodes'])} 页，{len(graph['edges'])} 条页面链接")
 
 
@@ -1275,7 +1272,7 @@ def wiki_graph(
     from secondbrain.wiki.graph import build_graph
 
     wiki = _open_wiki()
-    graph = build_graph(wiki, datetime.now().date(), include_drafts=drafts)
+    graph = build_graph(wiki, include_drafts=drafts)
     selected = {node["id"] for node in graph["nodes"]}
     if focus:
         candidates = wiki.resolve(focus)
@@ -1309,7 +1306,7 @@ def wiki_graph(
 def wiki_ingest(
     item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
     pending: bool = typer.Option(
-        False, "--pending", help='编入所有当前标为"有收获"但尚未编入的条目'
+        False, "--pending", help="整理已登记阅读且尚未完成整理的材料"
     ),
     force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
 ) -> None:
@@ -1323,7 +1320,7 @@ def wiki_ingest(
     conn = db.connect()
     try:
         if pending:
-            ids = pending_items(conn)
+            ids = pending_items(conn, wiki)
         else:
             done = db.ingested_ids(conn)
             row = db.item_detail(conn, item_id)
@@ -1333,7 +1330,7 @@ def wiki_ingest(
             ids = [item_id]
         typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
         if not ids:
-            typer.echo('0 条待 ingest（没有标为"有收获"且尚未编入的条目）')
+            typer.echo("没有需要整理的已读材料")
             return
     finally:
         conn.close()
@@ -1381,63 +1378,6 @@ def wiki_lint(
     typer.echo(f"\n共 {sum(len(lines) for _, lines in sections)} 项")
 
 
-@wiki_app.command("due")
-def wiki_due(
-    day: str | None = typer.Option(None, "--date", help="日期 YYYY-MM-DD，默认今天"),
-) -> None:
-    """列出到期复习的概念。"""
-    from datetime import date as date_cls
-
-    from secondbrain.wiki.review import due_concepts, due_date
-
-    try:
-        target = date_cls.fromisoformat(day) if day else datetime.now().date()
-    except ValueError as exc:
-        raise typer.BadParameter("日期格式应为 YYYY-MM-DD") from exc
-    wiki = _open_wiki()
-    due = due_concepts(wiki, target)
-    typer.echo(f"{target} 到期的概念：{len(due)} 个（共 {len(wiki.concepts())} 个概念页）")
-    for page in due:
-        typer.echo(
-            f"- [[{page.slug}]] {page.title}（掌握度 {page.meta.get('mastery') or '—'}；"
-            f"间隔 {page.meta.get('interval_days')} 天；到期 {due_date(page)}）"
-        )
-    if due:
-        typer.echo(
-            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered"
-            "（或在 Web /wiki 点按钮）"
-        )
-
-
-@wiki_app.command("review")
-def wiki_review(
-    slug: str = typer.Argument(..., help="概念页 slug"),
-    grade: str = typer.Argument(
-        ...,
-        help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"
-        "| needs_refresh（需要回炉）| mastered（已扎实）",
-    ),
-) -> None:
-    """记录一次概念复习，按 SM-2 简化版更新间隔、ease 与掌握度。"""
-    from secondbrain.wiki.review import GRADES, review
-
-    if grade not in GRADES:
-        raise typer.BadParameter("结果应为 " + " / ".join(GRADES))
-    _, fs, _ = _load_pipeline_settings()
-    wiki = _open_wiki()
-    page = wiki.find(slug)
-    if page is None or page.type != "concept" or page.knowledge_status == "draft":
-        typer.echo(f"{FAIL} 找不到概念页：{slug}", err=True)
-        raise typer.Exit(code=1)
-    out = review(wiki, page, grade, datetime.now().date(), fs.wiki.mastered_interval_days)
-    interval = f"间隔 {out.interval_before} → {out.interval_after} 天"
-    mastery = f"掌握度 {out.mastery_before} → {out.mastery_after}"
-    typer.echo(
-        f"{OK} [[{out.slug}]] {GRADES[grade]}：{interval}，ease {out.ease_after}，"
-        f"{mastery}，下次 {out.next_due}"
-    )
-
-
 @wiki_app.command("relation")
 def wiki_relation(
     source: str, target: str, mode: str,
@@ -1452,3 +1392,169 @@ def wiki_relation(
     except WikiError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"{result['source']} ↔ {result['target']}：{result['mode']} · {result['reason']}")
+
+
+def _rewrite_output(result: dict) -> None:
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("status") in {"failed", "interrupted"}:
+        raise typer.Exit(code=1)
+
+
+@rewrite_app.command("start")
+def rewrite_start(
+    page: str = typer.Argument(help="页面名称或稳定路径"),
+    context: str = typer.Option(..., "--context", help="仅本轮使用的语境与调整要求"),
+) -> None:
+    """生成新草稿；不改画像、不写回原页面。"""
+    from secondbrain.wiki.rewrite import start_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = start_session(page, context, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("continue")
+def rewrite_continue(session: str, message: str) -> None:
+    """在同一会话继续调整草稿；仍不修改页面。"""
+    from secondbrain.wiki.rewrite import continue_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = continue_session(session, message, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("show")
+def rewrite_show(session: str) -> None:
+    """读取持久会话，不重放模型请求。"""
+    from secondbrain.wiki.rewrite import get_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = get_session(session)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("sessions")
+def rewrite_sessions(page: str) -> None:
+    """查找该知识页的会话。"""
+    from secondbrain.wiki.rewrite import list_sessions
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = list_sessions(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@rewrite_app.command("apply")
+def rewrite_apply(session: str) -> None:
+    """采用草稿，先核对页面未变化并保存旧版本。"""
+    from secondbrain.wiki.rewrite import apply_revision
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = apply_revision(session, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("history")
+def rewrite_history(page: str) -> None:
+    """查看此页可恢复的版本。"""
+    from secondbrain.wiki.rewrite import history
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = history(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@rewrite_app.command("restore")
+def rewrite_restore(page: str, revision: str) -> None:
+    """恢复一个历史版本；当前版本仍保留，不调用模型。"""
+    from secondbrain.wiki.rewrite import restore_revision
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = restore_revision(page, revision, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("delete-session")
+def rewrite_delete_session(session: str) -> None:
+    """删除会话与草稿，不改已采用正文、版本或用量记录。"""
+    from secondbrain.wiki.rewrite import delete_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = delete_session(session)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("clear-history")
+def rewrite_clear_history(page: str, yes: bool = typer.Option(False, "--yes")) -> None:
+    """显式清空回退点，不改当前页面或会话。"""
+    from secondbrain.wiki.rewrite import clear_history
+    from secondbrain.wiki.store import WikiError
+
+    if not yes:
+        raise typer.BadParameter("此操作移除旧版本回退点；确认后加 --yes，当前正文保留")
+    try:
+        result = clear_history(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@wiki_app.command("manage")
+def wiki_manage(
+    action: str = typer.Argument(help="trash / restore"),
+    pages: Annotated[list[str], typer.Argument(help="一个或多个知识页稳定路径")] = ...,
+    yes: bool = typer.Option(False, "--yes", help="确认回收；不删除正文或来源"),
+) -> None:
+    """回收前展示受影响反链；恢复不生成模型请求。"""
+    from secondbrain.wiki.management import manage_pages, removal_impact
+    from secondbrain.wiki.store import WikiError
+
+    wiki = _open_wiki()
+    try:
+        if action == "trash" and not yes:
+            for impact in removal_impact(wiki, pages):
+                typer.echo(f"{impact['page'].title}：{len(impact['backlinks'])} 个引用页面")
+                for source in impact["backlinks"]:
+                    typer.echo(f"  {source.title}")
+            typer.echo("确认回收后加 --yes；正文、个人笔记与原材料保留。")
+            return
+        changed = manage_pages(wiki, pages, action)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已{'回收' if action == 'trash' else '恢复'} {len(changed)} 个知识页")
+
+
+@wiki_app.command("kind")
+def wiki_kind(page: str, kind: str) -> None:
+    """手动归类：concept / entity / paper / article / video / other。"""
+    from secondbrain.wiki.management import set_kind
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        set_kind(_open_wiki(), page, kind)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo("知识页类别已更新；正文和链接保持不变")

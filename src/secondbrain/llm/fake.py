@@ -118,7 +118,8 @@ class FakeBackend:
         self, messages: list[dict[str, str]], schema: type[T], tier: Tier
     ) -> tuple[T, Usage]:
         keywords = _keywords(messages[0]["content"])
-        payload = _payload(messages)
+        rewrite = schema.__name__ == "RewriteDraft"
+        payload = json.loads(messages[1]["content"]) if rewrite else _payload(messages)
         if schema is L1Response:
             items = []
             for it in payload["items"]:
@@ -159,7 +160,7 @@ class FakeBackend:
         elif schema is LintFindings:
             obj = {"issues": []}
         elif schema is DeepSummary:
-            known = "已知知识" in messages[-1]["content"]
+            known = "相关知识内容" in messages[-1]["content"]
             obj = _deep_summary(payload["item"], keywords, known)
         elif schema is PrereqExplanations:
             title = payload["item"]["title"]
@@ -173,6 +174,33 @@ class FakeBackend:
                     for p in payload["prerequisites"]
                 ]
             }
+        elif rewrite:
+            page = payload["page"]
+            request = messages[-1]["content"]
+            sources = payload.get("sources") or []
+            evidence = "\n".join(
+                f"- {source.get('title') or source.get('url') or '来源'}"
+                for source in sources if isinstance(source, dict)
+            ) or "- 本页已有正文；未提供额外原文。"
+            previous = next(
+                (message["content"] for message in reversed(messages[:-1])
+                 if message["role"] == "assistant"), ""
+            )
+            text = page["body"]
+            facts = [
+                line.strip("- #>") for line in text.splitlines()
+                if line.strip() and not line.startswith(("#", "<!--"))
+            ]
+            body = (
+                f"## {page['title']}：本轮重整\n\n"
+                f"（fake 离线草稿）本轮关注：{request}\n\n"
+                "### 核心内容\n\n"
+                + "\n".join(f"- {line}" for line in dict.fromkeys(facts[:4]))
+                + "\n\n### 来源依据\n\n" + evidence
+                + ("\n\n### 对话调整\n\n依据上一轮草稿重新组织，未写入长期画像。"
+                   if previous else "")
+            )
+            obj = {"body": body, "summary": f"（fake）按本轮语境重整：{request[:120]}"}
         else:
             raise LLMError(f"fake 后端不支持的 schema：{schema.__name__}")
         prompt_chars = sum(len(m["content"]) for m in messages)
@@ -185,59 +213,16 @@ class FakeBackend:
         return schema.model_validate(obj), usage
 
 
-def _match_row(table: list[dict], fb: dict) -> dict | None:
-    """反馈条目的 topics / 标题词出现在某个领域的名称或说明里时，认为对应该领域。"""
-    terms = [t.lower() for t in fb.get("topics") or []]
-    terms += [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", fb.get("title", ""))]
-    for row in table:
-        text = f"{row['domain']} {row.get('note', '')}".lower()
-        if any(t in text for t in terms):
-            return row
-    return None
-
-
-_LEVELS = ("陌生", "接触过", "想回炉", "扎实")
-
-
-def _shift_level(raw: str, delta: int) -> str | None:
-    """raw 掌握度（可能带括号说明）升 / 降一级；无法识别或已到端点时返回 None。"""
-    current = next((lv for lv in _LEVELS if raw.startswith(lv)), None)
-    if current is None:
-        return None
-    rank = _LEVELS.index(current) + delta
-    return _LEVELS[rank] if 0 <= rank < len(_LEVELS) else None
 
 
 def _profile_proposal(payload: dict) -> dict:
-    """确定性的 profile 提案（ADR 0013 的证据规则）：
-    - 太浅 → 对应领域升一级（无对应领域则新增"接触过"行）；
-    - 太难 → 对应领域降一级（无对应领域则新增"陌生"行）；
-    - 不感兴趣 / 没价值 → 在含"不想看"的段落末尾追加一行。"""
-    table = payload.get("table", [])
+    """只根据反馈维护兴趣段落，不推断或调整掌握度。"""
     sections = [s["section"] for s in payload.get("sections", [])]
     dislike = next((s for s in sections if "不想看" in s), None)
-    changes: dict[str, dict] = {}
     edits = []
-    labels = {"too_easy": "太浅", "too_hard": "太难"}
     for fb in payload.get("feedback", []):
         kind, fid = fb["kind"], fb["id"]
-        if kind in labels:
-            row = _match_row(table, fb)
-            if row is not None:
-                target = _shift_level(row["mastery"], 1 if kind == "too_easy" else -1)
-                if target is None:
-                    continue
-                key = f"row-{row['row']}"
-                change = {"action": "update", "row": row["row"], "mastery": target}
-            else:
-                domain = (fb.get("topics") or [fb["title"][:40]])[0]
-                key = f"add-{domain}"
-                target = "接触过" if kind == "too_easy" else "陌生"
-                change = {"action": "add", "domain": domain, "mastery": target, "priority": "中"}
-            entry = changes.setdefault(key, {**change, "reason": "（fake）", "evidence": []})
-            entry["evidence"].append(fid)
-            entry["reason"] = f"（fake）{len(entry['evidence'])} 次标记{labels[kind]}"
-        elif kind in ("dismiss", "worthless") and dislike:
+        if kind in ("dismiss", "worthless") and dislike:
             edits.append(
                 {
                     "section": dislike,
@@ -248,8 +233,7 @@ def _profile_proposal(payload: dict) -> dict:
                 }
             )
     return {
-        "summary": f"（fake）{len(changes)} 处掌握度修改，{len(edits)} 处段落修改",
-        "mastery_changes": list(changes.values()),
+        "summary": f"（fake）{len(edits)} 处兴趣段落修改",
         "section_edits": edits,
     }
 
@@ -266,7 +250,7 @@ def _deep_summary(it: dict, keywords: set[str], known: bool) -> dict:
         "results": [s[:120] for s in sentences[4:6]] or ["（fake）正文没有给出数字"],
         "limitations": ["（fake）没有讨论局限"],
         "relation_to_known": "（fake）"
-        + ("与已知知识中的页面相关。" if known else "与用户 wiki 中的已知知识没有直接关系。"),
+        + ("与相关知识页面的内容有关。" if known else "当前未提供直接相关的 wiki 内容。"),
         "sections_to_read": [{"name": "（fake）全文第 1 部分", "reason": "（fake）核心方法在这里"}],
         "prerequisites": [{"name": t, "why": f"（fake）正文用到 {t}"} for t in topics[:2]],
     }

@@ -10,6 +10,7 @@
   <p class="meta"><a href="/task-history/{{ task.id }}">任务详情</a> · <a href="/task-history">全部任务</a></p>
   {% if task.lines %}<details><summary>运行日志（{{ task.lines|length }} 行）</summary><pre class="log">{{ task.lines | join("\n") }}</pre></details>{% endif %}
   {% if task.error %}<p class="refresh">✗ {{ task.error }}</p>{% endif %}
+  {% if task.error and kind == "manual_add" %}{% for url in task.result.submitted_urls %}<p><a class="fb small" href="/add?url={{ url|urlencode }}&amp;remedy=1">保留原链接，粘贴正文 / 上传 PDF 补救</a></p>{% endfor %}{% endif %}
   {% if kind.startswith("paper-") and task.result.status %}
     <details open><summary>查看 / 收起论文结果</summary>
     {% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}
@@ -23,12 +24,16 @@
       {% if summary.failures %}<p class="refresh">知识整理尚未完成，已读与笔记已保留，可在登记表单重试。</p>{% endif %}
       {% for error in summary.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
       <p class="meta">本次估算费用 ${{ "%.4f"|format(summary.cost) }}</p>
-      {% for slug in summary.created + summary.updated %}<a href="/wiki/page/{{ slug }}">{{ slug }}</a> {% endfor %}
+      {% for slug in summary.created + summary.updated %}<a href="/wiki/page/{{ slug }}">{{ wiki_title(slug) }}</a> {% endfor %}
     {% elif kind == "wiki-sync" %}
       {% with result=task.result %}{% include "_wiki_sync_result.html" %}{% endwith %}
+    {% elif kind.startswith("rewrite-") %}
+      {% if task.result.slug %}<p><a href="/wiki/page/{{ task.result.slug }}#rewrite">返回知识页查看会话与草稿</a></p>{% endif %}
+      {% for error in task.result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      <p class="meta">累计费用 ${{ "%.4f"|format(task.result.cost|default(0)) }} · 仅明确采用才修改正文</p>
     {% elif kind == "wiki_ingest" or kind.startswith("wiki-") %}
-      <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
-      <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+      <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+      <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
     {% elif kind == "run" %}
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/recommendations">查看每日推荐</a></p>
@@ -36,7 +41,7 @@
       <table class="scores add-results">
         <tr><th>URL</th><th>结果</th><th>条目</th></tr>
         {% for r in task.result.results %}
-        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta break-anywhere">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
+        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta break-anywhere">{{ r.message }}</span>{% endif %}{% if r.url and (r.url.startswith('https://') or r.url.startswith('http://')) and (not r.item_id or r.acquisition and r.acquisition.status in ('missing', 'partial', 'abstract')) %}<p><a class="fb small" href="/add?url={{ r.url|urlencode }}&amp;remedy=1">粘贴正文 / 上传 PDF 补救</a></p>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">{{ r.title or '打开材料' }}</a>{% endif %}</td></tr>
         {% if r.acquisition %}<tr><td colspan="3">{% with acquisition=r.acquisition %}{% include "_acquisition.html" %}{% endwith %}</td></tr>{% endif %}
         {% endfor %}
       </table>
@@ -61,7 +66,7 @@
     </details>
   {% endif %}
   {% if not task.running and task.status != "waiting" and not task.dismissed %}
-  <form action="/task-history/{{ task.id }}/dismiss" method="post" hx-post="/task-history/{{ task.id }}/dismiss" hx-target="#task-{{ kind }}" hx-swap="outerHTML"><button class="fb small" type="submit">关闭反馈（记录仍保留）</button></form>
+  <div class="toolbar"><form action="/task-history/{{ task.id }}/dismiss" method="post" hx-post="/task-history/{{ task.id }}/dismiss" hx-target="#task-{{ kind }}" hx-swap="outerHTML"><button class="fb small" type="submit">收起反馈（保留记录）</button></form><form action="/task-history/delete" method="post"><input type="hidden" name="task_ids" value="{{ task.id }}"><button class="fb small" type="submit">删除记录…</button></form></div>
   {% endif %}
   {% endif %}
 </div>

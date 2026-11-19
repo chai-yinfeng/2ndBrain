@@ -28,7 +28,9 @@ def test_source_check_stays_completed_after_restart_and_can_be_cleared(monkeypat
     assert restored.status == "done"
     assert restored.result["results"][0]["changes"] == {"name": "Discovered name"}
     with TestClient(restarted) as client:
-        response = client.post("/task-history/clear", data={"confirm": "yes"})
+        response = client.post(
+            "/task-history/delete", data={"task_ids": task.id, "confirm": "yes"}
+        )
         assert response.status_code == 200
-        assert restarted.state.tasks.get(task.id).dismissed
+        assert restarted.state.tasks.get(task.id) is None
         assert f'data-task-record="{task.id}"' not in client.get("/task-history").text

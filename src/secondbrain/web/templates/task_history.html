@@ -3,14 +3,17 @@
 {% block content %}
 <header class="page-header">
   <div><p class="eyebrow">后台工作</p><h1>任务记录</h1><p class="meta">进度、候选和结果持久保留。等待选择不代表已导入；重启中断不会自动重试。</p></div>
-  <div class="page-actions"><a class="fb" href="/add">添加材料</a><a class="fb" href="/task-history{% if not include_dismissed %}?closed=1{% endif %}">{{ '隐藏已关闭' if include_dismissed else '包括已关闭' }}</a><form method="post" action="/task-history/clear"><button class="fb" type="submit">清理已结束历史…</button></form></div>
+  <div class="page-actions"><a class="fb" href="/add">添加材料</a><a class="fb" href="/task-history{% if not include_dismissed %}?closed=1{% endif %}">{{ '隐藏已收起' if include_dismissed else '包括已收起' }}</a><form method="post" action="/task-history/delete"><input type="hidden" name="all" value="yes"><button class="fb" type="submit">删除全部已结束记录…</button></form></div>
 </header>
-{% if cleared is not none %}<p class="saved" role="status">已收起 {{ cleared }} 条已结束记录；材料、用量和知识不受影响。“包括已关闭”可重新查看。</p>{% endif %}
+{% if cleared is not none %}<p class="saved" role="status">已删除 {{ cleared }} 条任务记录；材料、来源、知识、会话和用量不受影响。</p>{% endif %}
+<form id="task-delete" method="post" action="/task-history/delete" class="toolbar"><button class="fb" type="submit">删除所选记录…</button><span class="help">运行中或等待选择的任务不可删除；“收起反馈”不等于删除。</span></form>
 <section class="panel">
 {% for record in records %}
 <article class="task" data-task-record="{{ record.id }}">
+  {% if not record.running and record.status != "waiting" %}<input type="checkbox" name="task_ids" value="{{ record.id }}" form="task-delete" aria-label="选择 {{ record.title }}">{% endif %}
   <p><a href="/task-history/{{ record.id }}">{{ record.title }}</a> · <span data-task-status="{{ record.status }}">{{ {'running':'运行中','waiting':'等待选择 · 尚未导入','resolved':'历史候选 · 已选择','not_found':'未找到 · 未导入','done':'完成','partial':'部分完成 · 有失败','failed':'失败','interrupted':'已中断，未自动重试'}.get(record.status, record.status) }}</span>{% if record.dismissed %} · 已关闭反馈{% endif %}</p>
-  <p class="meta">{{ record.started.strftime('%Y-%m-%d %H:%M') }} UTC · 用时 {{ record.elapsed_seconds }} 秒{% if record.result.material_id %} · <a href="/item/{{ record.result.material_id }}">材料 #{{ record.result.material_id }}</a>{% endif %}</p>
+  <p class="meta">{{ record.started.strftime('%Y-%m-%d %H:%M') }} UTC · 用时 {{ record.elapsed_seconds }} 秒{% if record.result.material_id %} · <a href="/item/{{ record.result.material_id }}">打开材料</a>{% endif %}</p>
+  {% if not record.running and record.status != "waiting" %}<form method="post" action="/task-history/delete"><input type="hidden" name="task_ids" value="{{ record.id }}"><button class="fb small" type="submit">删除记录…</button></form>{% endif %}
 </article>
 {% else %}<p class="meta">暂无任务记录。</p>{% endfor %}
 </section>

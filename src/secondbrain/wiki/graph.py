@@ -5,11 +5,9 @@
 
 from __future__ import annotations
 
-from datetime import date
 from urllib.parse import quote
 
 from secondbrain.wiki.relations import relation_blocked
-from secondbrain.wiki.review import due_date
 from secondbrain.wiki.store import Page, Wiki
 
 
@@ -17,7 +15,7 @@ def link_index(wiki: Wiki, *, include_drafts: bool = False) -> dict[str, dict]:
     """统一消歧、草稿过滤与人工禁止；隐藏页不被误报为缺页。"""
     visible = {
         slug: page for slug, page in wiki.pages.items()
-        if include_drafts or page.is_visible
+        if not page.is_trashed and (include_drafts or page.is_visible)
     }
     index = {
         slug: {"outgoing": [], "backlinks": [], "missing": [], "ambiguous": []}
@@ -51,7 +49,7 @@ def page_connections(wiki: Wiki, page: Page, *, include_drafts: bool = False) ->
     )
 
 
-def build_graph(wiki: Wiki, today: date, *, include_drafts: bool = False) -> dict:
+def build_graph(wiki: Wiki, *, include_drafts: bool = False) -> dict:
     connections = link_index(wiki, include_drafts=include_drafts)
     edges: set[tuple[str, str]] = set()
     for slug, links in connections.items():
@@ -64,19 +62,16 @@ def build_graph(wiki: Wiki, today: date, *, include_drafts: bool = False) -> dic
     nodes = []
     for slug in sorted(connections):
         page = wiki.pages[slug]
-        due = due_date(page) if page.type == "concept" else None
         nodes.append(
             {
                 "id": slug,
                 "label": page.title,
-                "type": page.type,
+                "type": page.kind,
                 "aliases": page.aliases,
                 "sources": page.meta.get("sources") or [],
                 "material_id": page.meta.get("material_id"),
                 "knowledge_status": page.knowledge_status,
                 "material_sync_status": page.material_sync_status,
-                "mastery": page.meta.get("mastery"),
-                "due": bool(due and due <= today),
                 "degree": degree[slug],
                 "url": f"/wiki/page/{quote(slug, safe='/')}",
             }

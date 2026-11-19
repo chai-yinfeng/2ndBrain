@@ -6,7 +6,8 @@
   <div class="page-actions"><a class="fb" href="/sources">关注持续更新的主页</a></div>
 </header>
 <p class="toolbar"><a class="fb" href="/task-history">任务记录{% if task_count %}（{{ task_count }}）{% endif %}</a><span class="meta">{% if active_task_count %}{{ active_task_count }} 项运行中或等待选择。{% endif %}切页或重启后仍可返回查看；旧日志不在此堆叠。</span></p>
-<div data-intake>
+{% if remedy %}<section class="panel"><h2>补充无法访问的原文</h2><p class="help">原站拒绝了上次访问。保留下方原链接作为来源，粘贴你有权使用的正文或上传 PDF；明确提供正文后不会再次请求原站。登录或 Cookie 不保证能解决 403。</p></section>{% endif %}
+<div data-intake data-intake-remedy="{{ 'true' if remedy else 'false' }}">
 <div class="subnav intake-tabs" role="tablist" aria-label="材料类型" hidden>
   <button id="intake-tab-link" class="fb" type="button" role="tab" data-intake-type="link" aria-controls="intake-manual">链接</button>
   <button id="intake-tab-paper" class="fb" type="button" role="tab" data-intake-type="paper" aria-controls="paper-name">论文</button>
@@ -17,9 +18,9 @@
 <h2 data-intake-heading>链接、PDF 或文本</h2>
 <p class="help">链接可批量添加；文件和文本可独立保存，也可用于补充单个链接的正文。</p>
 <form action="/add" method="post" hx-post="/add" hx-target="#task-manual_add" hx-swap="outerHTML" hx-encoding="multipart/form-data" enctype="multipart/form-data" class="add-form" data-intake-form>
-  <div class="field" data-intake-field="link">
+  <div class="field" data-intake-field="{{ 'link file text' if remedy else 'link' }}">
     <label for="add-urls">链接</label>
-    <textarea id="add-urls" name="urls" rows="4" placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234"></textarea>
+    <textarea id="add-urls" name="urls" rows="4" placeholder="https://example.com/post&#10;https://arxiv.org/abs/2611.01234">{{ prefill_url }}</textarea>
     <p class="help">每行一个，可批量。arXiv 链接取 HTML 或 PDF 正文；含 DOI 的链接（doi.org、ACM DL 等）先查 Semantic Scholar，取不到全文时只导入标题与摘要。</p>
   </div>
   <div class="field">

@@ -17,8 +17,7 @@
     <div class="graph-view-actions"><button class="fb" id="graph-global" type="button" aria-pressed="true">全局概览</button><button class="fb" id="graph-fit" type="button">适应视图</button><button class="fb" id="graph-reset" type="button">重置视图</button></div>
   </div>
   <div class="graph-filters">
-    <fieldset><legend>类型</legend>{% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ t }}</label>{% endfor %}</fieldset>
-    <details class="graph-mastery"><summary>掌握度筛选</summary><fieldset><legend class="sr-only">掌握度</legend>{% for m in ("陌生", "接触过", "想回炉", "扎实", "无") %}<label><input type="checkbox" class="f-mastery" value="{{ m }}" checked> {{ m }}</label>{% endfor %}</fieldset></details>
+    <fieldset><legend>类别</legend>{% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ knowledge_kinds.get(t, t) }}</label>{% endfor %}</fieldset>
     <label class="graph-label-control" for="graph-labels">标签 <select id="graph-labels"><option value="auto">自动降噪</option><option value="all">全部显示</option><option value="none">隐藏标签</option></select></label>
   </div>
   <div class="network-layout">
@@ -27,9 +26,9 @@
       <div class="graph-canvas-wrap">
         <div id="graph" data-src="/wiki/graph.json{% if include_drafts %}?drafts=true{% endif %}" role="img" aria-label="知识页面链接图；也可通过右侧列表定位并查看页面"></div>
         <div class="graph-zoom" role="group" aria-label="图谱缩放"><button class="fb" id="graph-zoom-in" type="button" aria-label="放大">+</button><output id="graph-zoom-level" aria-label="缩放比例">100%</output><button class="fb" id="graph-zoom-out" type="button" aria-label="缩小">−</button></div>
-        <p id="graph-filter-empty" class="empty" hidden>当前筛选没有节点。请调整类型 / 掌握度筛选，或重置视图。</p>
+        <p id="graph-filter-empty" class="empty" hidden>当前筛选没有节点。请调整类别或重置视图。</p>
       </div>
-      <div class="graph-legend" aria-label="图例"><span><i class="graph-dot concept"></i>概念</span><span><i class="graph-dot material"></i>材料</span><span><i class="graph-dot paper"></i>论文</span><span><i class="graph-dot entity"></i>实体</span><span><i class="graph-dot due"></i>到期复习</span><span class="meta">连线 = 页面链接 · 自动标签随密度降噪</span></div>
+      <div class="graph-legend" aria-label="图例"><span><i class="graph-dot concept"></i>概念</span><span><i class="graph-dot material"></i>资料</span><span><i class="graph-dot paper"></i>论文</span><span><i class="graph-dot entity"></i>实体</span><span class="meta">连线 = 页面链接 · 自动标签随密度降噪</span></div>
     </div>
     <aside class="network-sidebar" aria-label="节点定位与详情">
       <div class="graph-locator"><label for="node-picker">定位节点</label><p id="node-results" class="help">按类型和稳定路径区分同名页面。</p><select id="node-picker" size="4" aria-label="定位节点" aria-describedby="node-results"></select></div>

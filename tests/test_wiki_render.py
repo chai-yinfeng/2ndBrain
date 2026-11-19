@@ -260,3 +260,20 @@ def test_safe_external_links_and_unicode_resource_names_remain_usable(vault):
         "https://example.org/search?q=中文&lang=zh", "mailto:me@example.org",
         "/vault/resources/" + quote("图片 (1).png"),
     ]
+
+
+def test_internal_edit_markers_are_hidden_but_code_examples_still_render(vault):
+    wiki, source = vault
+    marker = "<!-- wiki-rewrite:start -->"
+    text = (
+        marker + "\n正文可读。\n<!-- wiki-rewrite:end -->\n"
+        "<!-- wiki-ingest:start material-7:abcdef -->\n"
+        "<!-- material-7:abcdef -->\n补充解释。\n"
+        "<!-- wiki-ingest:end material-7:abcdef -->\n\n"
+        "```html\n" + marker + "\n```\n"
+    )
+    doc = Document(render_markdown(text, wiki, source))
+    assert "正文可读" in doc.content and "补充解释" in doc.content
+    assert doc.content.count(marker) == 1
+    assert "wiki-rewrite:end" not in doc.content
+    assert "material-7:abcdef" not in doc.content

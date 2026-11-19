@@ -10,17 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from secondbrain.llm.base import LLMBackend, Usage
-from secondbrain.llm.schemas import MasteryChange, ProfileProposal, SectionEdit
+from secondbrain.llm.schemas import ProfileProposal, SectionEdit
 from secondbrain.pipeline.run import PROMPTS_DIR
 from secondbrain.profile.feedback import FeedbackEntry
-from secondbrain.profile.loader import MASTERY_LEVELS, Profile, parse_profile
-
-LEVEL_RANK = {level: i for i, level in enumerate(MASTERY_LEVELS)}  # 陌生 < 接触过 < 想回炉 < 扎实
-# 证据规则（ADR 0013）：升级需要"太浅"；"有收获"只能作为 陌生 → 接触过 的证据；
-# 降级需要"太难"；每次最多升 / 降一级。
-UPGRADE_KINDS = {"too_easy"}
-FIRST_STEP_KINDS = {"gained"}
-DOWNGRADE_KINDS = {"too_hard"}
+from secondbrain.profile.loader import Profile, parse_profile
 
 
 @dataclass
@@ -67,19 +60,8 @@ def _sections(text: str) -> list[dict]:
 
 def proposal_messages(profile: Profile, feedback: list[FeedbackEntry]) -> list[dict[str, str]]:
     system = (PROMPTS_DIR / "profile_update.md").read_text(encoding="utf-8")
-    table = [
-        {
-            "row": n,
-            "domain": d.domain,
-            "mastery": d.raw_mastery,
-            "priority": d.priority,
-            "note": d.note,
-        }
-        for n, d in enumerate(profile.domains, start=1)
-    ]
     payload = {
-        "table": table,
-        "sections": _sections(profile.text),
+        "sections": _sections(profile.context),
         "feedback": [e.as_prompt_dict() for e in feedback],
     }
     user = "请根据反馈对 profile 提出修改提案，按规定格式输出 json：\n" + json.dumps(
@@ -106,109 +88,6 @@ def _evidence_problem(evidence: list[int], kinds: dict[int, str]) -> str | None:
     return None
 
 
-def _mastery_problem(old: str | None, new: str, evidence_kinds: set[str]) -> str | None:
-    if new not in LEVEL_RANK:
-        return f"掌握度取值无效：{new!r}"
-    if old is None or old == new:
-        return None
-    delta = LEVEL_RANK[new] - LEVEL_RANK[old]
-    if delta > 0:
-        if delta > 1:
-            return "每次只能升一级"
-        first_step = old == "陌生" and new == "接触过"
-        if not (
-            evidence_kinds & UPGRADE_KINDS or (first_step and evidence_kinds & FIRST_STEP_KINDS)
-        ):
-            return "升级缺少 太浅 证据（有收获 只能作为 陌生 → 接触过 的证据）"
-    else:
-        if not evidence_kinds & DOWNGRADE_KINDS:
-            return "降级缺少 太难 证据"
-        if delta < -1:
-            return "每次只能降一级"
-    return None
-
-
-def _row_line(header: list[str], values: dict[str, str]) -> str:
-    return "| " + " | ".join(values.get(col, "") for col in header) + " |"
-
-
-def _apply_table(
-    profile: Profile,
-    changes: list[MasteryChange],
-    kinds: dict[int, str],
-    applied: list[str],
-    rejected: list[str],
-) -> list[str] | None:
-    """返回新的表格行（表头与分隔行之后的数据行）；表格不存在时返回 None。"""
-    if profile.table_start is None:
-        if changes:
-            rejected.extend(
-                f"掌握度修改（{c.action}）：profile 中没有可解析的掌握度表" for c in changes
-            )
-        return None
-    header = profile.header
-    original = profile.text.splitlines()[profile.table_start + 2 : profile.table_end]
-    rows = [
-        {"领域": d.domain, "掌握度": d.raw_mastery, "优先级": d.priority, "说明": d.note}
-        for d in profile.domains
-    ]
-    dirty: set[int] = set()  # 被修改过的行；未修改的行保留原文，避免无意义的 diff
-    normalized = [d.mastery for d in profile.domains]
-    removed: set[int] = set()
-    for c in changes:
-        label = f"掌握度 {c.action} {c.domain or f'第 {c.row} 行'}"
-        problem = _evidence_problem(c.evidence, kinds)
-        ev_kinds = {kinds[i] for i in c.evidence if i in kinds}
-        if c.action in ("update", "remove"):
-            if problem is None and (c.row is None or not 1 <= c.row <= len(rows)):
-                problem = f"行号无效：{c.row}"
-            if problem is None and c.row - 1 in removed:
-                problem = f"第 {c.row} 行已被删除"
-        if problem is None and c.action == "update" and c.mastery:
-            problem = _mastery_problem(normalized[c.row - 1], c.mastery, ev_kinds)
-        if problem is None and c.action == "add":
-            if not c.domain or not c.mastery:
-                problem = "新增行需要 domain 与 mastery"
-            elif c.mastery not in LEVEL_RANK:
-                problem = f"掌握度取值无效：{c.mastery!r}"
-        if problem:
-            rejected.append(f"{label}：{problem}")
-            continue
-        if c.action == "update":
-            row = rows[c.row - 1]
-            label = f"掌握度 update「{row['领域']}」"
-            before = row["掌握度"]
-            if c.mastery and c.mastery != normalized[c.row - 1]:
-                row["掌握度"] = c.mastery
-                normalized[c.row - 1] = c.mastery
-            for col, value in (("优先级", c.priority), ("说明", c.note)):
-                if value is not None:
-                    row[col] = value
-            dirty.add(c.row - 1)
-            applied.append(f"{label}：{before} → {row['掌握度']}（{c.reason}；证据 {c.evidence}）")
-        elif c.action == "remove":
-            removed.add(c.row - 1)
-            applied.append(
-                f"掌握度 remove「{rows[c.row - 1]['领域']}」（{c.reason}；证据 {c.evidence}）"
-            )
-        else:
-            rows.append(
-                {
-                    "领域": c.domain,
-                    "掌握度": c.mastery,
-                    "优先级": c.priority or "",
-                    "说明": c.note or "",
-                }
-            )
-            normalized.append(c.mastery)
-            applied.append(
-                f"掌握度 add「{c.domain}」：{c.mastery}（{c.reason}；证据 {c.evidence}）"
-            )
-    return [
-        original[n] if n < len(original) and n not in dirty else _row_line(header, r)
-        for n, r in enumerate(rows)
-        if n not in removed
-    ]
 
 
 def _apply_section(
@@ -251,11 +130,6 @@ def apply_proposal(
     kinds = {e.feedback_id: e.kind for e in feedback}
     result = UpdateResult(old_text=profile.text, new_text=profile.text, summary=proposal.summary)
     lines = profile.text.splitlines()
-    table_rows = _apply_table(
-        profile, proposal.mastery_changes, kinds, result.applied, result.rejected
-    )
-    if table_rows is not None:
-        lines = lines[: profile.table_start + 2] + table_rows + lines[profile.table_end :]
     for edit in proposal.section_edits:
         new_lines, problem = _apply_section(lines, edit, kinds)
         label = f"段落「{edit.section}」{edit.action}：{edit.text.strip()}"

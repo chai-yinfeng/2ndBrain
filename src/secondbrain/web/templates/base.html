@@ -13,7 +13,7 @@
   <a class="skip-link" href="#main-content">跳到内容</a>
   {% with path = request.url.path %}
   {% set reading_active = path == '/later' or path == '/add' or path.startswith('/item/') or path.startswith('/papers/') %}
-  {% set section = '知识库' if path.startswith('/wiki') else '信源' if path.startswith('/sources') else '材料存档' if path == '/materials' else '阅读列表' if reading_active else '设置与管理' if path in ['/ops', '/profile'] else '推荐历史' if path == '/history' else '辅助推荐' if path == '/recommendations' else '概览' %}
+  {% set section = '知识库' if path.startswith('/wiki') else '信源' if path.startswith('/sources') else '任务记录' if path.startswith('/task-history') else '材料存档' if path == '/materials' else '阅读列表' if reading_active else '设置与管理' if path in ['/ops', '/profile'] else '推荐历史' if path == '/history' else '辅助推荐' if path == '/recommendations' else '概览' %}
   <aside class="app-sidebar" id="app-sidebar" aria-label="工作空间导航">
     <div class="sidebar-brand">
       <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">S</span>Second Brain</a>
@@ -40,6 +40,7 @@
       <a class="nav-link{% if path == '/materials' %} active{% endif %}" href="/materials"{% if path == '/materials' %} aria-current="page"{% endif %}>
         <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M3 4h18v5H3z M5 9v11h14V9 M10 13h4"/></svg>材料存档
       </a>
+      <a class="nav-link{% if path.startswith('/task-history') %} active{% endif %}" href="/task-history"{% if path == '/task-history' %} aria-current="page"{% endif %}><svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><path d="M8 4h12v16H4V8 M8 4v4H4 M8 12h8 M8 16h5"/></svg>任务记录</a>
       <details class="sidebar-tools"{% if path in ['/recommendations', '/history'] %} open{% endif %}>
         <summary>辅助推荐</summary>
         <div class="nav-sub"><a href="/recommendations"{% if path == '/recommendations' %} aria-current="page"{% endif %}>推荐结果</a><a href="/history"{% if path == '/history' %} aria-current="page"{% endif %}>推荐历史</a></div>

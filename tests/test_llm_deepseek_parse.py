@@ -197,7 +197,7 @@ def test_prompts_mention_json():
     for name in ("l1_system.md", "l2_system.md"):
         text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
         assert "json" in text
-        assert "{profile}" in text and "{mastery}" in text
+        assert "{profile}" in text and "{mastery}" not in text
 
 
 # ---------- 截断与校验失败的重试（ADR 0011） ----------

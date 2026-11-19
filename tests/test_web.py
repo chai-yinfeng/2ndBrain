@@ -16,7 +16,7 @@ from secondbrain.cli import app as cli_app
 from secondbrain.llm.fake import FakeBackend
 from secondbrain.models import FilterSettings, PricingSchedule, SourceConfig
 from secondbrain.pipeline.run import run_pipeline
-from secondbrain.profile.loader import load_profile, weak_prerequisites
+from secondbrain.profile.loader import load_profile
 from secondbrain.urls import content_hash
 from secondbrain.web.app import create_app
 
@@ -214,24 +214,6 @@ def test_backlog_only_counts_unread_must_reads(data_dir: Path):
     conn.close()
 
 
-# ---------- 前置知识提示 ----------
-
-
-def test_weak_prerequisites():
-    profile = load_profile(FIXTURES / "profile.md")
-    prereqs = [
-        "KV cache",
-        "Consensus protocols",
-        "Compilers",
-        "Linear algebra",
-        "GPU kernels (CUDA)",
-    ]
-    # 想回炉 / 陌生 / 接触过 的领域命中；"精通"无法识别，不算不扎实；未出现的概念不提示
-    assert weak_prerequisites(profile, prereqs) == [
-        "KV cache",
-        "Consensus protocols",
-        "GPU kernels (CUDA)",
-    ]
 
 
 # ---------- 定时任务 ----------

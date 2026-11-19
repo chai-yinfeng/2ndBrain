@@ -264,6 +264,6 @@ def test_wiki_lint_button(env):
     wiki.save_page(Page("a", new_meta("A", "concept", datetime.now().date()), "# A\n\n[[ghost]]"))
     client = TestClient(create_app())
     page = client.get("/wiki").text
-    assert 'hx-post="/wiki/lint"' in page and "不调用 LLM" in page
+    assert 'hx-post="/wiki/lint"' in page
     result = client.post("/wiki/lint").text
     assert "断链（指向不存在的页面）" in result and "[[a]] → ghost" in result

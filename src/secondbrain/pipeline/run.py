@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 from secondbrain import db
@@ -20,10 +20,9 @@ from secondbrain.pipeline.l0_rules import l0_reason
 from secondbrain.pipeline.l1_screen import interleave_by_source, l1_messages, match_results
 from secondbrain.pipeline.l2_deep import DeepResult, deep_read, estimate_deep_cost, is_paper
 from secondbrain.profile.feedback import few_shot_block, recent_feedback, too_hard_prerequisites
-from secondbrain.profile.loader import Profile, render_mastery, weak_prerequisites
-from secondbrain.wiki.loop import known_knowledge, related_item
-from secondbrain.wiki.review import due_concepts
-from secondbrain.wiki.store import Page, Wiki
+from secondbrain.profile.loader import Profile
+from secondbrain.wiki.loop import related_knowledge
+from secondbrain.wiki.store import Wiki
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts"
 
@@ -47,7 +46,6 @@ class RunReport:
     backfill_screened: int = 0
     backfill_picked: int = 0
     backfill_placed: int = 0
-    concepts_placed: int = 0  # 放入温故栏的到期概念
     lanes: Counter = field(default_factory=Counter)
     minutes_used: int = 0
     backlog_kept: int = 0
@@ -61,9 +59,7 @@ class RunReport:
 def system_prompt(name: str, profile: Profile, extra: str = "") -> str:
     """profile + 规则在最前（同一次 run 内不变，利于缓存）；extra（如反馈样例）接在末尾。"""
     template = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
-    text = template.replace("{profile}", profile.text.strip()).replace(
-        "{mastery}", render_mastery(profile)
-    )
+    text = template.replace("{profile}", profile.context.strip())
     return f"{text.rstrip()}\n\n{extra}\n" if extra else text
 
 
@@ -120,8 +116,8 @@ class _Runner:
             results, usages, error = {}, [], None
             pending = batch
             for _ in range(L1_ATTEMPTS):
-                known = known_knowledge(
-                    self.wiki, pending, fs.l1.item_chars, fs.wiki.known_max_chars
+                known = related_knowledge(
+                    self.wiki, pending, fs.l1.item_chars, fs.wiki.related_max_chars
                 )
                 known = "\n\n".join(part for part in (known, self.hard_prereqs) if part)
                 messages = l1_messages(system, pending, fs.l1.item_chars, known)
@@ -209,13 +205,10 @@ class _Runner:
         return done, failed
 
 
-def backfill_priority(row: sqlite3.Row, l1: dict, profile: Profile) -> tuple:
-    """回补池排序：explainer / survey / tutorial 优先，其次命中"接触过 / 想回炉"领域，
-    再按 refresher_value 与排序分。"""
-    topics = [t.replace("-", " ") for t in l1.get("topics", [])]
+def backfill_priority(l1: dict) -> tuple:
+    """回补优先讲解型内容，其次依据内容价值与排序分。"""
     return (
         l1.get("content_type") in REFRESHER_TYPES,
-        bool(weak_prerequisites(profile, topics)),
         l1.get("refresher_value", 0),
         l1.get("_score") or 0,
     )
@@ -234,7 +227,7 @@ def run_pipeline(
     wiki: Wiki | None = None,
     all_time: bool = False,
 ) -> RunReport:
-    """wiki：用于 L1 的"已知知识"与到期概念复习（M6）；为 None 时跳过这两项。
+    """wiki 提供相关内容参考，不调度概念复习。
     all_time：本次的新条目在 L0 不受时间窗限制（ADR 0016）。"""
     report = RunReport()
     run = _Runner(conn, fs, backend, profile, now, clock or (lambda: now), report, wiki)
@@ -291,22 +284,8 @@ def run_pipeline(
     ]
     backfill_ids = {c.item_id for c in cands if c.is_backfill}
     counts, minutes = db.day_usage(conn, day, tiering.TOP_LANES, {c.item_id for c in cands})
-    concept_rows = db.digest_concepts(conn, day)
-    counts["refresher"] = counts.get("refresher", 0) + len(concept_rows)
-    minutes += sum(r["est_minutes"] for r in concept_rows)
-    concepts = _concept_candidates(run, today, {r["slug"] for r in concept_rows}, len(cands))
-    placements = tiering.tier(cands + concepts.candidates(), fs, today, counts, minutes)
+    placements = tiering.tier(cands, fs, today, counts, minutes)
     for p in placements:
-        if p.item_id in concepts:
-            if p.lane == "refresher":
-                page, related = concepts[p.item_id].page, concepts[p.item_id].related
-                mastery = page.meta.get("mastery")
-                db.upsert_digest_concept(
-                    conn, day, page.slug, page.title, mastery, p.est_minutes, related, now
-                )
-                report.lanes["refresher"] += 1
-                report.concepts_placed += 1
-            continue
         if p.item_id in backfill_ids and p.lane not in ("refresher", "deferred"):
             # 回补条目今天没排进温故栏：留在回补池（已有 L2，下次不再花费）
             db.set_status(conn, [p.item_id], "backfill_l1")
@@ -321,7 +300,6 @@ def run_pipeline(
         for p in placements
         if p.lane in tiering.TOP_LANES
         and not (p.item_id in backfill_ids and p.lane != "refresher")
-        and (p.item_id not in concepts or p.lane == "refresher")
     )
 
     kept, demoted = tiering.apply_backlog(db.past_must_reads(conn, day), today, fs.backlog_max_days)
@@ -331,56 +309,6 @@ def run_pipeline(
     return report
 
 
-@dataclass(frozen=True)
-class _ConceptCandidate:
-    page: Page
-    related: int | None
-
-
-class _Concepts(dict):
-    """占位 item_id（负数）→ _ConceptCandidate；迭代时产出 tiering.Candidate。"""
-
-    def __init__(self, fs: FilterSettings):
-        super().__init__()
-        self.fs = fs
-
-    def candidates(self) -> list[tiering.Candidate]:
-        return [
-            tiering.Candidate(
-                item_id=item_id,
-                score=100.0,  # 到期复习优先于普通温故条目
-                relevance=10,
-                quality=10,
-                novelty=0,
-                refresher_value=10,
-                content_type="explainer",
-                role="core",
-                est_minutes=self.fs.wiki.review_minutes,
-                has_l2=True,
-                is_concept=True,
-            )
-            for item_id in self
-        ]
-
-
-def _concept_candidates(run: _Runner, today: date, already: set[str], offset: int) -> _Concepts:
-    """到期概念（最多 wiki.review_slots 个，当天已排过的不再排），附上近期讲到它的条目。"""
-    concepts = _Concepts(run.fs)
-    if run.wiki is None or run.fs.wiki.review_slots <= 0:
-        return concepts
-    due = [p for p in due_concepts(run.wiki, today) if p.slug not in already]
-    if not due:
-        return concepts
-    since = db.format_time(run.now - timedelta(days=run.fs.wiki.recent_days))
-    recent = [
-        r
-        for r in db.items_by_status(run.conn, ("l1", "l2", "tiered", "deferred"))
-        if r["fetched_at"] >= since
-    ]
-    l1, l2 = db.latest_assessments(run.conn, "L1"), db.latest_assessments(run.conn, "L2")
-    for n, page in enumerate(due[: run.fs.wiki.review_slots], start=1):
-        concepts[-(offset + n)] = _ConceptCandidate(page, related_item(page, recent, l1, l2))
-    return concepts
 
 
 def _backfill(run: _Runner, day: str, l1_system: str, l2_system: str) -> None:
@@ -399,7 +327,7 @@ def _backfill(run: _Runner, day: str, l1_system: str, l2_system: str) -> None:
     l1_data = db.latest_assessments(conn, "L1")
     l2_data = db.latest_assessments(conn, "L2")
     pool = [r for r in screened if r["id"] in l1_data and r["extract_method"] != NO_TRANSCRIPT]
-    pool.sort(key=lambda r: backfill_priority(r, l1_data[r["id"]], run.profile), reverse=True)
+    pool.sort(key=lambda r: backfill_priority(l1_data[r["id"]]), reverse=True)
     picks = pool[:needed]
     report.backfill_picked = len(picks)
     if not picks:

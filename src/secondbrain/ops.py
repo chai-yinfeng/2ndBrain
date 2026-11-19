@@ -54,7 +54,7 @@ def _require_active(conn, item_id: int) -> None:
     except ValueError as exc:
         raise OpsError(str(exc)) from exc
     if db.is_trashed(conn, item_id):
-        raise OpsError(f"材料 #{item_id} 已回收，请先恢复后再处理")
+        raise OpsError("材料已回收，请先恢复后再处理")
 
 
 class RunLocked(OpsError):
@@ -251,13 +251,19 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                 summary.failures += 1
                 continue
             if db.is_trashed(conn, iid):
-                message = f"材料 #{iid} 已回收，请先恢复后再整理"
+                message = f"{row['title']} 已回收，请先恢复后再整理"
                 echo(f"{FAIL} {message}")
                 summary.errors.append(message)
                 summary.failures += 1
                 continue
             notes = material_notes(iid)
-            material = wiki.pages.get(f"material-{iid}")
+            material = wiki.material_page(iid)
+            if material is not None and material.meta.get("trashed"):
+                message = f"{row['title']} 的知识页已回收，请先恢复后再整理"
+                echo(f"{FAIL} {message}")
+                summary.errors.append(message)
+                summary.failures += 1
+                continue
             compiled = (
                 row["processing_status"] == "processed"
                 and material is not None
@@ -271,7 +277,7 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                         if slug not in summary.updated
                     ]
                 summary.cached.append(iid)
-                echo(f"#{iid} {row['title']}：整理结果未变，复用已有页面（无模型调用）")
+                echo(f"{row['title']}：整理结果未变，复用已有页面（无模型调用）")
                 continue
             if not compiled:
                 conn.execute("UPDATE items SET processing_status = 'pending' WHERE id = ?", (iid,))
@@ -280,7 +286,7 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                 try:
                     _, backend = _backend(settings, fs)
                 except OpsError as exc:
-                    echo(f"{FAIL} #{iid}：{exc}")
+                    echo(f"{FAIL} {row['title']}：{exc}")
                     summary.errors.append(str(exc))
                     summary.failures += 1
                     break
@@ -293,11 +299,11 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                     estimate_only=True, user_notes=notes,
                 )
             except LLMError as exc:
-                echo(f"{FAIL} #{iid}：{exc}")
+                echo(f"{FAIL} {row['title']}：{exc}")
                 summary.errors.append(str(exc))
                 summary.failures += 1
                 continue
-            echo(f"#{iid} {row['title']}：预估 ${estimate:.4f}")
+            echo(f"{row['title']}：预估 ${estimate:.4f}")
             if summary.cost + estimate > fs.run.max_cost_usd:
                 echo(f"{FAIL} 预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
                 summary.errors.append("预估费用超过 run.max_cost_usd 上限")
@@ -318,7 +324,7 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                     )
                     conn.commit()
                 summary.errors.append(str(exc))
-                echo(f"{FAIL} #{iid}：{exc}")
+                echo(f"{FAIL} {row['title']}：{exc}")
                 summary.failures += 1
                 # 用量未知时无法确认剩余预算；不继续发起付费调用。
                 if exc.usage is None or summary.cost >= fs.run.max_cost_usd:
@@ -410,7 +416,7 @@ def register_read(
     try:
         summary = ingest_items([item_id], echo, force=force)
     except OpsError as exc:
-        echo(f"{FAIL} #{item_id}：{exc}")
+        echo(f"{FAIL} 知识整理失败：{exc}")
         summary = IngestSummary(failures=1, errors=[str(exc)])
     return {
         "item_id": item_id,
@@ -485,7 +491,7 @@ def deep_summary(item_id: int, echo: Echo, *, force: bool = False) -> SummaryOut
     from secondbrain.pipeline.run import system_prompt
     from secondbrain.pipeline.summary import deep_summary as run_summary
     from secondbrain.pipeline.summary import estimate_summary_cost
-    from secondbrain.wiki.loop import known_knowledge
+    from secondbrain.wiki.loop import related_knowledge
 
     config.load_env()
     settings, fs, _ = _settings()
@@ -497,17 +503,17 @@ def deep_summary(item_id: int, echo: Echo, *, force: bool = False) -> SummaryOut
         _require_active(conn, item_id)
         cached = db.get_ai(conn, item_id, "summary")
         if cached and not force:
-            echo(f"#{item_id} 已有深度速读（{cached['_created_at']}），直接显示")
+            echo(f"已有深度速读（{cached['_created_at']}），直接显示")
             return SummaryOutcome(cached, cached=True)
         if row["extract_method"] == NO_TRANSCRIPT or not (row["content"] or row["summary"]):
             raise OpsError("该条目没有正文（或视频没有字幕），无法速读")
         now = datetime.now(UTC)
         estimate = _peak_guard(estimate_summary_cost(len(row["content"] or ""), fs), fs, now)
-        echo(f"#{item_id} {row['title']}：预估 ${estimate:.4f}")
+        echo(f"{row['title']}：预估 ${estimate:.4f}")
         _, backend = _backend(settings, fs)
         profile_file, _ = config.ensure_profile()
         wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-        known = known_knowledge(wiki, [row], fs.l1.item_chars, fs.wiki.known_max_chars)
+        known = related_knowledge(wiki, [row], fs.l1.item_chars, fs.wiki.related_max_chars)
         system = system_prompt("summary_system", load_profile(profile_file))
         result = run_summary(backend, system, row, fs, known, progress=echo)
         cost = _record(conn, backend, fs, result.calls, now)
@@ -529,7 +535,6 @@ class PrereqEntry:
     why: str = ""
     page_slug: str | None = None  # wiki 中已有的页面
     page_title: str | None = None
-    mastery: str | None = None
     explanation: str | None = None  # AI 生成的讲解（wiki 中没有时）
     explainers: list[dict] = field(default_factory=list)  # 已入库的讲解类条目
 
@@ -591,7 +596,7 @@ def find_explainers(conn, item_id: int, name: str, limit: int) -> list[dict]:
 
 
 def prerequisites(item_id: int, echo: Echo, *, force: bool = False) -> PrereqReport:
-    """补前置：wiki 已有页面的给链接与掌握度；没有的一次 strong 调用批量生成讲解（缓存）。"""
+    """补前置：已有知识页给链接；缺少的讲解用一次 strong 调用批量生成并缓存。"""
     from secondbrain.pipeline.summary import STAGE_PREREQ, estimate_prereq_cost, explain_prereqs
 
     config.load_env()
@@ -607,16 +612,15 @@ def prerequisites(item_id: int, echo: Echo, *, force: bool = False) -> PrereqRep
         for name, why in prereq_names(conn, item_id):
             entry = PrereqEntry(name, why)
             page = wiki.find(name)
-            if page is not None:
+            if page is not None and not page.meta.get("trashed"):
                 entry.page_slug, entry.page_title = page.slug, page.title
-                entry.mastery = page.meta.get("mastery")
             entry.explainers = find_explainers(
                 conn, item_id, name, fs.summary.explainers_per_prereq
             )
             entries.append(entry)
         report = PrereqReport(entries)
         if not entries:
-            echo(f"#{item_id} 没有前置知识（L2 与深度速读都没有列出）")
+            echo("没有前置知识（L2 与深度速读都没有列出）")
             return report
         cache = (db.get_ai(conn, item_id, "prereq") or {}).get("explanations", {})
         missing = [e for e in entries if e.page_slug is None]
@@ -647,14 +651,12 @@ def prerequisites(item_id: int, echo: Echo, *, force: bool = False) -> PrereqRep
 
 
 def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
-    """把补前置的 AI 讲解存为概念页（不调用 LLM）；返回 (slug, 是否新建)。已存在则直接返回。
-
-    frontmatter 字段齐全：mastery 陌生，sources 指向该条目，首次复习间隔 wiki.first_review_days。"""
+    """把前置讲解存为概念页，不调用模型；保留来源，已存在则返回其稳定路径。"""
     import hashlib
 
+    from secondbrain.wiki.ingest import _append_machine
     from secondbrain.wiki.store import Page, WikiError, add_list_items, new_meta, slugify
 
-    _, fs, _ = _settings()
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     conn = db.connect()
     try:
@@ -662,6 +664,8 @@ def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
         _require_active(conn, item_id)
         existing = wiki.find(name)
         if existing is not None:
+            if existing.meta.get("trashed"):
+                raise OpsError("该知识页已在回收区，请先恢复")
             return existing.slug, False
         cache = (db.get_ai(conn, item_id, "prereq") or {}).get("explanations", {})
     finally:
@@ -675,6 +679,8 @@ def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
         slug = slugify(name)
     except WikiError:  # 中文等无法转成 slug 的名字
         slug = "concept-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    if slug in wiki.pages and wiki.pages[slug].meta.get("trashed"):
+        raise OpsError("同名知识页已在回收区，请先恢复")
     today = datetime.now().date()
     summary = explanation.replace("\n", " ").strip()[:80]
     meta = new_meta(
@@ -682,17 +688,14 @@ def save_prereq_page(item_id: int, name: str) -> tuple[str, bool]:
         "concept",
         today,
         summary=summary,
-        mastery="陌生",
         sources=[item_id],
-        interval_days=fs.wiki.first_review_days,
     )
-    body = (
-        f"# {name}\n\n"
-        f"> AI 生成的前置知识讲解（来自条目 #{item_id} 的「补前置」），未经人工核对。\n\n"
-        f"{explanation.strip()}\n"
-    )
-    body = add_list_items(body, "来源", [f"[{row['title']}]({row['url']})（条目 #{item_id}）"])
-    wiki.save_page(Page(slug, meta, body))
+    meta["generated_by"] = "wiki_ingest"
+    meta["knowledge_status"] = "recorded" if row["reading_state"] == "read" else "draft"
+    page = Page(slug, meta, f"# {name}\n\n## 个人笔记\n")
+    _append_machine(page, item_id, explanation.strip(), wiki=wiki)
+    page.body = add_list_items(page.body, "来源", [f"[{row['title']}]({row['url']})"])
+    wiki.save_page(page)
     wiki.rebuild_index()
     wiki.append_log(today, "prereq", name, [f"新建 [[{slug}]]（AI 讲解，来源 #{item_id}）"])
     return slug, True
@@ -1431,6 +1434,22 @@ def add_manual(
                         RawEntry(url="", title=display_title),
                         fallback, fallback_method, f"urn:sha256:{digest}",
                     )
+                elif fallback:
+                    existing = db.item_by_canonical(conn, manual_canonical(url))
+                    if existing:
+                        _require_active(conn, existing)
+                    row = db.item_detail(conn, existing) if existing else None
+                    must_fetch = True
+                    doi, arxiv_id = _url_ids(url)
+                    display_title = title or (row["title"] if row else next(
+                        (line.strip()[:120] for line in fallback.splitlines() if line.strip()),
+                        url,
+                    ))
+                    fetched = ManualFetched(
+                        RawEntry(url=url, title=display_title, doi=doi, arxiv_id=arxiv_id),
+                        fallback, fallback_method, manual_canonical(url),
+                        note="使用提供的正文；原链接仅作来源引用，未请求原站",
+                    )
                 else:
                     existing = db.item_by_canonical(conn, manual_canonical(url))
                     if existing:
@@ -1527,7 +1546,7 @@ def add_manual(
                 echo(f"✗ {label}：{result.message}")
             else:
                 extra = f"（{result.message}）" if result.message else ""
-                echo(f"✓ {label}：{result.status} #{result.item_id} {result.title}{extra}")
+                echo(f"✓ {label}：{result.status} {result.title}{extra}")
     finally:
         conn.close()
         if own_client:
