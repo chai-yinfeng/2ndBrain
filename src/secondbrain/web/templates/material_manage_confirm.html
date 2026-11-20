@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}确认材料操作 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="eyebrow">材料管理</p><h1>{{ '隐藏全部已读材料' if action == 'hide_read' else '移入回收区' }}</h1><p class="meta">本次将处理 {{ count }} 份材料，操作可恢复，不会删除原件、笔记或阅读历史。</p></div></header>
+{% if action == 'hide_read' %}<p class="help">此操作针对默认列表中全部已读材料，不受当前搜索或正文筛选限制。知识库不变；可在“已隐藏”视图取消隐藏。</p>{% else %}<p class="help">回收后材料不再进入阅读清单或自动处理。知识内容暂时保留，之后可到“预览知识变更”确认同步范围；不会立即删除共享概念。</p>{% endif %}
+<section class="panel"><ul>{% for row in rows %}<li><a href="/item/{{ row.id }}">{{ row.title }}</a></li>{% else %}<li>没有需要处理的材料。</li>{% endfor %}</ul>{% if count > rows|length %}<p class="meta">仅展示前 {{ rows|length }} 份；确认将处理全部 {{ count }} 份。</p>{% endif %}</section>
+<form method="post" action="{{ '/materials/hide-read' if action == 'hide_read' else '/materials/manage' }}" class="page-actions">
+  <input type="hidden" name="confirm" value="yes"><input type="hidden" name="action" value="{{ action }}">
+  {% for item_id in ids %}<input type="hidden" name="item_ids" value="{{ item_id }}">{% endfor %}
+  {% for name, value in filters.items() %}<input type="hidden" name="{{ 'q' if name == 'query' else name }}" value="{{ value }}">{% endfor %}
+  <button class="fb primary" type="submit"{% if not count %} disabled{% endif %}>确认处理 {{ count }} 份</button><a class="fb" href="{{ return_url }}">取消</a>
+</form>
+{% endblock %}

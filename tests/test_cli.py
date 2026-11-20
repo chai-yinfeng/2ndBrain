@@ -81,8 +81,17 @@ def test_doctor_fails_when_data_dir_not_writable(
 def test_sources_list(isolated_env: Path) -> None:
     result = runner.invoke(app, ["sources", "list"])
     assert result.exit_code == 0, result.output
-    assert "simon-willison" in result.output
-    assert "needs_scraper，待支持" in result.output
+    assert "simon-willison" not in result.output
+    assert config.load_sources() == []
+    (config.config_dir() / "sources.yaml").write_text(
+        "sources:\n"
+        "  - id: chosen-home\n    type: rss\n    url: https://chosen.example/\n"
+        "    needs_scraper: true\n", encoding="utf-8",
+    )
+    result = runner.invoke(app, ["sources", "list"])
+    assert result.exit_code == 0, result.output
+    assert "chosen-home" in result.output
+    assert "simon-willison" not in result.output
 
 
 def test_fetch_unknown_source_is_an_error(isolated_env: Path) -> None:

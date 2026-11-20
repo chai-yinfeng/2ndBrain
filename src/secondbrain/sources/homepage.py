@@ -41,7 +41,7 @@ def feed_root(url: str | None) -> str | None:
 def source_homepage(source: SourceConfig, detected: str | None = None) -> str | None:
     """配置的 homepage 优先；否则按类型推导：rss 用抓取 / 预览时从 feed 读到的 channel <link>，
     没有时用 feed URL 的站点根（托管域名除外）；sitemap 用站点根，arxiv 用分类列表
-    （没有 cat: 时用搜索），hf_papers 与 youtube 用固定页面。"""
+    （没有 cat: 时用搜索），youtube 用频道页面。"""
     if source.homepage:
         return safe_url(source.homepage)
     url = source.url or ""
@@ -57,8 +57,6 @@ def source_homepage(source: SourceConfig, detected: str | None = None) -> str | 
         if m:
             return f"https://arxiv.org/list/{m.group(1)}/recent"
         return f"https://arxiv.org/search/?query={quote_plus(source.query or '')}&searchtype=all"
-    if source.type == "hf_papers":
-        return "https://huggingface.co/papers"
     if source.type == "youtube":
         channel = parse_qs(urlsplit(url).query).get("channel_id", [None])[0]
         return f"https://www.youtube.com/channel/{quote_plus(channel)}" if channel else None

@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from secondbrain import config, db
 from secondbrain.cli import app as cli_app
 from secondbrain.llm.fake import FakeBackend
-from secondbrain.llm.schemas import MasteryChange, ProfileProposal, SectionEdit
+from secondbrain.llm.schemas import ProfileProposal, SectionEdit
 from secondbrain.models import FilterSettings, SourceConfig
 from secondbrain.pipeline.run import run_pipeline, system_prompt
 from secondbrain.profile.feedback import few_shot_block, polarity_examples, recent_feedback
@@ -194,115 +194,30 @@ def _feedback(conn):
     return ids, recent_feedback(conn, NOW, 30, 50)
 
 
-def _apply(fb, changes=(), edits=()):
-    proposal = ProfileProposal(mastery_changes=list(changes), section_edits=list(edits))
+def _apply(fb, edits=()):
+    proposal = ProfileProposal(section_edits=list(edits))
     return apply_proposal(parse_profile(PROFILE_TEXT), proposal, fb)
 
 
-def test_upgrade_requires_too_easy_evidence(conn):
-    ids, fb = _feedback(conn)
-    ok = _apply(
-        fb,
-        [
-            MasteryChange(
-                action="update", row=3, mastery="想回炉", reason="r", evidence=[ids["too_easy"]]
-            )
-        ],
-    )
-    assert ok.applied and not ok.rejected
-    assert "| GPU kernels | 想回炉 | 高 | 带补充说明 |" in ok.new_text
-    # 未修改的行保留原文（包括空单元格的写法），diff 只有一行改动
-    assert "| Consensus protocols | 陌生 | 中 | |" in ok.new_text
-    changed = [x for x in ok.diff().splitlines() if x[:1] in "+-" and x[:3] not in ("+++", "---")]
-    assert changed == [
-        "-| GPU kernels | 接触过（偶尔写） | 高 | 带补充说明 |",
-        "+| GPU kernels | 想回炉 | 高 | 带补充说明 |",
-    ]
-    ev = [ids["gained"]]
-    bad = _apply(
-        fb, [MasteryChange(action="update", row=3, mastery="想回炉", reason="r", evidence=ev)]
-    )
-    assert not bad.applied and "升级缺少" in bad.rejected[0]  # 有收获 只能用于 陌生 → 接触过
-    assert not bad.changed
-    two = _apply(
-        fb,
-        [
-            MasteryChange(
-                action="update", row=3, mastery="扎实", reason="r", evidence=[ids["too_easy"]]
-            )
-        ],
-    )
-    assert "每次只能升一级" in two.rejected[0]  # 不再有"已扎实可直升扎实"的特例
-
-
-def test_gained_only_supports_first_step(conn):
-    ids, fb = _feedback(conn)
-    ev = [ids["gained"]]
-    ok = _apply(
-        fb, [MasteryChange(action="update", row=2, mastery="接触过", reason="r", evidence=ev)]
-    )
-    assert ok.applied and "| Consensus protocols | 接触过 | 中 |" in ok.new_text
-
-
-def test_downgrade_one_level_with_too_hard(conn):
-    ids, fb = _feedback(conn)
-    ev = [ids["too_hard"]]
-    one = _apply(
-        fb, [MasteryChange(action="update", row=1, mastery="接触过", reason="r", evidence=ev)]
-    )
-    assert one.applied
-    two = _apply(
-        fb, [MasteryChange(action="update", row=1, mastery="陌生", reason="r", evidence=ev)]
-    )
-    assert "每次只能降一级" in two.rejected[0]
-    no_ev = _apply(
-        fb,
-        [
-            MasteryChange(
-                action="update", row=1, mastery="接触过", reason="r", evidence=[ids["gained"]]
-            )
-        ],
-    )
-    assert "降级缺少" in no_ev.rejected[0]
 
 
 def test_evidence_is_required_and_must_exist(conn):
-    ids, fb = _feedback(conn)
-    res = _apply(
-        fb,
-        [
-            MasteryChange(action="update", row=3, mastery="扎实", reason="r", evidence=[]),
-            MasteryChange(action="update", row=3, mastery="扎实", reason="r", evidence=[99999]),
-            MasteryChange(
-                action="update", row=42, mastery="扎实", reason="r", evidence=[ids["too_easy"]]
-            ),
-            MasteryChange(
-                action="add", domain="X", mastery="精通", reason="r", evidence=[ids["gained"]]
-            ),
-        ],
-    )
-    assert not res.applied and len(res.rejected) == 4
+    _, fb = _feedback(conn)
+    res = _apply(fb, [
+        SectionEdit(section="不想看的内容", action="append", text="- x", reason="r", evidence=[]),
+        SectionEdit(
+            section="不想看的内容", action="append", text="- x", reason="r", evidence=[99999],
+        ),
+    ])
+    assert not res.applied and len(res.rejected) == 2
     assert "没有给出反馈证据" in res.rejected[0]
     assert "不存在" in res.rejected[1]
-    assert "行号无效" in res.rejected[2]
-    assert "掌握度取值无效" in res.rejected[3]
 
 
 def test_add_remove_and_section_edits(conn):
     ids, fb = _feedback(conn)
     res = _apply(
         fb,
-        [
-            MasteryChange(
-                action="add",
-                domain="Compilers（MLIR）",
-                mastery="接触过",
-                priority="中",
-                reason="r",
-                evidence=[ids["gained"]],
-            ),
-            MasteryChange(action="remove", row=4, reason="r", evidence=[ids["dismiss"]]),
-        ],
         [
             SectionEdit(
                 section="不想看的内容",
@@ -327,10 +242,9 @@ def test_add_remove_and_section_edits(conn):
             ),
         ],
     )
-    assert len(res.applied) == 4 and len(res.rejected) == 1
+    assert len(res.applied) == 2 and len(res.rejected) == 1
     text = res.new_text
-    assert "| Compilers（MLIR） | 接触过 | 中 |  |" in text
-    assert "| Compilers | 精通 |" not in text
+    assert "| Compilers | 精通 |" in text
     assert "- 行业新闻汇总" in text and "- 融资新闻" not in text
     # 其余内容保持不变
     assert "## 背景\n\n- 一名虚构的后端工程师，正在学习推理系统。" in text
@@ -339,15 +253,10 @@ def test_add_remove_and_section_edits(conn):
     assert "+- 行业新闻汇总" in diff
 
 
-def test_profile_without_table_rejects_mastery_changes(conn):
+def test_profile_without_table_supports_interest_edits(conn):
     ids, fb = _feedback(conn)
     profile = parse_profile("# 画像\n\n## 不想看的内容\n\n- 广告\n")
     proposal = ProfileProposal(
-        mastery_changes=[
-            MasteryChange(
-                action="add", domain="X", mastery="陌生", reason="r", evidence=[ids["gained"]]
-            )
-        ],
         section_edits=[
             SectionEdit(
                 section="不想看的内容",
@@ -359,7 +268,7 @@ def test_profile_without_table_rejects_mastery_changes(conn):
         ],
     )
     res = apply_proposal(profile, proposal, fb)
-    assert "没有可解析的掌握度表" in res.rejected[0]
+    assert not res.rejected
     assert res.new_text == "# 画像\n\n## 不想看的内容\n\n- 广告\n- 新闻\n"
 
 
@@ -367,7 +276,7 @@ def test_generate_update_with_fake_backend(conn):
     _, fb = _feedback(conn)
     res = generate_update(FakeBackend(), PROFILE_TEXT, fb)
     assert res.changed
-    assert "+| GPU kernels | 想回炉 | 高 | 带补充说明 |" in res.diff()
+    assert "| GPU kernels | 接触过（偶尔写） | 高 | 带补充说明 |" in res.new_text
     assert "+- 类似《Funding news roundup》的内容" in res.diff()
     assert res.usage is not None
 
@@ -406,7 +315,7 @@ def test_profile_update_dry_run_and_apply(env: Path, conn):
 
     result = runner.invoke(cli_app, ["profile", "update"])  # 默认 dry-run
     assert result.exit_code == 0, result.output
-    assert "+| GPU kernels | 想回炉 |" in result.output
+    assert "+- 类似《Funding news roundup》的内容" in result.output
     assert "dry-run：未写入" in result.output
     assert (env / "profile.md").read_text(encoding="utf-8") == before
     assert not (env / "profile_history").exists()
@@ -415,7 +324,7 @@ def test_profile_update_dry_run_and_apply(env: Path, conn):
     assert result.exit_code == 0, result.output
     backups = list((env / "profile_history").glob("profile-*.md"))
     assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == before
-    assert "| GPU kernels | 想回炉 |" in (env / "profile.md").read_text(encoding="utf-8")
+    assert "| GPU kernels | 接触过（偶尔写） |" in (env / "profile.md").read_text(encoding="utf-8")
     calls = conn.execute("SELECT stage, backend FROM llm_calls").fetchall()
     assert [tuple(r) for r in calls] == [("PROFILE", "fake"), ("PROFILE", "fake")]
 
@@ -449,6 +358,12 @@ def test_feedback_distribution_uses_current_state(conn):
 
 
 def test_sources_tune_cli_is_read_only(env: Path, conn):
+    sources_path = config.config_dir() / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - id: dan-luu\n    type: rss\n    url: u\n"
+        "    trust: 3\n    role: expansion\n", encoding="utf-8",
+    )
+    before = sources_path.read_bytes()
     db.upsert_sources(
         conn, [SourceConfig(id="dan-luu", type="rss", url="u", trust=3, role="expansion")]
     )
@@ -461,7 +376,7 @@ def test_sources_tune_cli_is_read_only(env: Path, conn):
     assert "trust 3" in line and "反馈   5   0   0   0   0   0" in line
     assert "→" not in result.output  # 不再有 trust 调整建议
     assert runner.invoke(cli_app, ["sources", "tune", "--apply"]).exit_code != 0  # 选项已删除
-    assert not (config.CONFIG_DIR / "sources.yaml").exists()
+    assert sources_path.read_bytes() == before
 
 
 # ---------- Web：/profile ----------
@@ -475,9 +390,7 @@ def client(env: Path) -> TestClient:
 def test_profile_page(client: TestClient):
     resp = client.get("/profile")
     assert resp.status_code == 200
-    assert "领域掌握度（解析结果）" in resp.text
     assert "GPU kernels" in resp.text
-    assert 'href="/profile"' in client.get("/").text
 
 
 def test_profile_save_creates_backup(client: TestClient, env: Path):
@@ -502,7 +415,7 @@ def test_profile_propose_and_apply(client: TestClient, env: Path, conn):
     conn.commit()
     resp = client.post("/profile/propose")
     assert resp.status_code == 200
-    assert "+| GPU kernels | 想回炉 |" in resp.text
+    assert "+- 类似《Funding news roundup》的内容" in resp.text
     assert 'hx-post="/profile/apply"' in resp.text
 
     stale = client.post("/profile/apply", data={"new_text": "x", "base_sha": "0" * 64})

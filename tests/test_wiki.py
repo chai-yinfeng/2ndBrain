@@ -1,4 +1,4 @@
-"""M6 知识 wiki：初始化、ingest、slug 与路径安全、lint、SM-2 复习、闭环、Web。全部离线。"""
+"""知识 wiki：初始化、ingest、slug 与路径安全、lint、内容上下文、Web。全部离线。"""
 
 import shutil
 from datetime import UTC, date, datetime, timedelta
@@ -20,7 +20,6 @@ from secondbrain.urls import content_hash
 from secondbrain.web.app import create_app
 from secondbrain.wiki.ingest import apply_plan
 from secondbrain.wiki.lint import lint
-from secondbrain.wiki.review import due_concepts, review, schedule
 from secondbrain.wiki.store import Page, WikiError, new_meta, open_wiki, slugify
 
 TODAY = date(2026, 11, 4)
@@ -91,17 +90,16 @@ def _wiki(env):
 
 def test_open_wiki_initializes_skeleton(env):
     wiki = _wiki(env)
-    for folder in ("concepts", "entities", "papers"):
+    for folder in ("concepts", "entities", "papers", "materials"):
         assert (env / "wiki" / "pages" / folder).is_dir()
-    assert "## Concepts" in wiki.index_path.read_text(encoding="utf-8")
+    assert "## 概念" not in wiki.index_path.read_text(encoding="utf-8")
     assert wiki.log_path.read_text(encoding="utf-8").startswith("# Wiki Log")
 
 
 def test_slugify_and_path_safety(env):
     assert slugify("Paged Attention (vLLM)") == "paged-attention-vllm"
     assert slugify("../../etc/passwd") == "etc-passwd"
-    with pytest.raises(WikiError):
-        slugify("中文标题")
+    assert slugify("中文标题") == "中文标题"
     wiki = _wiki(env)
     for bad in ("../evil", "a/b", "UPPER", ""):
         with pytest.raises(WikiError):
@@ -124,10 +122,11 @@ def test_plan_cannot_escape_wiki_dir(env, conn):
         updates=[PageUpdate(slug="no-such-page", action="add_links", links=["a"])],
     )
     result = apply_plan(wiki, plan, row, PROFILE, TODAY)
-    assert result.created == ["outside"]  # 规范化为合法 slug，写在 wiki 内
+    assert result.created == [f"material-{item}", "outside", "中文"]
     assert (env / "wiki" / "pages" / "concepts" / "outside.md").is_file()
+    assert (env / "wiki" / "pages" / "concepts" / "中文.md").is_file()
     assert not (env.parent / "outside.md").exists()
-    assert len(result.rejected) == 2
+    assert len(result.rejected) == 1
     files = [p for p in env.rglob("*.md")]
     assert all(p.is_relative_to(env) for p in files)
 
@@ -136,42 +135,49 @@ def test_plan_cannot_escape_wiki_dir(env, conn):
 
 
 def test_ingest_pending_creates_pages_index_log(env, conn):
-    item = add_item(conn, 1, "PagedAttention explained", l2=L2)
+    item = add_item(
+        conn, 1, "PagedAttention explained", l2=L2,
+        content="PagedAttention manages KV cache. Continuous batching shares resources.",
+    )
     db.add_feedback(conn, item, "gained", None, datetime.now(UTC))
     conn.commit()
     result = runner.invoke(cli_app, ["wiki", "ingest", "--pending"])
     assert result.exit_code == 0, result.output
-    assert "新建：pagedattention-explained, kv-cache, continuous-batching" in result.output
+    assert f"新建：material-{item}, kv-cache, continuous-batching" in result.output
 
     wiki = _wiki(env)
-    paper = wiki.pages["pagedattention-explained"]
-    assert paper.type == "paper" and paper.meta["sources"] == [item]
-    assert "[[kv-cache]]" in paper.body
-    assert f"(../../raw/{item}.md)" in paper.body  # 链接回原文（data/wiki/raw，ADR 0013）
+    material = wiki.pages[f"material-{item}"]
+    assert material.type == "material" and material.meta["sources"] == [item]
+    assert "[[kv-cache]]" in material.body
+    assert f"(../../raw/{item}.md)" in material.body
     raw = env / "wiki" / "raw" / f"{item}.md"
     assert raw.read_text(encoding="utf-8").startswith("# PagedAttention")
     assert not (env / "raw").exists()
     kv = wiki.pages["kv-cache"]
-    # 新概念页一律从"接触过"起步（不继承 profile 中"想回炉"的领域），首次复习间隔 3 天
-    assert kv.meta["mastery"] == "接触过" and kv.meta["interval_days"] == 3
-    assert wiki.pages["continuous-batching"].meta["mastery"] == "接触过"
-    assert paper.meta["mastery"] is None and paper.meta["interval_days"] == 1
+    assert "mastery" not in kv.meta and "interval_days" not in kv.meta
+    assert "last_reviewed" not in kv.meta
+    assert "mastery" not in material.meta
     index = wiki.index_path.read_text(encoding="utf-8")
-    assert "- [[kv-cache]] — （fake）KV cache" in index
+    assert "[[kv-cache]]" in index and "（fake）KV cache" in index
     log = wiki.log_path.read_text(encoding="utf-8")
     assert "] ingest | PagedAttention explained" in log
     assert "- 新建 [[kv-cache]]" in log
 
     # 幂等：再次 --pending 没有待编入条目；显式指定也提示已编入
+    calls_before = conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
     again = runner.invoke(cli_app, ["wiki", "ingest", "--pending"])
-    assert "0 条待 ingest" in again.output
+    assert again.exit_code == 0, again.output
+    assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == calls_before
     explicit = runner.invoke(cli_app, ["wiki", "ingest", str(item)])
     assert "已编入 wiki" in explicit.output
     assert len(_wiki(env).pages) == 3
 
 
 def test_second_item_updates_existing_concepts(env, conn):
-    first = add_item(conn, 1, "PagedAttention explained", l2=L2)
+    first = add_item(
+        conn, 1, "PagedAttention explained", l2=L2,
+        content="PagedAttention manages KV cache. Continuous batching shares resources.",
+    )
     second = add_item(conn, 2, "KV cache quantization", l2={**L2, "prerequisites": ["KV cache"]})
     for item in (first, second):
         db.add_feedback(conn, item, "gained", None, datetime.now(UTC))
@@ -180,25 +186,26 @@ def test_second_item_updates_existing_concepts(env, conn):
     assert result.exit_code == 0, result.output
     kv = _wiki(env).pages["kv-cache"]
     assert sorted(kv.meta["sources"]) == [first, second]
-    assert "[[kv-cache-quantization]]" in kv.body  # 第二条通过 add_links 更新
+    assert f"material-{second}" in kv.links()
     assert db.ingested_ids(conn) == {first, second}
 
 
 def test_ingest_without_pending_is_reported(env):
     result = runner.invoke(cli_app, ["wiki", "ingest", "--pending"])
     assert result.exit_code == 0
-    assert "0 条待 ingest" in result.output
     assert (env / "wiki" / "index.md").is_file()
 
 
-def test_long_items_send_key_points_not_full_text(env, conn):
+def test_long_items_keep_full_available_text(env, conn):
     from secondbrain.wiki.ingest import item_payload
 
-    item = add_item(conn, 1, "Very long", l2=L2, content="x" * 50_000)
-    payload = item_payload(db.item_detail(conn, item), L2, FilterSettings())
-    assert "text" not in payload and payload["key_points"] == L2["key_points"]
-    short = add_item(conn, 2, "Short one", l2=L2, content="short body " * 10)
-    assert "text" in item_payload(db.item_detail(conn, short), L2, FilterSettings())
+    content = "x" * 50_000 + " final tail"
+    item = add_item(conn, 1, "Very long", l2=L2, content=content)
+    payload = item_payload(db.item_detail(conn, item), None, FilterSettings())
+    assert payload["text"] == content
+    assert payload["text_kind"] == "full"
+    assert payload["full_length_chars"] == len(content)
+    assert payload["key_points"] == []  # 不从 L2 偷换正文
 
 
 # ---------- lint ----------
@@ -223,40 +230,6 @@ def test_lint_finds_broken_links_orphans_and_missing_fields(env):
     assert out.exit_code == 0 and "[[a]] → ghost" in out.output
 
 
-# ---------- SM-2 复习 ----------
-
-
-def test_schedule_rules():
-    assert schedule(1, 2.5, "想回炉", "remembered") == (2, 2.6, "想回炉")
-    assert schedule(10, 2.5, "想回炉", "remembered") == (25, 2.6, "扎实")  # 间隔 ≥ 21 天
-    assert schedule(4, 2.5, "陌生", "remembered")[2] == "接触过"
-    assert schedule(10, 2.5, "扎实", "fuzzy") == (12, 2.35, "想回炉")
-    assert schedule(10, 2.5, "想回炉", "forgot") == (1, 2.3, "接触过")
-    assert schedule(3, 1.35, "陌生", "forgot") == (1, 1.3, "陌生")  # ease 下限、陌生不再降
-    assert schedule(30, 2.95, "扎实", "remembered")[1] == 3.0  # ease 上限
-    with pytest.raises(ValueError):
-        schedule(1, 2.5, None, "maybe")
-
-
-def test_review_updates_frontmatter_and_due(env):
-    wiki = _wiki(env)
-    meta = new_meta("KV cache", "concept", TODAY - timedelta(days=3), mastery="想回炉")
-    wiki.save_page(Page("kv-cache", meta, "# KV cache"))
-    wiki.save_page(Page("vllm", new_meta("vLLM", "entity", TODAY - timedelta(days=9)), "# vLLM"))
-    assert [p.slug for p in due_concepts(wiki, TODAY)] == ["kv-cache"]  # 实体不参与复习
-    out = review(wiki, wiki.pages["kv-cache"], "remembered", TODAY)
-    assert (out.interval_after, out.next_due) == (2, TODAY + timedelta(days=2))
-    reloaded = _wiki(env).pages["kv-cache"]
-    assert (
-        reloaded.meta["interval_days"] == 2 and reloaded.meta["last_reviewed"] == TODAY.isoformat()
-    )
-    assert due_concepts(_wiki(env), TODAY) == []
-    assert [p.slug for p in due_concepts(_wiki(env), TODAY + timedelta(days=2))] == ["kv-cache"]
-    assert "] review | KV cache" in wiki.log_path.read_text(encoding="utf-8")
-    due = runner.invoke(cli_app, ["wiki", "due", "--date", (TODAY + timedelta(days=2)).isoformat()])
-    assert "[[kv-cache]]" in due.output
-    cli = runner.invoke(cli_app, ["wiki", "review", "kv-cache", "forgot"])
-    assert cli.exit_code == 0 and "掌握度 想回炉 → 接触过" in cli.output
 
 
 # ---------- 闭环 ----------
@@ -285,59 +258,33 @@ def _run(conn, wiki, backend=None, today=TODAY):
     )
 
 
-def _concept(wiki, slug, title, mastery, days_ago=5, aliases=()):
+def _concept(wiki, slug, title, days_ago=5, aliases=()):
     meta = new_meta(
-        title, "concept", TODAY - timedelta(days=days_ago), mastery=mastery, aliases=list(aliases)
+        title, "concept", TODAY - timedelta(days=days_ago), aliases=list(aliases)
     )
     meta["summary"] = f"{title} 的摘要"
     wiki.save_page(Page(slug, meta, f"# {title}"))
 
 
-def test_l1_gets_known_knowledge_without_changing_system_prefix(env, conn):
+def test_l1_gets_related_content_without_changing_system_prefix(env, conn):
     wiki = _wiki(env)
-    _concept(wiki, "kv-cache", "KV cache", "扎实")
+    _concept(wiki, "kv-cache", "KV cache")
     add_item(conn, 1, "A new KV cache eviction policy for LLM inference")
     conn.commit()
     with_wiki = RecordingFake()
     _run(conn, wiki, with_wiki)
     user = with_wiki.l1[0][1]["content"]
-    assert user.startswith("## 已知知识（来自用户的 wiki）")
-    assert "KV cache（concept；掌握度：扎实）— KV cache 的摘要" in user
+    assert user.startswith("## 相关知识内容")
+    assert "KV cache（concept）— KV cache 的摘要" in user
 
     add_item(conn, 2, "Another kv cache post")
     conn.commit()
     without = RecordingFake()
     _run(conn, None, without)
-    assert "已知知识" not in without.l1[0][1]["content"]
+    assert "## 相关知识内容" not in without.l1[0][1]["content"]
     assert with_wiki.l1[0][0]["content"] == without.l1[0][0]["content"]  # system 前缀不变
 
 
-def test_due_concepts_go_to_refresher_with_related_item(env, conn):
-    wiki = _wiki(env)
-    _concept(wiki, "continuous-batching", "Continuous batching", "想回炉")
-    add_item(conn, 1, "Continuous batching in vLLM, revisited")
-    conn.commit()
-    report = _run(conn, wiki)
-    assert report.concepts_placed == 1
-    (row,) = db.digest_concepts(conn, TODAY.isoformat())
-    assert (row["slug"], row["est_minutes"], row["mastery"]) == ("continuous-batching", 5, "想回炉")
-    assert row["related_title"] == "Continuous batching in vLLM, revisited"
-    assert report.minutes_used >= 5
-    # 同一天再跑不重复
-    assert _run(conn, wiki).concepts_placed == 0
-    assert len(db.digest_concepts(conn, TODAY.isoformat())) == 1
-
-
-def test_concepts_respect_budget(env, conn):
-    wiki = _wiki(env)
-    _concept(wiki, "kv-cache", "KV cache", "想回炉")
-    fs = FilterSettings.model_validate(
-        {"daily_budget_minutes": 3, "lane_budget_reserve": {"refresher": 0}}
-    )
-    report = run_pipeline(
-        conn, fs, FakeBackend(), PROFILE, limit=None, now=datetime.now(UTC), today=TODAY, wiki=wiki
-    )
-    assert report.concepts_placed == 0  # 5 分钟放不进 3 分钟预算
 
 
 # ---------- Web ----------
@@ -346,7 +293,7 @@ def test_concepts_respect_budget(env, conn):
 @pytest.fixture
 def client(env, conn):
     wiki = _wiki(env)
-    _concept(wiki, "kv-cache", "KV cache", "想回炉", aliases=["KV-cache"])
+    _concept(wiki, "kv-cache", "KV cache", aliases=["KV-cache"])
     page = Page(
         "paged-attention",
         new_meta("PagedAttention", "paper", TODAY, summary="分块 KV cache"),
@@ -375,9 +322,6 @@ def client(env, conn):
         )(),
         datetime.now(UTC),
     )
-    db.upsert_digest_concept(
-        conn, TODAY.isoformat(), "kv-cache", "KV cache", "想回炉", 5, item, datetime.now(UTC)
-    )
     conn.commit()
     return TestClient(create_app())
 
@@ -385,7 +329,7 @@ def client(env, conn):
 def test_wiki_index_and_page(client):
     html = client.get("/wiki").text
     assert 'href="/wiki/page/kv-cache"' in html
-    assert 'hx-post="/wiki/review"' in html and "还记得" in html
+    assert 'hx-post="/wiki/review"' not in html
     page = client.get("/wiki/page/paged-attention").text
     assert '<a href="/wiki/page/kv-cache">KV cache</a>' in page
     assert 'class="missing"' in page
@@ -394,22 +338,15 @@ def test_wiki_index_and_page(client):
     assert client.get("/wiki/page/nope").status_code == 404
 
 
-def test_review_button(client, env):
-    resp = client.post("/wiki/review", data={"slug": "kv-cache", "grade": "fuzzy"})
-    assert resp.status_code == 200 and "已记录：模糊" in resp.text
-    assert _wiki(env).pages["kv-cache"].meta["last_reviewed"] == datetime.now().date().isoformat()
-    assert client.post("/wiki/review", data={"slug": "kv-cache", "grade": "meh"}).status_code == 400
-    assert (
-        client.post("/wiki/review", data={"slug": "paged-attention", "grade": "fuzzy"}).status_code
-        == 404
-    )
+def test_review_route_is_removed(client):
+    response = client.post("/wiki/review", data={"slug": "kv-cache", "grade": "fuzzy"})
+    assert response.status_code == 404
 
 
-def test_digest_shows_concepts_and_wiki_refresh_links(client):
-    html = client.get(f"/?date={TODAY.isoformat()}").text
-    assert 'data-concept="kv-cache"' in html and "概念复习" in html
-    assert 'data-budget="25/105"' in html  # 20 分钟必读 + 5 分钟概念复习
-    # 前置知识命中 wiki 中不扎实的概念 → 链接到 wiki 页面
+def test_digest_links_related_wiki_without_review_budget(client):
+    html = client.get(f"/recommendations?date={TODAY.isoformat()}").text
+    assert "概念复习" not in html
+    assert 'data-budget="20/105"' in html
     assert '<a href="/wiki/page/kv-cache">KV cache</a>' in html
     assert 'href="/wiki"' in html
 
@@ -437,7 +374,7 @@ def test_dropped_ops_are_reported_and_rest_applied(env, conn):
         (FIXTURES / "wiki_plan_malformed.json").read_text(encoding="utf-8")
     )
     result = apply_plan(_wiki(env), plan, db.item_detail(conn, item), PROFILE, TODAY)
-    assert result.created == ["concept-a", "concept-b"]
+    assert result.created == [f"material-{item}", "concept-a", "concept-b"]
     assert result.updated == []  # 对新建页的 add_links 计入新建
     assert "[[concept-b]]" in _wiki(env).pages["concept-a"].body
     assert sum("解析时丢弃" in r for r in result.rejected) == 2

@@ -1,59 +1,48 @@
 {% extends "base.html" %}
 {% block title %}知识图谱 · Wiki{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">{% endblock %}
 {% block content %}
-<p class="meta"><a href="/wiki">← Wiki</a></p>
-<h1>知识图谱 <small class="meta">{{ count }} 个页面</small></h1>
+<header class="page-header">
+  <div><p class="eyebrow">KNOWLEDGE WORKSPACE</p><h1>知识图谱 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">从一个概念出发，沿页面链接探索。连线不代表因果、引用或前置关系。</p></div>
+  <div class="page-actions"><form method="post" action="/wiki/reindex"><button class="fb" type="submit">从 Markdown 重新索引</button></form></div>
+</header>
+<nav class="subnav" aria-label="知识库视图"><a href="/wiki">知识页面</a><a href="/wiki/graph{% if include_drafts %}?drafts=1{% endif %}" aria-current="page">关系图谱</a></nav>
+{% if include_drafts %}<p class="refresh wiki-notice">当前为高级视图，可显示机器草稿、来源已回收及待复核的机器内容。<a href="/wiki/graph">返回正式知识库图谱</a></p>{% endif %}
 {% if not count %}
-<p class="empty" id="graph-empty">在文章上点「有收获」并编进 wiki 后，这里会出现图谱。</p>
+<p class="empty panel" id="graph-empty">知识网络为空。<a href="/add">导入材料</a>后可在材料详情页整理入 wiki，无需先运行推荐或提交反馈。</p>
 {% else %}
-<div class="graph-filters">
-  <span class="meta">类型：</span>
-  {% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ t }}</label>{% endfor %}
-  <span class="meta">掌握度：</span>
-  {% for m in ("陌生", "接触过", "想回炉", "扎实", "无") %}<label><input type="checkbox" class="f-mastery" value="{{ m }}" checked> <span class="dot" data-mastery="{{ m }}"></span>{{ m }}</label>{% endfor %}
-  <span class="meta">粗边框 = 今天到期复习；节点大小 ~ 连接数；点击打开页面。</span>
-</div>
-<div id="graph" data-src="/wiki/graph.json"></div>
-<script src="/static/cytoscape.min.js"></script>
-<script>
-(function () {
-  const COLORS = {"陌生": "#d64545", "接触过": "#e0a030", "想回炉": "#7a5cd6", "扎实": "#2f9e5a", "无": "#9aa0a6"};
-  document.querySelectorAll(".dot").forEach(d => d.style.background = COLORS[d.dataset.mastery]);
-  fetch("/wiki/graph.json").then(r => r.json()).then(data => {
-    const elements = [];
-    data.nodes.forEach(n => elements.push({data: {
-      id: n.id, label: n.label, type: n.type, mastery: n.mastery || "无", due: n.due,
-      size: 18 + 8 * Math.sqrt(n.degree), url: n.url, color: COLORS[n.mastery || "无"] || COLORS["无"]
-    }}));
-    data.edges.forEach(e => elements.push({data: {id: e.source + "__" + e.target, source: e.source, target: e.target}}));
-    const fg = getComputedStyle(document.documentElement).getPropertyValue("--fg").trim() || "#1f2328";
-    const cy = cytoscape({
-      container: document.getElementById("graph"),
-      elements: elements,
-      layout: {name: "cose", animate: false, nodeRepulsion: 8000},
-      style: [
-        {selector: "node", style: {
-          "background-color": "data(color)", "label": "data(label)", "width": "data(size)",
-          "height": "data(size)", "font-size": 10, "color": fg, "text-valign": "bottom",
-          "text-margin-y": 3}},
-        {selector: "node[type = 'paper']", style: {"shape": "round-rectangle"}},
-        {selector: "node[type = 'entity']", style: {"shape": "diamond"}},
-        {selector: "node[?due]", style: {"border-width": 4, "border-color": "#d64545"}},
-        {selector: "edge", style: {"width": 1, "line-color": "#b8bcc2", "curve-style": "haystack"}}
-      ]
-    });
-    cy.on("tap", "node", evt => { window.location.href = evt.target.data("url"); });
-    function applyFilters() {
-      const types = new Set([...document.querySelectorAll(".f-type:checked")].map(x => x.value));
-      const levels = new Set([...document.querySelectorAll(".f-mastery:checked")].map(x => x.value));
-      cy.nodes().forEach(n => {
-        const show = types.has(n.data("type")) && levels.has(n.data("mastery"));
-        n.style("display", show ? "element" : "none");
-      });
-    }
-    document.querySelectorAll(".f-type, .f-mastery").forEach(x => x.addEventListener("change", applyFilters));
-  });
-})();
-</script>
+<section class="graph-workspace panel" aria-label="知识网络浏览器">
+  <div class="graph-toolbar">
+    <div class="graph-search"><label for="node-search">查找名称 / 别名</label><input id="node-search" type="search" placeholder="例如 KV cache、键值缓存" autocomplete="off" aria-controls="node-picker"><span class="help">Enter 定位首个结果；同名页面请核对类型与路径。</span></div>
+    <div class="graph-view-actions"><button class="fb" id="graph-global" type="button" aria-pressed="true">全局概览</button><button class="fb" id="graph-fit" type="button">适应视图</button><button class="fb" id="graph-reset" type="button">重置视图</button></div>
+  </div>
+  <div class="graph-filters">
+    <fieldset><legend>类别</legend>{% for t in types %}<label><input type="checkbox" class="f-type" value="{{ t }}" checked> {{ knowledge_kinds.get(t, t) }}</label>{% endfor %}</fieldset>
+    <label class="graph-label-control" for="graph-labels">标签 <select id="graph-labels"><option value="auto">自动降噪</option><option value="all">全部显示</option><option value="none">隐藏标签</option></select></label>
+  </div>
+  <div class="network-layout">
+    <div class="graph-stage">
+      <div class="graph-statusbar"><p id="graph-status" role="status" aria-live="polite">正在读取 Markdown 网络…</p><span class="meta">点击节点查看详情 · 滚轮缩放</span></div>
+      <div class="graph-canvas-wrap">
+        <div id="graph" data-src="/wiki/graph.json{% if include_drafts %}?drafts=true{% endif %}" role="img" aria-label="知识页面链接图；也可通过右侧列表定位并查看页面"></div>
+        <div class="graph-zoom" role="group" aria-label="图谱缩放"><button class="fb" id="graph-zoom-in" type="button" aria-label="放大">+</button><output id="graph-zoom-level" aria-label="缩放比例">100%</output><button class="fb" id="graph-zoom-out" type="button" aria-label="缩小">−</button></div>
+        <p id="graph-filter-empty" class="empty" hidden>当前筛选没有节点。请调整类别或重置视图。</p>
+      </div>
+      <div class="graph-legend" aria-label="图例"><span><i class="graph-dot concept"></i>概念</span><span><i class="graph-dot material"></i>资料</span><span><i class="graph-dot paper"></i>论文</span><span><i class="graph-dot entity"></i>实体</span><span class="meta">连线 = 页面链接</span><span class="meta" id="graph-layout-hint"></span></div>
+    </div>
+    <aside class="network-sidebar" aria-label="节点定位与详情">
+      <div class="graph-locator"><label for="node-picker">定位节点</label><p id="node-results" class="help">按类型和稳定路径区分同名页面。</p><select id="node-picker" size="4" aria-label="定位节点" aria-describedby="node-results"></select></div>
+      <p id="node-placeholder" class="empty">选择画布节点或上方列表，查看名称、来源与直接相连页面。</p>
+      <section id="node-detail" hidden>
+        <p class="eyebrow">NODE INSPECTOR</p><h2 id="node-title"></h2><p class="meta" id="node-kind"></p><p class="meta" id="node-aliases"></p><p class="meta" id="node-state"></p>
+        <div class="graph-node-actions"><a id="node-open" class="fb primary">打开完整页面</a><button class="fb" id="graph-local" type="button" aria-pressed="false">以此为中心</button><button class="fb" id="graph-expand" type="button">展开直接邻居</button></div>
+        <div class="graph-source-group"><h3>来源材料</h3><div id="node-sources"></div></div>
+        <h3>相连页面 <small id="node-neighbor-count" class="meta"></small></h3><p class="help">仅列直接页面链接；选择邻居后可继续展开。</p><div id="node-neighbors"></div>
+      </section>
+    </aside>
+  </div>
+</section>
+<script src="{{ static_asset('cytoscape.min.js') }}"></script>
+<script src="{{ static_asset('wiki_graph.js') }}" defer></script>
 {% endif %}
 {% endblock %}

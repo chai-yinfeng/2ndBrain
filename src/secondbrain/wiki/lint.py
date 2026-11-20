@@ -8,13 +8,15 @@ from dataclasses import dataclass, field
 
 from secondbrain.llm.base import LLMBackend, Usage
 from secondbrain.llm.schemas import LintFindings
-from secondbrain.wiki.store import REQUIRED_FIELDS, WIKILINK_RE, Wiki, slugify_safe
+from secondbrain.wiki.graph import link_index
+from secondbrain.wiki.store import REQUIRED_FIELDS, Wiki, wikilink_targets
 
 
 @dataclass
 class LintReport:
     broken_links: dict[str, list[str]] = field(default_factory=dict)  # 页面 → 指向不存在页面的链接
     missing_pages: dict[str, int] = field(default_factory=dict)  # 被链接但不存在的 slug → 次数
+    ambiguous_links: dict[str, list[str]] = field(default_factory=dict)
     orphans: list[str] = field(default_factory=list)  # 没有任何其他页面链接到它
     missing_fields: dict[str, list[str]] = field(default_factory=dict)
     index_missing: list[str] = field(default_factory=list)  # 页面存在但不在 index 中
@@ -26,6 +28,7 @@ class LintReport:
     def problems(self) -> int:
         return (
             sum(len(v) for v in self.broken_links.values())
+            + sum(len(v) for v in self.ambiguous_links.values())
             + len(self.orphans)
             + sum(len(v) for v in self.missing_fields.values())
             + len(self.index_missing)
@@ -36,24 +39,35 @@ class LintReport:
 
 def lint(wiki: Wiki) -> LintReport:
     report = LintReport()
-    inbound: dict[str, int] = {slug: 0 for slug in wiki.pages}
+    connections = link_index(wiki)
     for slug, page in sorted(wiki.pages.items()):
+        if page.is_trashed:
+            continue
         missing = [f for f in REQUIRED_FIELDS if f not in page.meta]
         if missing:
             report.missing_fields[slug] = missing
-        for target in sorted(page.links()):
-            if target == slug:
-                continue
-            if target in wiki.pages:
-                inbound[target] += 1
-            else:
-                report.broken_links.setdefault(slug, []).append(target)
-                report.missing_pages[target] = report.missing_pages.get(target, 0) + 1
-    report.orphans = sorted(s for s, n in inbound.items() if n == 0)
+        links = connections.get(slug)
+        if links is None:
+            continue
+        if links["missing"]:
+            report.broken_links[slug] = links["missing"]
+        if links["ambiguous"]:
+            report.ambiguous_links[slug] = links["ambiguous"]
+        for target in links["missing"]:
+            report.missing_pages[target] = report.missing_pages.get(target, 0) + 1
+    report.orphans = sorted(slug for slug, links in connections.items() if not links["backlinks"])
     index_text = wiki.index_path.read_text(encoding="utf-8") if wiki.index_path.exists() else ""
-    listed = {slugify_safe(m) for m in WIKILINK_RE.findall(index_text)} - {""}
-    report.index_missing = sorted(set(wiki.pages) - listed)
-    report.index_dangling = sorted(listed - set(wiki.pages))
+    listed = set()
+    for name in wikilink_targets(index_text):
+        matches = wiki.resolve(name)
+        if len(matches) == 1:
+            listed.add(matches[0].slug)
+        elif not matches:
+            report.index_dangling.append(name)
+        else:
+            report.ambiguous_links.setdefault("index", []).append(name)
+    report.index_missing = sorted(set(connections) - listed)
+    report.index_dangling.sort()
     return report
 
 
@@ -63,6 +77,10 @@ def report_sections(report: LintReport) -> list[tuple[str, list[str]]]:
         (
             "断链（指向不存在的页面）",
             [f"[[{s}]] → {', '.join(t)}" for s, t in report.broken_links.items()],
+        ),
+        (
+            "歧义链接（请使用页面路径或稳定 ID）",
+            [f"[[{s}]] → {', '.join(t)}" for s, t in report.ambiguous_links.items()],
         ),
         (
             "缺失页面（被链接但不存在）",
@@ -82,10 +100,13 @@ def llm_contradictions(wiki: Wiki, backend: LLMBackend, max_chars: int = 12_000)
     """把各页摘要与开头交给 cheap 模型，找可能相互矛盾的说法。"""
     pages, total = [], 0
     for p in sorted(wiki.pages.values(), key=lambda p: p.slug):
+        if not p.is_visible:
+            continue
         excerpt = {
             "slug": p.slug,
             "title": p.title,
             "summary": p.meta.get("summary"),
+            "material_sync_status": p.material_sync_status,
             "text": p.body[:600],
         }
         total += len(json.dumps(excerpt, ensure_ascii=False))

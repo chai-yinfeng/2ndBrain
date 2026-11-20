@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from secondbrain import config
+from secondbrain.bibliography import compare_bibliography, split_authors
 from secondbrain.models import SourceConfig
 
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+class MaterialMergedError(ValueError):
+    """A historical material ID cannot receive writes after a merge."""
+
+    def __init__(self, item_id: int, canonical_id: int) -> None:
+        self.item_id = item_id
+        self.canonical_id = canonical_id
+        super().__init__(f"材料 #{item_id} 已归并至主材料 #{canonical_id}，请对主 ID 操作")
+
 
 # 每个元素是一个版本的迁移脚本；只能追加，不能修改已发布的脚本。
 MIGRATIONS: list[str] = [
@@ -163,6 +176,176 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_items_doi ON items(doi);
     CREATE INDEX idx_items_arxiv_id ON items(arxiv_id);
     """,
+    # v10（M13）：材料身份独立于信源；重建时不重命名旧表，保留子表外键目标与 ID。
+    """
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    CREATE TABLE items_material (
+        id INTEGER PRIMARY KEY,
+        source_id TEXT REFERENCES sources(id),
+        url TEXT NOT NULL,
+        url_canonical TEXT NOT NULL UNIQUE,
+        content_hash TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT,
+        summary TEXT,
+        content TEXT NOT NULL DEFAULT '',
+        extract_method TEXT NOT NULL,
+        published_at TEXT,
+        fetched_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'new',
+        read_at TEXT,
+        is_backfill INTEGER NOT NULL DEFAULT 0,
+        duration_seconds INTEGER,
+        doi TEXT,
+        arxiv_id TEXT,
+        reading_state TEXT NOT NULL DEFAULT 'unread'
+            CHECK (reading_state IN ('unread', 'reading', 'read')),
+        processing_status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (processing_status IN ('pending', 'processed')),
+        original_text TEXT NOT NULL DEFAULT '',
+        content_completeness TEXT NOT NULL DEFAULT 'missing'
+            CHECK (content_completeness IN ('missing', 'abstract', 'partial', 'full')),
+        content_truncated INTEGER NOT NULL DEFAULT 0 CHECK (content_truncated IN (0, 1)),
+        resource_path TEXT,
+        text_hash TEXT
+    );
+    INSERT INTO items_material
+        (id, source_id, url, url_canonical, content_hash, title, author, summary, content,
+         extract_method, published_at, fetched_at, status, read_at, is_backfill,
+         duration_seconds, doi, arxiv_id, reading_state, processing_status, original_text,
+         content_completeness)
+    SELECT id, CASE WHEN source_id IN
+           (SELECT id FROM sources WHERE id = 'manual' AND type = 'manual')
+           THEN NULL ELSE source_id END,
+           url, url_canonical, content_hash, title, author, summary, content, extract_method,
+           published_at, fetched_at, status, read_at, is_backfill, duration_seconds,
+           doi, arxiv_id, CASE WHEN read_at IS NULL THEN 'unread' ELSE 'read' END,
+           CASE WHEN id IN (SELECT item_id FROM wiki_ingests) THEN 'processed' ELSE 'pending' END,
+           content, CASE WHEN content = '' THEN 'missing'
+                         WHEN extract_method IN ('summary', 'abstract_only') THEN 'abstract'
+                         ELSE 'partial' END
+    FROM items;
+    DROP TABLE items;
+    ALTER TABLE items_material RENAME TO items;
+    CREATE INDEX idx_items_content_hash ON items(content_hash);
+    CREATE INDEX idx_items_published_at ON items(published_at);
+    CREATE INDEX idx_items_source_id ON items(source_id);
+    CREATE INDEX idx_items_backfill_status ON items(is_backfill, status);
+    CREATE INDEX idx_items_doi ON items(doi);
+    CREATE INDEX idx_items_arxiv_id ON items(arxiv_id);
+    CREATE INDEX idx_items_text_hash ON items(text_hash);
+    CREATE TABLE item_sources (
+        id INTEGER PRIMARY KEY,
+        item_id INTEGER NOT NULL REFERENCES items(id),
+        source_id TEXT REFERENCES sources(id),
+        kind TEXT NOT NULL,
+        locator TEXT NOT NULL,
+        canonical TEXT,
+        original_path TEXT,
+        text_path TEXT,
+        raw_path TEXT,
+        total_pages INTEGER,
+        extracted_pages INTEGER,
+        original_chars INTEGER,
+        content_chars INTEGER,
+        completeness TEXT NOT NULL,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        method TEXT NOT NULL,
+        content_hash TEXT,
+        text_hash TEXT,
+        pdf_hash TEXT,
+        imported_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_item_sources_item ON item_sources(item_id);
+    CREATE INDEX idx_item_sources_canonical ON item_sources(canonical);
+    CREATE INDEX idx_item_sources_hash ON item_sources(text_hash);
+    CREATE INDEX idx_item_sources_pdf_hash ON item_sources(pdf_hash);
+    INSERT INTO item_sources
+        (item_id, source_id, kind, locator, canonical, completeness, method,
+         content_hash, imported_at)
+    SELECT id, source_id, CASE WHEN source_id IS NULL THEN 'url' ELSE 'subscription' END,
+           url, url_canonical, content_completeness, extract_method, content_hash, fetched_at
+    FROM items;
+    DELETE FROM sources WHERE id = 'manual' AND type = 'manual';
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+    """,
+    # v11：论文名检索会话/不可变候选与导入尝试；来源元数据和失败的 LLM 调用。
+    """
+    CREATE TABLE paper_searches (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        candidates_json TEXT NOT NULL,
+        errors_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE paper_import_attempts (
+        id INTEGER PRIMARY KEY,
+        search_id TEXT NOT NULL REFERENCES paper_searches(id),
+        candidate_id TEXT,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_paper_attempts_search ON paper_import_attempts(search_id);
+    ALTER TABLE item_sources ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE llm_calls ADD COLUMN error TEXT;
+    ALTER TABLE llm_calls ADD COLUMN usage_known INTEGER NOT NULL DEFAULT 1;
+    """,
+    # v12：稍后阅读清单独立于偏好；只迁移当前明确的 later，不自动收录其他材料。
+    """
+    CREATE TABLE reading_list (
+        item_id INTEGER PRIMARY KEY REFERENCES items(id),
+        added_at TEXT NOT NULL
+    );
+    INSERT INTO reading_list (item_id, added_at)
+    SELECT f.item_id, f.ts FROM feedback f
+    WHERE f.kind = 'later'
+      AND f.id = (SELECT MAX(latest.id) FROM feedback latest WHERE latest.item_id = f.item_id);
+    """,
+    # v13：来源语义分析与参考目录的个人显示状态，不改已关注来源或材料。
+    """
+    CREATE TABLE source_analyses (
+        source_id TEXT PRIMARY KEY REFERENCES sources(id) ON UPDATE CASCADE ON DELETE CASCADE,
+        input_hash TEXT NOT NULL,
+        data TEXT NOT NULL,
+        model TEXT NOT NULL,
+        ts TEXT NOT NULL
+    );
+    CREATE TABLE source_catalog_hidden (
+        source_id TEXT PRIMARY KEY
+    );
+    """,
+    # v14：可恢复的材料生命周期；阅读、清单、来源与知识历史均保留。
+    """
+    CREATE TABLE material_lifecycle (
+        item_id INTEGER PRIMARY KEY REFERENCES items(id),
+        hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
+        trashed INTEGER NOT NULL DEFAULT 0 CHECK (trashed IN (0, 1)),
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        synced_revision INTEGER NOT NULL DEFAULT 0
+            CHECK (synced_revision >= 0 AND synced_revision <= revision),
+        updated_at TEXT NOT NULL
+    );
+    """,
+    # v15: append-only identity redirects; source rows and historical IDs survive.
+    """
+    CREATE TABLE material_aliases (
+        alias_id INTEGER PRIMARY KEY REFERENCES items(id),
+        canonical_id INTEGER NOT NULL REFERENCES items(id),
+        created_at TEXT NOT NULL,
+        CHECK(alias_id != canonical_id)
+    );
+    CREATE INDEX idx_material_aliases_canonical ON material_aliases(canonical_id);
+    CREATE TABLE material_merges (
+        token TEXT PRIMARY KEY,
+        canonical_id INTEGER NOT NULL REFERENCES items(id),
+        duplicate_id INTEGER NOT NULL REFERENCES items(id),
+        evidence_json TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
 ]
 
 # 文章反馈（ADR 0013）：反馈类型 → 按钮文字（顺序即页面上的按钮顺序）。
@@ -275,13 +458,9 @@ def source_overview(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
     return {r["id"]: r for r in rows}
 
 
-def known_urls(conn: sqlite3.Connection) -> frozenset[str]:
-    return frozenset(r[0] for r in conn.execute("SELECT url_canonical FROM items"))
-
-
 @dataclass
 class NewItem:
-    source_id: str
+    source_id: str | None
     url: str
     url_canonical: str
     content_hash: str
@@ -295,48 +474,258 @@ class NewItem:
     duration_seconds: int | None = None
     doi: str | None = None
     arxiv_id: str | None = None
+    original_text: str | None = None
+    completeness: str | None = None
+    truncated: bool = False
+    pdf_data: bytes | None = None
+    origin_kind: str | None = None
+    origin_locator: str | None = None
+    raw_data: bytes | None = None
+    origin_canonical: str | None = None
+    total_pages: int | None = None
+    extracted_pages: int | None = None
+    provenance: dict | None = None
+    origin_source_id: str | None = None
+
+
+def text_fingerprint(text: str) -> str | None:
+    normalized = " ".join(text.split()).casefold()
+    return hashlib.sha256(normalized.encode()).hexdigest() if normalized else None
+
+
+def discover_ids(text: str) -> tuple[str | None, str | None]:
+    """只认材料开头显式标注的标识；多个不同标识或参考文献不用于猜测身份。"""
+    header = re.split(r"(?im)^\s*(?:references|bibliography|参考文献)\s*$", text[:6000])[0]
+    header = re.split(r"(?im)^\s*(?:1[.\s]+)?introduction\s*$", header)[0]
+    dois = {
+        match.rstrip(".,;)]}").lower()
+        for match in re.findall(
+            r"^\s*(?:doi\s*:\s*|https?://(?:dx\.)?doi\.org/)(10\.\d{4,9}/[^\s<>\"]+)",
+            header,
+            re.I | re.M,
+        )
+    }
+    arxiv_ids = {
+        re.sub(r"v\d+$", "", match, flags=re.I)
+        for match in re.findall(
+            r"^\s*(?:arxiv\s*:\s*|https?://arxiv\.org/(?:abs|pdf)/)"
+            r"(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)",
+            header,
+            re.I | re.M,
+        )
+    }
+    return (
+        next(iter(dois)) if len(dois) == 1 else None,
+        next(iter(arxiv_ids)) if len(arxiv_ids) == 1 else None,
+    )
+
+
+def material_origins(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM item_sources WHERE item_id = ? ORDER BY id", (item_id,)
+    ).fetchall()
+
+
+def _save_original(data: bytes, suffix: str) -> str:
+    relative = Path("resources") / f"{hashlib.sha256(data).hexdigest()}.{suffix}"
+    path = config.wiki_dir() / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_bytes(data)
+    return relative.as_posix()
+
+
+def persist_material(
+    conn: sqlite3.Connection,
+    item: NewItem,
+    fetched_at: datetime,
+    *,
+    item_id: int | None = None,
+) -> tuple[int, bool, bool]:
+    """唯一材料写入口，返回 (ID, 是否新增, 是否补全)；不提交事务。
+
+    多个标识指向不同材料时拒绝写入，不擅自合并已存在的身份或转移来源。
+    item_id 仅供显式补全已有材料，仍执行相同的身份冲突校验。
+    """
+    if item_id is not None:
+        require_canonical(conn, item_id)
+    incoming = dict((item.provenance or {}).get("bibliography") or {})
+    explicit = {"doi": item.doi, "arxiv_id": item.arxiv_id}
+    conflicts = compare_bibliography(incoming, explicit)["conflicts"]
+    if conflicts:
+        raise ValueError("材料身份冲突：" + "、".join(conflicts))
+    item.doi = item.doi or incoming.get("doi")
+    item.arxiv_id = item.arxiv_id or incoming.get("arxiv_id")
+    original = item.original_text if item.original_text is not None else item.content
+    doi, arxiv_id = discover_ids(original)
+    if item.doi and doi and item.doi.lower() != doi:
+        raise ValueError("材料身份冲突：正文 DOI 与输入标识不同")
+    if item.arxiv_id and arxiv_id and re.sub(r"v\d+$", "", item.arxiv_id, flags=re.I) != arxiv_id:
+        raise ValueError("材料身份冲突：正文 arXiv 与输入标识不同")
+    item.doi = (item.doi or doi or "").lower() or None
+    item.arxiv_id = re.sub(r"v\d+$", "", item.arxiv_id or arxiv_id or "", flags=re.I) or None
+    fingerprint = text_fingerprint(original)
+    pdf_hash = hashlib.sha256(item.pdf_data).hexdigest() if item.pdf_data else None
+    completeness = item.completeness or (
+        "missing" if not original.strip() else
+        "abstract" if item.extract_method in ("summary", "abstract_only") else
+        "partial" if item.truncated else "full"
+    )
+    ranks = {"missing": 0, "abstract": 1, "partial": 2, "full": 3}
+    if completeness not in ranks:
+        raise ValueError(f"未知正文完整度：{completeness}")
+    candidates = set()
+    if item_id is not None:
+        if not item_exists(conn, item_id):
+            raise ValueError(f"条目不存在：{item_id}")
+        candidates.add(item_id)
+    for canonical in {item.url_canonical, item.origin_canonical} - {None, ""}:
+        candidates.update(
+            r[0] for r in conn.execute(
+                """SELECT id FROM items WHERE url_canonical = ?
+                   UNION SELECT item_id FROM item_sources WHERE canonical = ?""",
+                (canonical, canonical),
+            )
+        )
+    for column, value in (("doi", item.doi), ("arxiv_id", item.arxiv_id)):
+        if value:
+            candidates.update(
+                r[0] for r in conn.execute(f"SELECT id FROM items WHERE {column} = ?", (value,))
+            )
+    # 页数限制后的相同开头不能证明是同一个文件；原件哈希仍可确认身份。
+    identity_text = fingerprint if not (
+        item.total_pages is not None and item.extracted_pages is not None
+        and item.total_pages > item.extracted_pages
+    ) else None
+    if identity_text or pdf_hash:
+        candidates.update(
+            r[0] for r in conn.execute(
+                """SELECT id FROM items
+                   WHERE ((? IS NOT NULL AND (text_hash = ? OR original_text = ?))
+                      OR (? IS NOT NULL AND content_hash = ?))
+                     AND NOT EXISTS (
+                         SELECT 1 FROM item_sources o WHERE o.item_id = items.id
+                         AND o.text_hash = items.text_hash AND o.total_pages > o.extracted_pages
+                     )
+                   UNION SELECT item_id FROM item_sources
+                   WHERE (? IS NOT NULL AND text_hash = ?
+                          AND (total_pages IS NULL OR total_pages <= extracted_pages))
+                      OR (? IS NOT NULL AND pdf_hash = ?)""",
+                (identity_text, identity_text, original, identity_text, item.content_hash,
+                 identity_text, identity_text, pdf_hash, pdf_hash),
+            )
+        )
+    candidates = {resolve_material_id(conn, candidate) for candidate in candidates}
+    from secondbrain.material_identity import resolve_existing
+
+    incoming.update(doi=item.doi, arxiv_id=item.arxiv_id)
+    bibliographic = resolve_existing(conn, incoming)
+    if bibliographic is not None:
+        candidates.add(bibliographic)
+    if len(candidates) > 1:
+        raise ValueError("材料身份冲突：" + "、".join(f"#{i}" for i in sorted(candidates)))
+    item_id = next(iter(candidates), None)
+    old = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if old is not None:
+        if is_trashed(conn, item_id):
+            raise ValueError(f"材料 #{item_id} 已回收，请先恢复后再导入或补全")
+        for column, value in (("doi", item.doi), ("arxiv_id", item.arxiv_id)):
+            if value and old[column] and value != old[column]:
+                raise ValueError(f"材料身份冲突：#{item_id} 的 {column} 不同")
+        previous_bibliography = material_bibliography(conn, item_id)
+        compared = compare_bibliography(incoming, previous_bibliography)
+        if compared["conflicts"]:
+            raise ValueError("材料身份冲突：" + "、".join(compared["conflicts"]))
+    resource = _save_original(item.pdf_data, "pdf") if item.pdf_data else None
+    text_resource = _save_original(original.encode(), "txt") if original else None
+    raw_resource = _save_original(item.raw_data, "html") if item.raw_data else None
+    created = item_id is None
+    improved = False
+    now = format_time(fetched_at)
+    if created:
+        cur = conn.execute(
+            """INSERT INTO items
+               (source_id, url, url_canonical, content_hash, title, author, summary,
+                content, extract_method, published_at, fetched_at, is_backfill,
+                duration_seconds, doi, arxiv_id, status, original_text,
+                content_completeness, content_truncated, resource_path, text_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (item.source_id, item.url, item.url_canonical, item.content_hash,
+             item.title, item.author, item.summary, item.content, item.extract_method,
+             format_time(item.published_at) if item.published_at else None, now,
+             int(item.is_backfill), item.duration_seconds, item.doi, item.arxiv_id,
+             "new" if item.source_id else "manual", original, completeness,
+             int(item.truncated), resource or text_resource, fingerprint),
+        )
+        item_id = cur.lastrowid
+    else:
+        old_rank, new_rank = ranks[old["content_completeness"]], ranks[completeness]
+        old_text = " ".join(old["original_text"].split()).casefold()
+        new_text = " ".join(original.split()).casefold()
+        expanded = bool(old_text) and old_text in new_text and len(new_text) > len(old_text)
+        pdf_upgrade = (
+            item.extract_method in ("pdf", "manual_pdf")
+            and old["extract_method"] not in ("pdf", "manual_pdf")
+            and len(original) > len(old["original_text"])
+        )
+        improved = new_rank > old_rank or (
+            new_rank == old_rank and (expanded or pdf_upgrade)
+        )
+        if improved:
+            conn.execute(
+                """UPDATE items SET content = ?, original_text = ?, extract_method = ?,
+                   content_hash = ?, text_hash = ?, content_completeness = ?,
+                   content_truncated = ?, resource_path = ?, processing_status = 'pending'
+                   WHERE id = ?""",
+                (item.content, original, item.extract_method, item.content_hash, fingerprint,
+                 completeness, int(item.truncated), resource or text_resource, item_id),
+            )
+        elif resource and not str(old["resource_path"] or "").endswith(".pdf"):
+            conn.execute("UPDATE items SET resource_path = ? WHERE id = ?", (resource, item_id))
+        fill_ids(conn, item_id, item.doi, item.arxiv_id)
+        custom = any(json.loads(row["metadata_json"]).get("display_title_custom")
+                     for row in material_origins(conn, item_id))
+        placeholder = (not old["title"] or old["title"] == old["url"]
+                       or old["title"].startswith(("http://", "https://", "urn:")))
+        if placeholder and not custom and item.title:
+            conn.execute("UPDATE items SET title = ? WHERE id = ?", (item.title, item_id))
+        if not old["author"] and item.author:
+            conn.execute("UPDATE items SET author = ? WHERE id = ?", (item.author, item_id))
+        preprint_upgrade = (
+            previous_bibliography.get("preprint_year") and not previous_bibliography.get("year")
+            and incoming.get("year")
+        )
+        if item.published_at and (not old["published_at"] or preprint_upgrade):
+            conn.execute("UPDATE items SET published_at = ? WHERE id = ?",
+                         (format_time(item.published_at), item_id))
+    kind = item.origin_kind or ("subscription" if item.source_id else "url")
+    locator = item.origin_locator or item.url or f"sha256:{pdf_hash or fingerprint}"
+    conn.execute(
+        """INSERT INTO item_sources
+           (item_id, source_id, kind, locator, canonical, original_path, text_path,
+            raw_path, total_pages, extracted_pages, original_chars, content_chars,
+            completeness, truncated, method, content_hash, text_hash, pdf_hash, imported_at,
+            metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (item_id, item.origin_source_id or item.source_id, kind, locator,
+         item.origin_canonical or item.url_canonical or None,
+         resource or text_resource, text_resource, raw_resource, item.total_pages,
+         item.extracted_pages, len(original), len(item.content), completeness,
+         int(item.truncated), item.extract_method, item.content_hash, fingerprint, pdf_hash, now,
+         json.dumps(item.provenance or {}, ensure_ascii=False)),
+    )
+    return item_id, created, improved
 
 
 def insert_item(conn: sqlite3.Connection, item: NewItem, fetched_at: datetime) -> bool:
-    """插入一条；url_canonical 或 content_hash 已存在时不插入并返回 False。"""
-    dup = conn.execute(
-        "SELECT 1 FROM items WHERE content_hash = ? LIMIT 1", (item.content_hash,)
-    ).fetchone()
-    if dup:
-        return False
-    cur = conn.execute(
-        """
-        INSERT INTO items (source_id, url, url_canonical, content_hash, title, author, summary,
-                           content, extract_method, published_at, fetched_at, is_backfill,
-                           duration_seconds, doi, arxiv_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(url_canonical) DO NOTHING
-        """,
-        (
-            item.source_id,
-            item.url,
-            item.url_canonical,
-            item.content_hash,
-            item.title,
-            item.author,
-            item.summary,
-            item.content,
-            item.extract_method,
-            format_time(item.published_at) if item.published_at else None,
-            format_time(fetched_at),
-            int(item.is_backfill),
-            item.duration_seconds,
-            item.doi.lower() if item.doi else None,
-            item.arxiv_id,
-        ),
-    )
-    return cur.rowcount == 1
+    """订阅与主动输入共用材料写入、去重、补全和来源记录。"""
+    return persist_material(conn, item, fetched_at)[1]
 
 
 def list_items(
     conn: sqlite3.Connection, since: datetime | None = None, source_id: str | None = None
 ) -> list[sqlite3.Row]:
-    clauses, params = [], []
+    clauses, params = ["id NOT IN (SELECT alias_id FROM material_aliases)"], []
     if since is not None:
         clauses.append("COALESCE(published_at, fetched_at) >= ?")
         params.append(format_time(since))
@@ -356,9 +745,12 @@ def list_items(
 # ---------- M2：评估与分级 ----------
 
 ITEM_COLUMNS = """
-    i.id, i.source_id, i.url, i.title, i.summary, i.content, i.extract_method,
+    i.id, i.source_id, i.url, i.url_canonical, i.title, i.summary, i.content, i.extract_method,
     i.published_at, i.fetched_at, i.status, length(i.content) AS content_len,
-    i.is_backfill, i.duration_seconds, s.trust, s.role
+    i.is_backfill, i.duration_seconds, COALESCE(s.trust, 3) AS trust,
+    COALESCE(s.role, 'core') AS role, i.reading_state, i.processing_status,
+    i.original_text, i.content_completeness, i.content_truncated, i.resource_path,
+    i.doi, i.arxiv_id
 """
 
 
@@ -372,6 +764,10 @@ def items_by_status(
         f"""
         SELECT {ITEM_COLUMNS} FROM items i JOIN sources s ON s.id = i.source_id
         WHERE i.status IN ({marks}){extra}
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         ORDER BY COALESCE(i.published_at, i.fetched_at) DESC, i.id DESC
         """,
         statuses,
@@ -384,6 +780,10 @@ def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
         """
         SELECT COUNT(*) FROM digests d JOIN items i ON i.id = d.item_id
         WHERE d.date = ? AND i.is_backfill = 1 AND d.lane IN ('refresher', 'deferred')
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """,
         (day,),
     ).fetchone()[0]
@@ -391,6 +791,8 @@ def backfill_placed(conn: sqlite3.Connection, day: str) -> int:
 
 def set_status(conn: sqlite3.Connection, item_ids: list[int], status: str) -> None:
     assert status in ITEM_STATUSES
+    for item_id in item_ids:
+        require_canonical(conn, item_id)
     conn.executemany("UPDATE items SET status = ? WHERE id = ?", [(status, i) for i in item_ids])
 
 
@@ -403,6 +805,7 @@ def add_assessment(
     model: str | None = None,
     score: float | None = None,
 ) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         "INSERT INTO assessments (item_id, stage, model, data, score, created_at)"
         " VALUES (?, ?, ?, ?, ?, ?)",
@@ -417,6 +820,7 @@ def latest_assessments(conn: sqlite3.Connection, stage: str) -> dict[int, dict]:
         SELECT a.item_id, a.data, a.score, a.model FROM assessments a
         JOIN (SELECT item_id, MAX(id) AS id FROM assessments WHERE stage = ? GROUP BY item_id) m
           ON m.id = a.id
+        WHERE a.item_id NOT IN (SELECT alias_id FROM material_aliases)
         """,
         (stage,),
     ).fetchall()
@@ -433,6 +837,10 @@ def deferred_since(conn: sqlite3.Connection) -> dict[int, str]:
         SELECT d.item_id, COALESCE(d.deferred_from, d.date) AS since FROM digests d
         JOIN items i ON i.id = d.item_id
         WHERE i.status = 'deferred' AND d.lane = 'deferred'
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """
     ).fetchall()
     result: dict[int, str] = {}
@@ -449,8 +857,10 @@ def day_usage(
     counts: dict[str, int] = {}
     minutes = 0
     rows = conn.execute(
-        "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests"
-        " WHERE date = ?",
+        "SELECT item_id, lane, COALESCE(budget_minutes, est_minutes) AS budget FROM digests d"
+        " WHERE date = ? AND NOT EXISTS ("
+        " SELECT 1 FROM material_lifecycle m WHERE m.item_id = d.item_id AND m.trashed = 1)"
+        " AND d.item_id NOT IN (SELECT alias_id FROM material_aliases)",
         (day,),
     )
     for r in rows:
@@ -461,6 +871,7 @@ def day_usage(
 
 
 def upsert_digest(conn: sqlite3.Connection, day: str, placement, ts: datetime) -> None:
+    require_canonical(conn, placement.item_id)
     conn.execute(
         """
         INSERT INTO digests (date, item_id, lane, rank, est_minutes, is_deep_read, deferred_from,
@@ -493,6 +904,10 @@ def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int
         LEFT JOIN ({LATEST_FEEDBACK}) lf ON lf.item_id = d.item_id
         WHERE d.lane = 'must_read' AND d.date < ? AND i.read_at IS NULL
           AND COALESCE(lf.kind, '') NOT IN ('later', 'dismiss')
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+          AND NOT EXISTS (
+              SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+          )
         """,
         (before_day,),
     ).fetchall()
@@ -500,6 +915,8 @@ def past_must_reads(conn: sqlite3.Connection, before_day: str) -> list[tuple[int
 
 
 def demote_must_reads(conn: sqlite3.Connection, item_ids: list[int], before_day: str) -> None:
+    for item_id in item_ids:
+        require_canonical(conn, item_id)
     conn.executemany(
         "UPDATE digests SET lane = 'fyi' WHERE item_id = ? AND lane = 'must_read' AND date < ?",
         [(i, before_day) for i in item_ids],
@@ -513,7 +930,11 @@ def digest_rows(conn: sqlite3.Connection, day: str) -> list[sqlite3.Row]:
                i.source_id, i.extract_method, i.is_backfill, length(i.content) AS content_len,
                s.type AS source_type
         FROM digests d JOIN items i ON i.id = d.item_id LEFT JOIN sources s ON s.id = i.source_id
-        WHERE d.date = ? ORDER BY d.lane, d.rank
+        WHERE d.date = ? AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        )
+          AND i.id NOT IN (SELECT alias_id FROM material_aliases)
+        ORDER BY d.lane, d.rank
         """,
         (day,),
     ).fetchall()
@@ -531,23 +952,68 @@ def item_exists(conn: sqlite3.Connection, item_id: int) -> bool:
     return conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone() is not None
 
 
+def reading_list_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """用户显式维护的清单；订阅、抓取和偏好状态不决定成员资格。"""
+    return conn.execute(
+        """SELECT i.id, i.title, i.url, i.source_id, r.added_at,
+                  length(COALESCE(NULLIF(i.original_text, ''), i.content)) AS content_len,
+                  i.reading_state, i.processing_status
+           FROM reading_list r JOIN items i ON i.id = r.item_id
+           WHERE NOT EXISTS (
+               SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id
+           ) AND NOT EXISTS (
+               SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+           )
+           ORDER BY r.added_at DESC, i.id DESC"""
+    ).fetchall()
+
+
+def add_to_reading_list(
+    conn: sqlite3.Connection, item_id: int, ts: datetime | None = None
+) -> None:
+    """幂等加入清单，不创建反馈、不改变阅读状态。"""
+    require_canonical(conn, item_id)
+    if is_trashed(conn, item_id):
+        raise ValueError(f"材料 #{item_id} 已回收，请先恢复")
+    conn.execute(
+        "INSERT OR IGNORE INTO reading_list (item_id, added_at) VALUES (?, ?)",
+        (item_id, format_time(ts or datetime.now(UTC))),
+    )
+    conn.commit()
+
+
+def remove_from_reading_list(conn: sqlite3.Connection, item_id: int) -> None:
+    """移出清单，不改变偏好或已读事实。"""
+    require_canonical(conn, item_id)
+    conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    conn.commit()
+
+
 def add_feedback(
     conn: sqlite3.Connection, item_id: int, kind: str, note: str | None, ts: datetime
 ) -> None:
-    """写一条反馈（成为该条目的当前状态）。读完后的四种设置 items.read_at（保留最早的时间），
-    读之前的两种与撤销（clear）清空 read_at。"""
+    """记录评价；读后反馈同步已读，读前意愿/撤销不撤销阅读事实。"""
+    require_canonical(conn, item_id)
     assert kind in FEEDBACK_KINDS or kind == CLEAR_KIND
+    previous = feedback_state(conn, [item_id])[item_id]
     conn.execute(
         "INSERT INTO feedback (item_id, kind, note, ts) VALUES (?, ?, ?, ?)",
         (item_id, kind, note or None, format_time(ts)),
     )
     if kind in AFTER_READ_KINDS:
         conn.execute(
-            "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+            "UPDATE items SET read_at = COALESCE(read_at, ?), reading_state = 'read' WHERE id = ?",
             (format_time(ts), item_id),
         )
-    else:
-        conn.execute("UPDATE items SET read_at = NULL WHERE id = ?", (item_id,))
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    elif kind == "later":
+        conn.execute(
+            "INSERT OR IGNORE INTO reading_list (item_id, added_at) VALUES (?, ?)",
+            (item_id, format_time(ts)),
+        )
+    elif kind == CLEAR_KIND and previous == "later":
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    # 读前反馈仅表达意愿，不撤销已读事实，也不把 reading 改回 unread。
     conn.commit()
 
 
@@ -563,14 +1029,22 @@ def toggle_feedback(
 
 def feedback_for(conn: sqlite3.Connection, item_id: int) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, kind, note, ts FROM feedback WHERE item_id = ? ORDER BY id", (item_id,)
+        """SELECT id, kind, note, ts, item_id FROM feedback
+           WHERE item_id = ? OR item_id IN
+               (SELECT alias_id FROM material_aliases WHERE canonical_id = ?) ORDER BY id""",
+        (item_id, item_id),
     ).fetchall()
 
 
 # 每个条目最新的一条反馈（即当前状态；kind 为 clear 时表示无状态）
 LATEST_FEEDBACK = """
-    SELECT f.* FROM feedback f
-    JOIN (SELECT item_id, MAX(id) AS id FROM feedback GROUP BY item_id) m ON m.id = f.id
+    SELECT f.id, COALESCE(a.canonical_id, f.item_id) AS item_id, f.kind, f.note, f.ts
+    FROM feedback f LEFT JOIN material_aliases a ON a.alias_id = f.item_id
+    WHERE f.id = (
+        SELECT MAX(f2.id) FROM feedback f2
+        LEFT JOIN material_aliases a2 ON a2.alias_id = f2.item_id
+        WHERE COALESCE(a2.canonical_id, f2.item_id) = COALESCE(a.canonical_id, f.item_id)
+    )
 """
 
 
@@ -595,7 +1069,9 @@ def items_in_state(conn: sqlite3.Connection, kind: str) -> list[sqlite3.Row]:
         SELECT i.id, i.title, i.url, i.source_id, length(i.content) AS content_len,
                lf.ts AS state_ts
         FROM ({LATEST_FEEDBACK}) lf JOIN items i ON i.id = lf.item_id
-        WHERE lf.kind = ? ORDER BY lf.id DESC
+        WHERE lf.kind = ? AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        ) ORDER BY lf.id DESC
         """,
         (kind,),
     ).fetchall()
@@ -627,7 +1103,7 @@ def digest_lane_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def item_detail(conn: sqlite3.Connection, item_id: int) -> sqlite3.Row | None:
     return conn.execute(
         f"SELECT {ITEM_COLUMNS}, i.author, i.read_at FROM items i"
-        " JOIN sources s ON s.id = i.source_id WHERE i.id = ?",
+        " LEFT JOIN sources s ON s.id = i.source_id WHERE i.id = ?",
         (item_id,),
     ).fetchone()
 
@@ -647,10 +1123,14 @@ def item_assessment(conn: sqlite3.Connection, item_id: int, stage: str) -> dict 
 
 
 def ingested_ids(conn: sqlite3.Connection) -> set[int]:
-    return {r[0] for r in conn.execute("SELECT item_id FROM wiki_ingests")}
+    return {r[0] for r in conn.execute(
+        "SELECT item_id FROM wiki_ingests WHERE item_id NOT IN "
+        "(SELECT alias_id FROM material_aliases)"
+    )}
 
 
 def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: datetime) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         "INSERT OR REPLACE INTO wiki_ingests (item_id, ts, pages) VALUES (?, ?, ?)",
         (item_id, format_time(ts), json.dumps(pages, ensure_ascii=False)),
@@ -660,7 +1140,9 @@ def record_ingest(conn: sqlite3.Connection, item_id: int, pages: list[str], ts: 
 def gained_item_ids(conn: sqlite3.Connection) -> list[int]:
     """当前状态为"有收获"的条目，按标记时间先后。"""
     rows = conn.execute(
-        f"SELECT item_id FROM ({LATEST_FEEDBACK}) WHERE kind = 'gained' ORDER BY id"
+        f"SELECT item_id FROM ({LATEST_FEEDBACK}) f WHERE kind = 'gained'"
+        " AND NOT EXISTS (SELECT 1 FROM material_lifecycle m"
+        " WHERE m.item_id = f.item_id AND m.trashed = 1) ORDER BY id"
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -716,6 +1198,7 @@ def get_ai(conn: sqlite3.Connection, item_id: int, kind: str) -> dict | None:
 def set_ai(
     conn: sqlite3.Connection, item_id: int, kind: str, data: dict, model: str | None, ts: datetime
 ) -> None:
+    require_canonical(conn, item_id)
     conn.execute(
         """
         INSERT INTO item_ai (item_id, kind, data, model, created_at) VALUES (?, ?, ?, ?, ?)
@@ -761,41 +1244,47 @@ def source_yield(conn: sqlite3.Connection, since: datetime) -> dict[str, sqlite3
     return {r["id"]: r for r in rows}
 
 
-# ---------- M11：手动添加的文章（ADR 0018） ----------
-
-MANUAL_SOURCE = "manual"
-
-
-def ensure_manual_source(conn: sqlite3.Connection) -> None:
-    """虚拟信源 manual：DB 中有 sources 行（满足外键、详情页可显示），但不在 sources.yaml 中，
-    不参与抓取、产出率与低产出建议。"""
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO sources (id, type, url, query, trust, role, tags, max_age_days,
-                                       enabled, backfill, needs_scraper, updated_at)
-        VALUES (?, 'manual', NULL, NULL, 3, 'core', '[]', 36500, 0, 0, 0, ?)
-        """,
-        (MANUAL_SOURCE, format_time(datetime.now(UTC))),
-    )
 
 
 def item_by_canonical(conn: sqlite3.Connection, url_canonical: str) -> int | None:
-    row = conn.execute("SELECT id FROM items WHERE url_canonical = ?", (url_canonical,)).fetchone()
-    return row[0] if row else None
+    row = conn.execute(
+        """SELECT id FROM items WHERE url_canonical = ?
+           UNION SELECT item_id FROM item_sources WHERE canonical = ? LIMIT 1""",
+        (url_canonical, url_canonical),
+    ).fetchone()
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def item_by_hash(conn: sqlite3.Connection, content_hash: str) -> int | None:
     row = conn.execute(
         "SELECT id FROM items WHERE content_hash = ? LIMIT 1", (content_hash,)
     ).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
+
+
+def set_reading_state(conn: sqlite3.Connection, item_id: int, state: str) -> None:
+    require_canonical(conn, item_id)
+    if state not in ("unread", "reading", "read"):
+        raise ValueError(f"非法阅读状态：{state}")
+    conn.execute(
+        """UPDATE items SET reading_state = ?,
+           read_at = CASE WHEN ? = 'read' THEN COALESCE(read_at, ?) ELSE NULL END
+           WHERE id = ?""",
+        (state, state, format_time(datetime.now(UTC)), item_id),
+    )
+    if state == "read":
+        conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
+    conn.commit()
 
 
 def mark_read(conn: sqlite3.Connection, item_id: int, ts: datetime) -> None:
-    """ "已读、无评价"：只设置 items.read_at（保留最早时间），不写反馈；当前反馈状态为空。"""
+    """显式已读，不添加或覆盖评价。"""
+    require_canonical(conn, item_id)
     conn.execute(
-        "UPDATE items SET read_at = COALESCE(read_at, ?) WHERE id = ?", (format_time(ts), item_id)
+        "UPDATE items SET read_at = COALESCE(read_at, ?), reading_state = 'read' WHERE id = ?",
+        (format_time(ts), item_id),
     )
+    conn.execute("DELETE FROM reading_list WHERE item_id = ?", (item_id,))
     conn.commit()
 
 
@@ -804,15 +1293,6 @@ def record_homepage(conn: sqlite3.Connection, source_id: str, homepage: str) -> 
     conn.execute("UPDATE sources SET homepage = ? WHERE id = ?", (homepage, source_id))
 
 
-def replace_content(conn: sqlite3.Connection, item_id: int, content: str, method: str) -> None:
-    """用新正文替换条目正文（手动添加时补全"仅摘要"的条目）；content_hash 随之更新。"""
-    from secondbrain.urls import content_hash
-
-    title = conn.execute("SELECT title FROM items WHERE id = ?", (item_id,)).fetchone()[0]
-    conn.execute(
-        "UPDATE items SET content = ?, extract_method = ?, content_hash = ? WHERE id = ?",
-        (content, method, content_hash(title, content), item_id),
-    )
 
 
 # ---------- M12：论文标识与正文完整度（ADR 0020） ----------
@@ -820,31 +1300,25 @@ def replace_content(conn: sqlite3.Connection, item_id: int, content: str, method
 
 def item_by_doi(conn: sqlite3.Connection, doi: str) -> int | None:
     row = conn.execute("SELECT id FROM items WHERE doi = ? LIMIT 1", (doi.lower(),)).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def item_by_arxiv(conn: sqlite3.Connection, arxiv_id: str) -> int | None:
     row = conn.execute("SELECT id FROM items WHERE arxiv_id = ? LIMIT 1", (arxiv_id,)).fetchone()
-    return row[0] if row else None
+    return resolve_material_id(conn, row[0]) if row else None
 
 
 def fill_ids(conn: sqlite3.Connection, item_id: int, doi: str | None, arxiv_id: str | None) -> None:
     """补上缺失的 doi / arxiv_id（已有的不覆盖）。"""
+    require_canonical(conn, item_id)
     conn.execute(
         "UPDATE items SET doi = COALESCE(doi, ?), arxiv_id = COALESCE(arxiv_id, ?) WHERE id = ?",
         (doi.lower() if doi else None, arxiv_id, item_id),
     )
 
 
-# 正文不完整：只导入了摘要；或是手动添加的论文类条目、正文短于 1500 字符
-INCOMPLETE_MIN_CHARS = 1500
-INCOMPLETE_SQL = f"""
-    (i.extract_method = 'abstract_only'
-     OR (i.source_id = '{MANUAL_SOURCE}' AND length(i.content) < {INCOMPLETE_MIN_CHARS}
-         AND (i.doi IS NOT NULL OR i.arxiv_id IS NOT NULL
-              OR i.extract_method IN ('pdf', 'arxiv_html')
-              OR i.url LIKE '%arxiv.org/%' OR lower(i.url) LIKE '%.pdf')))
-"""
+# 完整性是材料采集事实，不从标题、长度或信源类型猜测。
+INCOMPLETE_SQL = "i.content_completeness != 'full' OR i.content_truncated = 1"
 
 
 def incomplete_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -852,24 +1326,125 @@ def incomplete_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         f"""
         SELECT i.id, i.title, i.url, i.source_id, i.extract_method,
                length(i.content) AS content_len, i.doi, i.arxiv_id
-        FROM items i WHERE {INCOMPLETE_SQL} ORDER BY i.id DESC
+        FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS (
+            SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id
+        ) AND NOT EXISTS (
+            SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1
+        ) ORDER BY i.id DESC
         """
     ).fetchall()
 
 
 def incomplete_ids(conn: sqlite3.Connection) -> set[int]:
-    return {r[0] for r in conn.execute(f"SELECT i.id FROM items i WHERE {INCOMPLETE_SQL}")}
+    return {
+        r[0] for r in conn.execute(
+            f"SELECT i.id FROM items i WHERE ({INCOMPLETE_SQL}) AND NOT EXISTS ("
+            "SELECT 1 FROM material_aliases a WHERE a.alias_id = i.id) AND NOT EXISTS ("
+            "SELECT 1 FROM material_lifecycle m WHERE m.item_id = i.id AND m.trashed = 1)"
+        )
+    }
 
 
-def same_title_manual(conn: sqlite3.Connection, title: str, exclude: int) -> int | None:
-    """手动条目中规范化标题（小写、去标点与多余空白）完全相同的另一条（只提示，不合并）。"""
-    import re
+def _has_lifecycle(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'material_lifecycle'"
+    ).fetchone() is not None
 
-    def norm(text: str) -> str:
-        return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
 
-    target = norm(title)
+def lifecycle_states(conn: sqlite3.Connection) -> dict[int, dict]:
+    """所有材料的生命周期快照；旧材料没有状态行时默认为 active / revision 0。"""
+    if not _has_lifecycle(conn):
+        return {
+            row[0]: {"hidden": False, "trashed": False, "revision": 0, "synced_revision": 0}
+            for row in conn.execute("SELECT id FROM items")
+        }
     rows = conn.execute(
-        "SELECT id, title FROM items WHERE source_id = ? AND id != ?", (MANUAL_SOURCE, exclude)
-    ).fetchall()
-    return next((r["id"] for r in rows if norm(r["title"]) == target), None)
+        """SELECT i.id, COALESCE(m.hidden, 0) AS hidden, COALESCE(m.trashed, 0) AS trashed,
+                  COALESCE(m.revision, 0) AS revision,
+                  COALESCE(m.synced_revision, 0) AS synced_revision
+           FROM items i LEFT JOIN material_lifecycle m ON m.item_id = i.id"""
+    )
+    return {
+        row["id"]: {
+            "hidden": bool(row["hidden"]),
+            "trashed": bool(row["trashed"]),
+            "revision": row["revision"],
+            "synced_revision": row["synced_revision"],
+        }
+        for row in rows
+    }
+
+
+def is_trashed(conn: sqlite3.Connection, item_id: int) -> bool:
+    if not _has_lifecycle(conn):
+        return False
+    return conn.execute(
+        "SELECT 1 FROM material_lifecycle WHERE item_id = ? AND trashed = 1", (item_id,)
+    ).fetchone() is not None
+
+
+def acknowledge_lifecycle(conn: sqlite3.Connection, item_id: int, revision: int) -> bool:
+    """只确认同步所见的版本；不提交事务，不覆盖同步期间的新操作。"""
+    require_canonical(conn, item_id)
+    changed = conn.execute(
+        """UPDATE material_lifecycle SET synced_revision = ?
+           WHERE item_id = ? AND revision = ?""",
+        (revision, item_id, revision),
+    ).rowcount
+    if changed:
+        return True
+    return revision == 0 and item_exists(conn, item_id) and conn.execute(
+        "SELECT 1 FROM material_lifecycle WHERE item_id = ?", (item_id,)
+    ).fetchone() is None
+
+
+def resolve_material_id(conn: sqlite3.Connection, item_id: int) -> int:
+    seen = set()
+    while item_id not in seen:
+        seen.add(item_id)
+        row = conn.execute(
+            "SELECT canonical_id FROM material_aliases WHERE alias_id = ?", (item_id,)
+        ).fetchone()
+        if row is None:
+            return item_id
+        item_id = row[0]
+    raise ValueError("材料归并映射存在循环")
+
+
+def require_canonical(conn: sqlite3.Connection, item_id: int) -> None:
+    canonical = resolve_material_id(conn, item_id)
+    if canonical != item_id:
+        raise MaterialMergedError(item_id, canonical)
+
+
+def material_bibliography(conn: sqlite3.Connection, item_id: int) -> dict:
+    row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        return {}
+    facts = {}
+    for source in material_origins(conn, item_id):
+        record = json.loads(source["metadata_json"]).get("bibliography") or {}
+        conflicts = compare_bibliography(facts, record)["conflicts"]
+        if conflicts:
+            raise ValueError(f"材料 #{item_id} 的来源书目冲突：" + "、".join(conflicts))
+        evidence = list(dict.fromkeys([*facts.get("evidence", []), *record.get("evidence", [])]))
+        facts.update({key: value for key, value in record.items() if value})
+        if evidence:
+            facts["evidence"] = evidence
+    # Only identifier-backed stored metadata supplies bibliographic evidence.
+    stored = {"doi": row["doi"], "arxiv_id": row["arxiv_id"]}
+    if row["doi"] or row["arxiv_id"]:
+        stored.update(
+            title=row["title"], authors=split_authors(row["author"] or ""),
+            year=(int(row["published_at"][:4]) if row["published_at"] and not (
+                facts.get("preprint_year") and not facts.get("year")
+            ) else None),
+            evidence=["stored:public-identifier"],
+        )
+    conflicts = compare_bibliography(facts, stored)["conflicts"]
+    if conflicts:
+        raise ValueError(f"材料 #{item_id} 的保存书目冲突：" + "、".join(conflicts))
+    for key, value in stored.items():
+        if value and not facts.get(key):
+            facts[key] = value
+    return facts

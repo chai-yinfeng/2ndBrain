@@ -1,71 +1,114 @@
 {% extends "base.html" %}
 {% block title %}信源 · Second Brain{% endblock %}
 {% block content %}
-<h1>信源 <small class="meta">{{ sources | length }} 个</small></h1>
-<p class="meta">产出统计近 {{ pers.yield_window_days }} 天：入库 ≥ {{ pers.low_yield_min_items }} 条但没有一条<span title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）">进入推荐</span>（必读 / 温故 / 意外 / 值得读，不含速览、归档）的信源标记"低产出，建议停用"；新加入、历史不足 {{ pers.yield_window_days }} 天的不标记。</p>
-<p class="meta">读取 {{ path }}{% if is_example %}（还没有个人配置；第一次修改时会先复制为 config/sources.yaml）{% endif %}。这里的修改写入 config/sources.yaml（gitignore）：按条目文本块追加 / 删除 / 改 enabled，保留注释与其余格式；字段说明见 config/sources.example.yaml。信源全部由你手动维护：反馈只影响 AI 判断，下面的反馈分布只供参考。</p>
-{% if saved %}<p class="saved">已保存{% if saved != "deleted" %}：{{ saved }}{% else %}（已删除）{% endif %}</p>{% endif %}
-{% if error %}<p class="refresh">✗ {{ error }}</p>{% endif %}
-
-<section class="entry">
-  <table class="scores sources">
-    <tr><th>id</th><th>类型</th><th>trust</th><th>role</th><th>状态</th><th>最近抓取</th><th>入库</th><th title="各条目的当前反馈状态计数，只供参考，不产生任何建议">反馈分布</th><th title="近 {{ pers.yield_window_days }} 天：入库 / 精读（通过 L1 进入 L2）/ 进入推荐 / 正 / 负">近 {{ pers.yield_window_days }} 天产出</th><th></th></tr>
-    {% for s in sources %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}
-    <tr data-source="{{ s.id }}">
-      <td>{% set home = homepages.get(s.id) %}{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer" title="打开信源主页"><b>{{ s.id }}</b></a>{% else %}<b>{{ s.id }}</b>{% endif %}{% if s.tags %}<br><span class="meta">{{ s.tags | join(", ") }}</span>{% endif %}</td>
-      <td>{{ s.type }}</td><td>{{ s.trust }}</td><td>{{ s.role }}</td>
-      <td>{% if not s.enabled %}停用{% elif s.needs_scraper %}needs_scraper{% else %}启用{% endif %}</td>
-      <td>{% if o and o.last_fetch_at %}{{ "✓" if o.last_fetch_status == "ok" else "✗" }} {{ o.last_fetch_at }}{% if o.last_fetch_status == "ok" %}（新增 {{ o.last_fetch_added }}）{% else %}<br><span class="meta">{{ o.last_fetch_message }}</span>{% endif %}{% else %}<span class="meta">—</span>{% endif %}</td>
-      <td>{{ o.items if o else 0 }}</td>
-      {% set d = dist.get(s.id, {}) %}
-      <td class="dist" data-dist="{% for k in dist_kinds %}{{ d.get(k, 0) }}{% if not loop.last %}/{% endif %}{% endfor %}">{% for k in dist_kinds %}{% if d.get(k) %}{{ feedback_kinds[k] }} {{ d[k] }}{% if not loop.last %} · {% endif %}{% endif %}{% endfor %}{% if not d %}<span class="meta">—</span>{% endif %}</td>
-      <td class="yield" data-yield="{{ y.items }}/{{ y.l2 }}/{{ y.front }}/{{ y.positive }}/{{ y.negative }}">入库 {{ y.items }} · 精读 {{ y.l2 }} · <span title="被分进 必读/温故/意外/值得读 的条数（不含速览、归档）">进入推荐 {{ y.front }}</span> · 正 {{ y.positive }} / 负 {{ y.negative }}{% if y.low_yield %}<br><span class="refresh low-yield">低产出，建议停用</span>{% endif %}</td>
-      <td class="actions">
-        <button type="button" class="fb" hx-post="/sources/{{ s.id }}/peek" hx-target="#peek-{{ s.id }}" title="拉取最新约 10 条的标题与日期（不写库、不调用 LLM）">预览</button>
-        <form method="post" action="/sources/{{ s.id }}/toggle"><button type="submit" class="fb{% if y.low_yield %} primary{% endif %}" title="切换启用 / 停用，写入 config/sources.yaml">{{ "停用" if s.enabled else "启用" }}</button></form>
-        <form method="post" action="/sources/{{ s.id }}/delete"><button type="submit" class="fb" title="从 config/sources.yaml 删除（需要再确认一次；已入库的条目保留）">删除</button></form>
-      </td>
-    </tr>
-    <tr class="peek-row"><td colspan="10"><div id="peek-{{ s.id }}"></div></td></tr>
-    {% else %}
-    <tr><td colspan="10" class="empty">还没有信源：从下面的信源目录逐个添加，或在"添加信源"里填自己的。</td></tr>
-    {% endfor %}
-  </table>
-</section>
-
-<section class="entry" id="catalog">
-  <h2>信源目录 <small class="meta">{{ catalog | length }} 个未添加</small></h2>
-  <p class="meta">来自 config/sources.example.yaml、但还不在你配置里的信源。"预览"只拉取最新约 10 条标题与日期（几秒，不写库、不调用 LLM）；"添加"把这一条原样（含注释）追加到 config/sources.yaml。论文类信源每天量大、读起来投入也大，按需添加。</p>
-  {% for c in catalog %}
-  <div class="fyi catalog-item" data-catalog="{{ c.id }}">
-    {% set home = catalog_homepages.get(c.id) %}{% if home %}<a href="{{ home }}" target="_blank" rel="noopener noreferrer"><b>{{ c.id }}</b></a>{% else %}<b>{{ c.id }}</b>{% endif %}
-    <span class="meta">{{ c.type }}{% if c.tags %} · {{ c.tags | join(", ") }}{% endif %}</span>
-    {% if c.type in ("arxiv", "hf_papers") %}<span class="tag">论文类</span>{% endif %}
-    {% if c.needs_scraper %}<span class="tag">needs_scraper</span>{% endif %}
-    {% if not c.enabled %}<span class="tag">example 中为停用</span>{% endif %}
-    <button type="button" class="fb" hx-post="/sources/{{ c.id }}/peek" hx-target="#peek-{{ c.id }}">预览</button>
-    <form method="post" action="/sources/catalog/{{ c.id }}/add" style="display:inline"><button type="submit" class="fb">添加</button></form>
-    <div id="peek-{{ c.id }}"></div>
-  </div>
-  {% else %}<p class="empty">（目录中的信源都已添加）</p>{% endfor %}
-</section>
-
-<section class="entry">
-  <h2>添加信源</h2>
-  <p class="meta">先「试抓」：只拉取并解析 feed / sitemap / API，列出前 10 条标题与日期，不抓正文、不写数据库（几秒）；确认无误后再保存。</p>
-  <form hx-post="/sources/preview" hx-target="#source-preview" hx-swap="innerHTML" class="source-form">
-    <label>id <input name="id" required pattern="[a-z0-9][a-z0-9-]*" placeholder="my-blog"></label>
-    <label>类型 <select name="type">{% for t in types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}</select></label>
-    <label class="wide">url <input name="url" placeholder="RSS / sitemap.xml / YouTube 频道 feed 地址"></label>
-    <label class="wide">query <input name="query" placeholder="arxiv 检索式，如 cat:cs.DC AND abs:inference"></label>
-    <label>trust <input name="trust" type="number" min="1" max="5" value="3"></label>
-    <label>role <select name="role"><option value="core">core</option><option value="expansion">expansion</option></select></label>
-    <label>max_age_days <input name="max_age_days" type="number" min="1" value="30"></label>
-    <label class="wide">tags <input name="tags" placeholder="逗号分隔，如 inference, serving"></label>
-    <label class="wide">url_pattern（sitemap / html_index）<input name="url_pattern" placeholder="只保留匹配该正则的 URL；html_index 必填（匹配绝对地址的文章链接）"></label>
-    <label>use_lastmod（sitemap）<input name="use_lastmod" type="checkbox" value="1"></label>
-    <p><button type="submit" class="fb">试抓</button></p>
+{% set analyses = analyses|default({}) %}{% set source_tasks = source_tasks|default({}) %}{% set repair_tasks = repair_tasks|default({}) %}
+{% set source_contexts = source_contexts|default({}) %}{% set source_visuals = source_visuals|default({}) %}
+<header class="page-header">
+  <div><p class="eyebrow">发现与关注</p><h1>信源 <small class="meta">{{ sources | length }} 个</small></h1><p class="meta">关注来源，主动挑选文章。获取方式与内容领域分开维护，不自动加入阅读列表。</p></div>
+  <div class="page-actions"><a class="fb" href="/add">添加材料</a></div>
+</header>
+{% if saved %}<p class="saved" role="status">已保存：{{ saved }}</p>{% endif %}
+{% if error %}<p class="refresh" role="alert">{{ error }}</p>{% endif %}
+<details class="panel source-add" open>
+  <summary>关注一个主页</summary>
+  <form hx-post="/sources/home/preview" hx-target="#homepage-preview" hx-indicator="#homepage-preview-loading" class="source-home-form" data-preview-dialog="homepage-preview-dialog">
+    <label class="sr-only" for="source-home-url">主页 URL</label><input id="source-home-url" name="url" type="url" required placeholder="博客、网站或账号主页 URL">
+    <button class="fb primary" type="submit">识别并预览</button>
   </form>
-  <div id="source-preview"></div>
+  <p class="help">优先复用已有关注与已知适配；识别不保存、不调用模型。</p>
+</details>
+<div id="source-task-home">{% with kind="manual_add", task=None, message=None %}{% include "_task.html" %}{% endwith %}</div>
+<dialog id="homepage-preview-dialog" class="source-dialog" aria-labelledby="homepage-preview-title">
+  <header class="source-dialog-header"><h2 id="homepage-preview-title">主页识别与采集范围</h2><div class="page-actions"><span id="homepage-preview-loading" class="htmx-indicator meta" role="status">正在识别…</span><button type="button" class="fb icon-button" data-dialog-close aria-label="关闭识别预览">×</button></div></header>
+  <div class="source-dialog-body"><div data-source-task-host aria-live="polite"></div><div id="homepage-preview"></div></div>
+  <footer class="source-dialog-footer">关闭不会保存或采用候选；可随时重新识别。</footer>
+</dialog>
+<div class="panel-header">
+  <h2 id="following-title">已关注</h2>
+  <div class="source-view-controls">
+    <label class="source-sort" for="source-sort">排序<select id="source-sort" disabled><option value="recent">最近导入</option><option value="name">首字母 A–Z</option></select></label>
+    <label class="source-sort" for="source-layout">布局<select id="source-layout" disabled><option value="list">列表</option><option value="cards">封面卡片</option></select></label>
+    <button class="fb small" type="button" data-dialog-open="sources-repair-dialog" aria-haspopup="dialog" aria-controls="sources-repair-dialog">检查 / 修复</button>
+  </div>
+</div>
+<dialog id="sources-repair-dialog" class="source-dialog" aria-labelledby="sources-repair-title">
+  <header class="source-dialog-header"><h2 id="sources-repair-title">检查 / 修复采集配置</h2><button type="button" class="fb icon-button" data-dialog-close aria-label="收起检查与修复">×</button></header>
+  <div class="source-dialog-body">
+    <p class="help">检查只读；只有明确点击应用才会修复可验证来源。不调用模型、不删除关注，修改字段前先验证适配。</p>
+    <p class="meta break-anywhere">当前配置：{{ path }}</p>
+    <form hx-post="/sources/repair" hx-target="#task-sources-repair" hx-swap="outerHTML" class="page-actions">
+      <button class="fb" name="apply" value="false" type="submit">只读检查</button>
+      <button class="fb primary" name="apply" value="true" type="submit">应用可验证修复</button>
+    </form>
+    {% with kind="sources-repair", task=bulk_repair_task|default(none), message=None %}{% include "_task.html" %}{% endwith %}
+  </div>
+  <footer class="source-dialog-footer">关闭或 Escape 只收起窗口，不取消任务；再次打开可查看进度与结果。</footer>
+</dialog>
+<section id="following-list" class="compact-list source-list" aria-labelledby="following-title">
+{% for s in sources|reverse %}{% set o = overview.get(s.id) %}{% set y = yields.get(s.id) %}{% set home = homepages.get(s.id) %}{% set a = analyses.get(s.id) %}{% set hints = source_contexts.get(s.id, {}) %}
+  <article class="source-item" data-source="{{ s.id }}" data-source-name="{{ s.name or s.id }}" data-import-order="{{ loop.revindex0 }}">
+    <div class="source-row">
+      <button type="button" class="source-cover" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}" aria-label="设置 {{ s.name or s.id }}">
+        <span class="source-initial" aria-hidden="true">{{ (s.name or s.id)[:1]|upper }}</span>
+        <img alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" data-source-visual="{{ s.id }}"{% if source_visuals.get(s.id) %} src="/sources/{{ s.id }}/visual?v={{ source_visuals[s.id] }}"{% else %} hidden{% endif %}>
+      </button>
+      <div class="row-main"><h3><button type="button" class="source-title" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}" title="配置 {{ s.name or s.id }}">{{ s.name or s.id }}</button>{% if not s.enabled %}<span class="tag">已停用</span>{% endif %}</h3>
+        <p class="meta">{{ s.id }} · {{ "手动浏览" if s.needs_scraper else s.type }}{% for tag in s.tags %} · {{ tag }}{% endfor %}{% if a %} · {% for domain in a.profile.domains %}{{ domain }}{% if not loop.last %} / {% endif %}{% endfor %}{% elif hints.existing_topics %} · 历史主题：{{ hints.existing_topics|join(' / ') }}{% elif not s.tags %} · 领域未分析{% endif %}</p>
+      </div>
+      <div class="row-actions">
+        {% if home %}<a class="fb ghost small" href="{{ home }}" target="_blank" rel="noopener noreferrer" aria-label="浏览 {{ s.name or s.id }} 主页">主页 ↗</a>{% endif %}
+        <button type="button" class="fb small" hx-post="/sources/{{ s.id }}/peek" hx-target="#peek-{{ s.id }}" hx-indicator="#preview-loading-{{ s.id }}" data-dialog-open="preview-{{ s.id }}" aria-haspopup="dialog" aria-controls="preview-{{ s.id }}">预览选文</button>
+        <button type="button" class="fb small" data-dialog-open="settings-{{ s.id }}" aria-haspopup="dialog" aria-controls="settings-{{ s.id }}">设置</button>
+        <form method="post" action="/sources/{{ s.id }}/delete"><button class="fb ghost small" type="submit">删除信源…</button></form>
+      </div>
+    </div>
+    {% with source=s, can_edit=True %}{% include "_source_preview_dialog.html" %}{% endwith %}
+    <dialog id="settings-{{ s.id }}" class="source-dialog" aria-labelledby="settings-title-{{ s.id }}">
+      <header class="source-dialog-header"><h2 id="settings-title-{{ s.id }}">{{ s.name or s.id }} · 来源设置</h2><button type="button" class="fb icon-button" data-dialog-close aria-label="关闭来源设置">×</button></header>
+      <div class="source-dialog-body">
+      <nav class="source-actions" aria-label="来源维护">
+        <form hx-post="/sources/{{ s.id }}/repair" hx-target="#task-source-repair-{{ s.id }}" hx-swap="outerHTML"><button class="fb small" name="apply" value="false" type="submit">检查</button><button class="fb small" name="apply" value="true" type="submit">修复采集</button></form>
+        <form method="post" action="/sources/{{ s.id }}/toggle"><button class="fb small" type="submit">{{ "停用" if s.enabled else "启用" }}</button></form>
+        <form method="post" action="/sources/{{ s.id }}/delete"><button class="fb ghost small" type="submit">删除信源…</button></form>
+      </nav>
+      {% with kind="source-repair-" ~ s.id, task=repair_tasks.get(s.id), message=None %}{% include "_task.html" %}{% endwith %}
+      <section class="source-visual-settings" aria-label="来源封面">
+        <h3>来源封面</h3>
+        <p class="help">仅手动更新时读取公开主页及图片；优先站点分享图，其次站点图标。图片安全缓存到本地，无可用图片时显示首字母，不调用模型。</p>
+        <button class="fb small" type="button" data-refresh-visual="{{ s.id }}">更新封面</button>
+        <p class="meta" data-visual-status="{{ s.id }}" role="status"></p>
+      </section>
+      <h3>名称与采集配置</h3>
+      <form method="post" action="/sources/{{ s.id }}/edit" class="add-form">
+        {% with source=s %}{% include "_source_fields.html" %}{% endwith %}
+        <button class="fb primary" type="submit">保存此来源</button>
+      </form>
+      <div class="source-classification">
+        {% if hints.existing_topics %}<p class="help">已有文章分析主题（不调用模型）：{{ hints.existing_topics|join('、') }}</p>{% endif %}
+        {% with analysis=a %}{% include "_source_analysis.html" %}{% endwith %}
+        <h3>分析内容领域</h3>
+        <p class="help">仅在点击后分析最多10条标题/摘要，可能调用 cheap 模型。发送内容给当前模型服务；预估上限 ${{ source_cost_limit|default(0.5) }}，不是服务商账单硬上限。不读全文、不覆盖手动标签。</p>
+        <form hx-post="/sources/{{ s.id }}/analyze" hx-target="#task-source-profile-{{ s.id }}" hx-swap="outerHTML" class="page-actions"><button class="fb" type="submit">分析领域与性质</button><label class="meta"><input type="checkbox" name="force" value="true">强制重做</label></form>
+        {% with kind="source-profile-" ~ s.id, task=source_tasks.get(s.id), message=None %}{% include "_task.html" %}{% endwith %}
+      </div>
+      <details class="source-statistics"><summary>采集记录与历史统计</summary>
+        <p class="meta">trust {{ s.trust }} · role {{ s.role }} · 已入库 {{ o.items if o else 0 }}</p>
+        <p class="meta">最近抓取：{% if o and o.last_fetch_at %}{{ "成功" if o.last_fetch_status == "ok" else "失败" }} · {{ o.last_fetch_at }}{% if o.last_fetch_status != "ok" %} · {{ o.last_fetch_message }}{% endif %}{% else %}尚无记录{% endif %}</p>
+        {% set d = dist.get(s.id, {}) %}<p class="meta dist" data-dist="{% for k in dist_kinds %}{{ d.get(k, 0) }}{% if not loop.last %}/{% endif %}{% endfor %}">反馈：{% for k in dist_kinds %}{% if d.get(k) %}{{ feedback_kinds[k] }} {{ d[k] }} · {% endif %}{% endfor %}{% if not d %}暂无{% endif %}</p>
+        <p class="meta yield" data-yield="{{ y.items }}/{{ y.l2 }}/{{ y.front }}/{{ y.positive }}/{{ y.negative }}">近 {{ pers.yield_window_days }} 天：入库 {{ y.items }} · 精读 {{ y.l2 }} · 推荐 {{ y.front }}{% if y.low_yield %} · <span class="refresh low-yield">低产出，建议停用</span>{% endif %}</p>
+      </details>
+      </div>
+      <footer class="source-dialog-footer">关闭不会提交未保存修改；已启动的分析或修复任务会继续运行。</footer>
+    </dialog>
+  </article>
+{% else %}<p class="empty">还没有关注信源。请在上方手动输入主页 URL。</p>{% endfor %}
 </section>
+<details class="panel"><summary>高级：手动指定采集配置</summary>
+  <p class="help">普通主页优先使用自动识别；已知 RSS/API/列表规则可在此只读试抓。</p>
+  <form hx-post="/sources/preview" hx-target="#source-preview" hx-swap="innerHTML" class="add-form">
+    {% with source=none %}{% include "_source_fields.html" %}{% endwith %}
+    <button class="fb" type="submit">试抓</button>
+  </form><div id="source-preview"></div>
+</details>
+<script src="{{ static_asset('sources.js') }}" defer></script>
 {% endblock %}

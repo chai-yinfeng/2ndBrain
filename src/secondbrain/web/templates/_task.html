@@ -1,32 +1,72 @@
-{# 后台任务状态片段：运行中每 2 秒轮询 GET /tasks/<kind>，结束后停止轮询。 #}
-<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="/tasks/{{ kind }}{% if refresh_on_done %}?refresh=1{% endif %}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+{# 保留既有 kind 片段入口；材料与独立详情固定记录 ID，避免新任务替换旧结果。 #}
+<div class="task" id="task-{{ kind }}"{% if task and task.running %} hx-get="{% if detail or kind == 'manual_add' %}/task-history/{{ task.id }}/fragment{% else %}/tasks/{{ kind }}{% endif %}{% if refresh_on_done %}?refresh=1{% endif %}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   {% if message %}<p class="refresh">{{ message }}</p>{% endif %}
-  {% if task %}
+  {% if task and (not task.dismissed or detail) %}
   <p class="meta" data-task-status="{{ task.status }}">
     {{ task.title }} ·
-    {% if task.running %}运行中…{% elif task.status == "done" %}✓ 完成{% else %}✗ 失败{% endif %}
+    {% if task.running %}运行中…{% elif task.status == "waiting" %}等待选择 · 尚未导入{% elif task.status == "resolved" %}历史候选 · 已选择{% elif task.status == "not_found" %}未找到 · 未导入{% elif task.status == "done" %}✓ 完成{% elif task.status == "partial" %}部分完成 · 有失败{% elif task.status == "interrupted" %}任务中断{% else %}✗ 失败{% endif %}
     · 用时 {{ task.elapsed_seconds }} 秒
   </p>
-  {% if task.lines %}<pre class="log">{{ task.lines[-15:] | join("\n") }}</pre>{% endif %}
+  <p class="meta"><a href="/task-history/{{ task.id }}">任务详情</a> · <a href="/task-history">全部任务</a></p>
+  {% if task.lines %}<details><summary>运行日志（{{ task.lines|length }} 行）</summary><pre class="log">{{ task.lines | join("\n") }}</pre></details>{% endif %}
   {% if task.error %}<p class="refresh">✗ {{ task.error }}</p>{% endif %}
-  {% if task.status == "done" %}
-    {% if kind == "wiki_ingest" %}
-      <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
-      <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ s }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+  {% if task.error and kind == "manual_add" %}{% for url in task.result.submitted_urls %}<p><a class="fb small" href="/add?url={{ url|urlencode }}&amp;remedy=1">保留原链接，粘贴正文 / 上传 PDF 补救</a></p>{% endfor %}{% endif %}
+  {% if kind.startswith("paper-") and task.result.status %}
+    <details open><summary>查看 / 收起论文结果</summary>
+    {% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}
+    </details>
+  {% endif %}
+  {% if task.result and not task.running and not kind.startswith("paper-") %}
+    <details open><summary>查看 / 收起任务结果</summary>
+    {% if kind.startswith("read-") %}
+      {% set summary=task.result.ingest %}
+      <p>{% if task.result.cached %}已复用现有知识整理，无新增模型调用。{% else %}已登记阅读；新建 {{ summary.created|length }} 页，更新 {{ summary.updated|length }} 页。{% endif %}</p>
+      {% if summary.failures %}<p class="refresh">知识整理尚未完成，已读与笔记已保留，可在登记表单重试。</p>{% endif %}
+      {% for error in summary.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      <p class="meta">本次估算费用 ${{ "%.4f"|format(summary.cost) }}</p>
+      {% for slug in summary.created + summary.updated %}<a href="/wiki/page/{{ slug }}">{{ wiki_title(slug) }}</a> {% endfor %}
+    {% elif kind == "wiki-sync" %}
+      {% with result=task.result %}{% include "_wiki_sync_result.html" %}{% endwith %}
+    {% elif kind.startswith("rewrite-") %}
+      {% if task.result.slug %}<p><a href="/wiki/page/{{ task.result.slug }}#rewrite">返回知识页查看会话与草稿</a></p>{% endif %}
+      {% for error in task.result.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      <p class="meta">累计费用 ${{ "%.4f"|format(task.result.cost|default(0)) }} · 仅明确采用才修改正文</p>
+    {% elif kind == "wiki_ingest" or kind.startswith("wiki-") %}
+      <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
+      <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
     {% elif kind == "run" %}
-      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/">查看今日 digest</a></p>
+      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/recommendations">查看每日推荐</a></p>
     {% elif kind == "manual_add" %}
       <table class="scores add-results">
         <tr><th>URL</th><th>结果</th><th>条目</th></tr>
         {% for r in task.result.results %}
-        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta">{{ r.message }}</span>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">#{{ r.item_id }} {{ r.title }}</a>{% endif %}</td></tr>
+        <tr data-add-status="{{ r.status }}"><td class="url">{{ r.url }}</td><td>{{ r.status }}{% if r.message %}<br><span class="meta break-anywhere">{{ r.message }}</span>{% endif %}{% if r.url and (r.url.startswith('https://') or r.url.startswith('http://')) and (not r.item_id or r.acquisition and r.acquisition.status in ('missing', 'partial', 'abstract')) %}<p><a class="fb small" href="/add?url={{ r.url|urlencode }}&amp;remedy=1">粘贴正文 / 上传 PDF 补救</a></p>{% endif %}</td><td>{% if r.item_id %}<a href="/item/{{ r.item_id }}">{{ r.title or '打开材料' }}</a>{% endif %}</td></tr>
+        {% if r.acquisition %}<tr><td colspan="3">{% with acquisition=r.acquisition %}{% include "_acquisition.html" %}{% endwith %}</td></tr>{% endif %}
         {% endfor %}
       </table>
-      {% if task.result.ingest %}<p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>{% endif %}
+      {% if task.result.ingest %}
+      <p class="meta">编入 wiki：新建 {{ task.result.ingest.created | length }} 页、更新 {{ task.result.ingest.updated | length }} 页，估算费用 ${{ "%.4f" | format(task.result.ingest.cost) }}</p>
+      {% if task.result.ingest.failures %}<p class="refresh">知识整理尚未完成；材料和已读记录已保留，可在材料详情重试。</p>{% endif %}
+      {% for error in task.result.ingest.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      {% endif %}
     {% elif kind.startswith("summary-") %}
       <p class="meta">{% if task.result.cached %}已有结果{% else %}估算费用 ${{ "%.4f" | format(task.result.cost) }}{% endif %} · <a href="/item/{{ task.result.item_id }}#summary">查看深度速读</a></p>
+    {% elif kind.startswith("source-profile-") %}
+      {% with analysis=task.result %}{% include "_source_analysis.html" %}{% endwith %}
+      <p class="meta">{{ '复用已有分析，无模型调用' if task.result.cached else '本次分析' }} · 估算费用 ${{ "%.4f"|format(task.result.cost) }}</p>
+    {% elif kind.startswith("source-repair-") or kind == "sources-repair" %}
+      <ul class="source-repair-results">{% for result in task.result.results %}
+        <li><strong>{{ result.source_id }}</strong> · {{ {'ready':'可采集','empty':'适配有效，暂无条目','failed':'获取失败','manual':'需手动浏览','rejected':'地址被拒绝'}.get(result.status, result.status) }} · {{ '已更新配置' if result.applied else '未改配置' }}
+          {% if result.changes %}<p class="meta">字段：{{ result.changes.keys()|join('、') }}</p>{% endif %}
+          {% for warning in result.warnings|unique %}<p class="refresh">{{ warning }}</p>{% endfor %}
+        </li>{% endfor %}</ul>
+      <a class="fb small" href="/sources">刷新来源列表</a>
     {% endif %}
+    </details>
+  {% endif %}
+  {% if not task.running and task.status != "waiting" and not task.dismissed %}
+  <div class="toolbar"><form action="/task-history/{{ task.id }}/dismiss" method="post" hx-post="/task-history/{{ task.id }}/dismiss" hx-target="#task-{{ kind }}" hx-swap="outerHTML"><button class="fb small" type="submit">收起反馈（保留记录）</button></form><form action="/task-history/delete" method="post"><input type="hidden" name="task_ids" value="{{ task.id }}"><button class="fb small" type="submit">删除记录…</button></form></div>
   {% endif %}
   {% endif %}
 </div>

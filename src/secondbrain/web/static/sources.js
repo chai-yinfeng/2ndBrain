@@ -1,0 +1,133 @@
+(() => {
+  "use strict";
+  const list = document.getElementById("following-list");
+  if (!list) return;
+  const sort = document.getElementById("source-sort");
+  const layout = document.getElementById("source-layout");
+  const rows = Array.from(list.children).filter(row => row.matches("[data-source]"));
+  const collator = new Intl.Collator("zh-CN", {
+    usage: "sort", sensitivity: "base", numeric: true, ignorePunctuation: true,
+  });
+  const orderKey = "secondbrain-source-sort";
+  const layoutKey = "secondbrain-source-layout";
+  function setLayout(value) {
+    const mode = value === "cards" ? "cards" : "list";
+    list.dataset.layout = mode;
+    layout.value = mode;
+  }
+  let savedLayout = "list";
+  try { savedLayout = localStorage.getItem(layoutKey) || savedLayout; } catch (_) { /* Optional storage. */ }
+  setLayout(savedLayout);
+  layout.disabled = false;
+  layout.addEventListener("change", () => {
+    setLayout(layout.value);
+    try { localStorage.setItem(layoutKey, layout.value); } catch (_) { /* Optional storage. */ }
+  });
+  let preference = "recent";
+  try { preference = localStorage.getItem(orderKey) || preference; } catch (_) { /* Optional storage. */ }
+  function sortRows(value) {
+    const mode = value === "name" ? "name" : "recent";
+    const recent = (left, right) => Number(right.dataset.importOrder) - Number(left.dataset.importOrder);
+    const ordered = [...rows].sort(mode === "name"
+      ? (left, right) => collator.compare(left.dataset.sourceName, right.dataset.sourceName) || recent(left, right)
+      : recent);
+    const fragment = document.createDocumentFragment();
+    ordered.forEach(row => fragment.append(row));
+    list.append(fragment);
+    sort.value = mode;
+  }
+  sortRows(preference);
+  sort.disabled = false;
+  sort.addEventListener("change", () => {
+    sortRows(sort.value);
+    try { localStorage.setItem(orderKey, sort.value); } catch (_) { /* This page still sorts. */ }
+  });
+  document.querySelectorAll("img[data-source-visual]").forEach(image => {
+    image.addEventListener("error", () => { image.hidden = true; });
+    image.addEventListener("load", () => { image.hidden = false; });
+    if (image.complete && image.naturalWidth === 0) image.hidden = true;
+  });
+  document.querySelectorAll("[data-refresh-visual]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.refreshVisual;
+      const row = button.closest("[data-source]");
+      const status = row.querySelector("[data-visual-status]");
+      button.disabled = true;
+      status.textContent = "正在安全获取封面…关闭窗口不会取消。";
+      try {
+        const response = await fetch(`/sources/${encodeURIComponent(id)}/visual`, {
+          method: "POST", headers: {"Accept": "application/json"}, credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error("获取失败");
+        const result = await response.json();
+        const image = row.querySelector("img[data-source-visual]");
+        if (result.available && /^[a-f0-9]{64}$/.test(result.version)) {
+          image.hidden = false;
+          image.src = `/sources/${encodeURIComponent(id)}/visual?v=${result.version}`;
+          status.textContent = result.message || "本地封面已更新。";
+        } else {
+          status.textContent = result.message || "未找到可用封面，保留首字母或现有缓存。";
+        }
+      } catch (_) {
+        status.textContent = "封面更新失败；现有封面与采集配置不受影响，可再次尝试。";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+
+  const dialogs = Array.from(document.querySelectorAll("dialog.source-dialog"));
+  const openers = new WeakMap();
+  function taskTo(host) {
+    const task = document.getElementById("task-manual_add");
+    if (task && host) host.append(task);
+  }
+  function openerFor(dialog, trigger) {
+    if (trigger && !trigger.closest("dialog")) return trigger;
+    return Array.from(document.querySelectorAll("[data-dialog-open]")).find(element =>
+      element.dataset.dialogOpen === dialog.id && !element.closest("dialog"));
+  }
+  function openDialog(dialog, trigger) {
+    if (!dialog) return;
+    const position = {x: window.scrollX, y: window.scrollY};
+    dialogs.filter(other => other !== dialog && other.open).forEach(other => other.close());
+    openers.set(dialog, openerFor(dialog, trigger));
+    if (!dialog.open) {
+      dialog.showModal();
+      window.scrollTo(position.x, position.y);
+    }
+    const host = dialog.querySelector("[data-source-task-host]");
+    if (host) taskTo(host);
+  }
+  document.querySelectorAll("[data-dialog-open]").forEach(trigger => {
+    trigger.addEventListener("click", event => {
+      if (trigger.tagName === "A") event.preventDefault();
+      openDialog(document.getElementById(trigger.dataset.dialogOpen), trigger);
+    });
+  });
+  document.querySelectorAll("form[data-preview-dialog]").forEach(form => {
+    form.addEventListener("submit", () => {
+      openDialog(document.getElementById(form.dataset.previewDialog), form.querySelector("button"));
+    });
+  });
+  dialogs.forEach(dialog => {
+    dialog.querySelectorAll("[data-dialog-close]").forEach(button => {
+      button.addEventListener("click", () => dialog.close());
+    });
+    dialog.addEventListener("click", event => {
+      const box = dialog.getBoundingClientRect();
+      if (event.target === dialog && (event.clientX < box.left || event.clientX > box.right
+          || event.clientY < box.top || event.clientY > box.bottom)) dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      if (!dialogs.some(other => other.open)) {
+        const opener = openers.get(dialog);
+        if (opener && opener.isConnected && opener.getClientRects().length) {
+          opener.focus({preventScroll: true});
+        }
+      }
+    });
+  });
+  // Native dialogs own focus trapping and Escape. Responses only update their body;
+  // closing an in-flight preview must never reopen it when HTMX finishes.
+})();

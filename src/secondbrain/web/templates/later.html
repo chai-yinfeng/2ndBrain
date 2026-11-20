@@ -1,15 +1,34 @@
 {% extends "base.html" %}
-{% block title %}稍后再看 · Second Brain{% endblock %}
+{% block title %}阅读列表 · Second Brain{% endblock %}
 {% block content %}
-<h1>稍后再看 <small class="meta">{{ rows | length }} 条</small></h1>
-<p class="meta"><a href="/add">手动添加文章</a>（已读 / 准备读，可批量）。在文章上点「稍后读」的条目：不计入积压、不降级、没有期限。读完后点读完后的反馈，或再点一次「稍后读」移出列表。</p>
+<div class="page-header">
+  <div><p class="eyebrow">阅读与学习</p><h1>阅读列表</h1><p class="meta">自己维护的稍后清单。阅读可以留在原站或 ChatGPT，读后登记，由 AI 整理知识。</p></div>
+  <div class="page-actions"><a class="fb" href="/sources">浏览信源</a><a class="fb primary" href="/add">添加材料</a></div>
+</div>
+<div class="toolbar">
+  <label for="reading-search" class="sr-only">搜索标题或来源</label>
+  <input id="reading-search" type="search" placeholder="搜索标题或来源…" data-list-filter="reading-list" data-filter-status="reading-count" aria-controls="reading-list">
+  <span id="reading-count" class="list-count" role="status">{{ rows | length }} 份待读材料</span>
+</div>
+<form id="reading-manage" method="post" action="/reading/remove" class="toolbar"><button class="fb" type="submit">移出所选</button><span class="help">只移出阅读列表，保留材料和学习记录。</span></form>
+<div class="compact-list" id="reading-list">
 {% for r in rows %}
-<article class="entry" data-item-id="{{ r.id }}">
-  <h3><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.title }}</a></h3>
-  <p class="meta">{{ r.source_id }} · 标记于 {{ r.state_ts }} · <a href="/item/{{ r.id }}">详情</a>{% if r.id in incomplete %} <a class="tag warn" data-incomplete href="/item/{{ r.id }}#complete">正文不完整</a>{% endif %}</p>
-  {% with item_id=r.id, state="later", with_note=False, saved=None %}{% include "_feedback.html" %}{% endwith %}
+<article class="list-row" data-item-id="{{ r.id }}" data-filter-row data-filter-text="{{ r.title }} {{ r.source_id or '主动添加' }}">
+  <input type="checkbox" name="item_ids" value="{{ r.id }}" form="reading-manage" aria-label="选择 {{ r.title }}">
+  <div class="row-main">
+    <h3><a href="/item/{{ r.id }}">{{ r.title }}</a>{% if r.id in incomplete %}<span class="tag warn">正文待补充</span>{% endif %}</h3>
+    <p class="meta">{{ r.source_id or "主动添加" }}<span aria-hidden="true"> · </span>{{ r.added_at[:10] }} 加入</p>
+  </div>
+  <div class="row-actions">
+    {% if r.url %}<a class="fb ghost small" href="{{ r.url }}" target="_blank" rel="noopener">原站 ↗</a>{% endif %}
+    <a class="fb small" href="/item/{{ r.id }}#register-read">登记阅读</a>
+    <details class="row-menu"><summary class="fb small" aria-label="{{ r.title }}：更多操作">···</summary>
+      <div><a href="/item/{{ r.id }}">材料与学习记录</a><form method="post" action="/reading/{{ r.id }}/remove"><button type="submit">移出清单（保留材料）</button></form></div>
+    </details>
+  </div>
 </article>
-{% else %}
-<p class="empty">（空）</p>
-{% endfor %}
+{% else %}<div class="empty"><h3>留一点空间给想读的内容</h3><p>没有待读材料。信源采集不会自动填满这个列表。</p><a class="fb" href="/add">添加第一份材料</a></div>{% endfor %}
+<p class="empty" data-filter-empty hidden>没有匹配的材料。试试其他关键词，或清除搜索。</p>
+</div>
+<p class="meta section-note">已经读过或只想保存的内容，可在<a href="/materials">材料存档</a>中查找。</p>
 {% endblock %}

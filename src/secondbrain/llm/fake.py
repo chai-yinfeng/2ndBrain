@@ -21,6 +21,7 @@ from secondbrain.llm.schemas import (
     LintFindings,
     PrereqExplanations,
     ProfileProposal,
+    SourceProfile,
     WikiPlan,
 )
 
@@ -117,7 +118,8 @@ class FakeBackend:
         self, messages: list[dict[str, str]], schema: type[T], tier: Tier
     ) -> tuple[T, Usage]:
         keywords = _keywords(messages[0]["content"])
-        payload = _payload(messages)
+        rewrite = schema.__name__ == "RewriteDraft"
+        payload = json.loads(messages[1]["content"]) if rewrite else _payload(messages)
         if schema is L1Response:
             items = []
             for it in payload["items"]:
@@ -151,12 +153,14 @@ class FakeBackend:
             obj = _chunk_notes(payload)
         elif schema is ProfileProposal:
             obj = _profile_proposal(payload)
+        elif schema is SourceProfile:
+            obj = _source_profile(payload)
         elif schema is WikiPlan:
             obj = _wiki_plan(payload)
         elif schema is LintFindings:
             obj = {"issues": []}
         elif schema is DeepSummary:
-            known = "已知知识" in messages[-1]["content"]
+            known = "相关知识内容" in messages[-1]["content"]
             obj = _deep_summary(payload["item"], keywords, known)
         elif schema is PrereqExplanations:
             title = payload["item"]["title"]
@@ -170,6 +174,33 @@ class FakeBackend:
                     for p in payload["prerequisites"]
                 ]
             }
+        elif rewrite:
+            page = payload["page"]
+            request = messages[-1]["content"]
+            sources = payload.get("sources") or []
+            evidence = "\n".join(
+                f"- {source.get('title') or source.get('url') or '来源'}"
+                for source in sources if isinstance(source, dict)
+            ) or "- 本页已有正文；未提供额外原文。"
+            previous = next(
+                (message["content"] for message in reversed(messages[:-1])
+                 if message["role"] == "assistant"), ""
+            )
+            text = page["body"]
+            facts = [
+                line.strip("- #>") for line in text.splitlines()
+                if line.strip() and not line.startswith(("#", "<!--"))
+            ]
+            body = (
+                f"## {page['title']}：本轮重整\n\n"
+                f"（fake 离线草稿）本轮关注：{request}\n\n"
+                "### 核心内容\n\n"
+                + "\n".join(f"- {line}" for line in dict.fromkeys(facts[:4]))
+                + "\n\n### 来源依据\n\n" + evidence
+                + ("\n\n### 对话调整\n\n依据上一轮草稿重新组织，未写入长期画像。"
+                   if previous else "")
+            )
+            obj = {"body": body, "summary": f"（fake）按本轮语境重整：{request[:120]}"}
         else:
             raise LLMError(f"fake 后端不支持的 schema：{schema.__name__}")
         prompt_chars = sum(len(m["content"]) for m in messages)
@@ -182,59 +213,16 @@ class FakeBackend:
         return schema.model_validate(obj), usage
 
 
-def _match_row(table: list[dict], fb: dict) -> dict | None:
-    """反馈条目的 topics / 标题词出现在某个领域的名称或说明里时，认为对应该领域。"""
-    terms = [t.lower() for t in fb.get("topics") or []]
-    terms += [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", fb.get("title", ""))]
-    for row in table:
-        text = f"{row['domain']} {row.get('note', '')}".lower()
-        if any(t in text for t in terms):
-            return row
-    return None
-
-
-_LEVELS = ("陌生", "接触过", "想回炉", "扎实")
-
-
-def _shift_level(raw: str, delta: int) -> str | None:
-    """raw 掌握度（可能带括号说明）升 / 降一级；无法识别或已到端点时返回 None。"""
-    current = next((lv for lv in _LEVELS if raw.startswith(lv)), None)
-    if current is None:
-        return None
-    rank = _LEVELS.index(current) + delta
-    return _LEVELS[rank] if 0 <= rank < len(_LEVELS) else None
 
 
 def _profile_proposal(payload: dict) -> dict:
-    """确定性的 profile 提案（ADR 0013 的证据规则）：
-    - 太浅 → 对应领域升一级（无对应领域则新增"接触过"行）；
-    - 太难 → 对应领域降一级（无对应领域则新增"陌生"行）；
-    - 不感兴趣 / 没价值 → 在含"不想看"的段落末尾追加一行。"""
-    table = payload.get("table", [])
+    """只根据反馈维护兴趣段落，不推断或调整掌握度。"""
     sections = [s["section"] for s in payload.get("sections", [])]
     dislike = next((s for s in sections if "不想看" in s), None)
-    changes: dict[str, dict] = {}
     edits = []
-    labels = {"too_easy": "太浅", "too_hard": "太难"}
     for fb in payload.get("feedback", []):
         kind, fid = fb["kind"], fb["id"]
-        if kind in labels:
-            row = _match_row(table, fb)
-            if row is not None:
-                target = _shift_level(row["mastery"], 1 if kind == "too_easy" else -1)
-                if target is None:
-                    continue
-                key = f"row-{row['row']}"
-                change = {"action": "update", "row": row["row"], "mastery": target}
-            else:
-                domain = (fb.get("topics") or [fb["title"][:40]])[0]
-                key = f"add-{domain}"
-                target = "接触过" if kind == "too_easy" else "陌生"
-                change = {"action": "add", "domain": domain, "mastery": target, "priority": "中"}
-            entry = changes.setdefault(key, {**change, "reason": "（fake）", "evidence": []})
-            entry["evidence"].append(fid)
-            entry["reason"] = f"（fake）{len(entry['evidence'])} 次标记{labels[kind]}"
-        elif kind in ("dismiss", "worthless") and dislike:
+        if kind in ("dismiss", "worthless") and dislike:
             edits.append(
                 {
                     "section": dislike,
@@ -245,8 +233,7 @@ def _profile_proposal(payload: dict) -> dict:
                 }
             )
     return {
-        "summary": f"（fake）{len(changes)} 处掌握度修改，{len(edits)} 处段落修改",
-        "mastery_changes": list(changes.values()),
+        "summary": f"（fake）{len(edits)} 处兴趣段落修改",
         "section_edits": edits,
     }
 
@@ -263,21 +250,26 @@ def _deep_summary(it: dict, keywords: set[str], known: bool) -> dict:
         "results": [s[:120] for s in sentences[4:6]] or ["（fake）正文没有给出数字"],
         "limitations": ["（fake）没有讨论局限"],
         "relation_to_known": "（fake）"
-        + ("与已知知识中的页面相关。" if known else "与用户 wiki 中的已知知识没有直接关系。"),
+        + ("与相关知识页面的内容有关。" if known else "当前未提供直接相关的 wiki 内容。"),
         "sections_to_read": [{"name": "（fake）全文第 1 部分", "reason": "（fake）核心方法在这里"}],
         "prerequisites": [{"name": t, "why": f"（fake）正文用到 {t}"} for t in topics[:2]],
     }
 
 
 def _chunk_notes(payload: dict) -> dict:
-    """逐段提要：视频取前几段带时间戳的字幕，其余取前几行。"""
+    """确定性逐段提要：保留首部和尾部，视频保留时间戳。"""
+    text = payload.get("text", "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    excerpts = [line[:100] for line in lines[:3]]
+    if lines:
+        excerpts.append(lines[-1][-100:])
     points = []
-    for line in payload.get("text", "").splitlines()[:4]:
+    for line in dict.fromkeys(excerpts):
         m = re.match(r"\[((?:\d{1,2}:)?\d{1,2}:\d{2})\]\s*(.*)", line)
         if m:
-            points.append({"t": m.group(1), "text": m.group(2)[:100]})
-        elif line.strip():
-            points.append({"t": None, "text": line.strip()[:100]})
+            points.append({"t": m.group(1), "text": m.group(2)})
+        else:
+            points.append({"t": None, "text": line})
     return {"summary": f"（fake）第 {payload.get('part', '?')} 段", "points": points}
 
 
@@ -286,40 +278,103 @@ def _slug(text: str) -> str:
 
 
 def _wiki_plan(payload: dict) -> dict:
-    """确定性的 wiki 编辑：为条目建 paper 页；前置知识若已有页面则加链接，否则新建概念页。"""
+    """确定性材料整理：材料身份来自 id，概念来自正文；不要求 L2 或读后反馈。"""
     item = payload["item"]
-    paper = _slug(item["title"])
+    material = item["material_slug"]
     index = payload.get("index", "")
-    existing = {p["slug"] for p in payload.get("related_pages", [])}
-    concepts = [_slug(c) for c in (item.get("prerequisites") or [])[:3]]
-    concepts = [c for c in dict.fromkeys(concepts) if c != paper]
-    points = "\n".join(f"- {kp}" for kp in item.get("key_points") or []) or f"- {item['title']}"
-    related = "\n".join(f"- [[{c}]]" for c in concepts)
+    pages = payload.get("related_pages", [])
+    existing = {p["slug"] for p in pages}
+    text = item.get("text") or ""
+    haystack = f"{item['title']} {text}".lower().replace("-", " ")
+    names = [
+        name
+        for name in ("KV cache", "Continuous batching", "PagedAttention", *DEFAULT_KEYWORDS)
+        if name.lower() in haystack
+    ]
+    names_by_key = {}
+    for name in names:
+        names_by_key.setdefault(name.lower(), name)
+    names = list(names_by_key.values())[:2]
+    concepts = []
+    for name in names:
+        match = next(
+            (
+                p["slug"]
+                for p in pages
+                if p["type"] == "concept"
+                and name.lower()
+                in {p["title"].lower(), *(alias.lower() for alias in p.get("aliases", []))}
+            ),
+            None,
+        )
+        concepts.append(match or _slug(name))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    points = list(dict.fromkeys([*(line[:160] for line in lines[:2]), text[-160:].strip()]))
+    points = [point for point in points if point]
+    body = "## 材料陈述\n\n" + "\n".join(f"- {point}" for point in points)
+    if concepts:
+        body += "\n\n## 关联依据\n\n" + "\n".join(
+            f"- [[{concept}]]：材料中出现该概念。" for concept in concepts
+        )
     creates = [
         {
-            "slug": paper,
-            "type": "paper",
+            "slug": material,
+            "type": "material",
             "title": item["title"],
-            "summary": "（fake）" + (item.get("tldr") or item["title"])[:60],
-            "body": f"## 要点\n\n{points}" + (f"\n\n## 相关\n\n{related}" if related else ""),
+            "summary": "（fake）" + item["title"][:60],
+            "body": body,
         }
     ]
     updates = []
-    for c, name in zip(concepts, item.get("prerequisites") or [], strict=False):
-        if c in existing or f"[[{c}]]" in index:
-            updates.append({"slug": c, "action": "add_links", "links": [paper]})
+    for concept, name in zip(concepts, names, strict=True):
+        if concept in existing or f"[[{concept}]]" in index:
+            updates.append({"slug": concept, "action": "add_links", "links": [material]})
         else:
             creates.append(
                 {
-                    "slug": c,
+                    "slug": concept,
                     "type": "concept",
                     "title": name,
                     "summary": f"（fake）{name}",
-                    "body": f"## 是什么\n\n（fake）{name}。\n\n## 相关\n\n- [[{paper}]]",
+                    "body": f"## 材料陈述\n\n（fake）材料提到 {name}。"
+                    f"\n\n## 关联依据\n\n- [[{material}]]：提供该概念的材料出处。",
                 }
             )
     return {
-        "summary": f"（fake）新建 {len(creates)} 页，更新 {len(updates)} 页",
+        "summary": f"（fake）整理材料及 {len(concepts)} 个关联概念",
         "creates": creates,
         "updates": updates,
+    }
+
+
+def _source_profile(payload: dict) -> dict:
+    """仅从实际样本确定性提取领域，不把人工标签或采集协议当成新结论。"""
+    samples = payload["samples"]
+    text = " ".join(
+        f"{sample['title']} {sample['summary']} {' '.join(sample['topics'])}"
+        for sample in samples
+    ).casefold()
+    patterns = (
+        ("人工智能", (
+            "artificial intelligence", "machine learning", "llm", "transformer", "人工智能",
+        )),
+        ("计算机系统", ("database", "distributed", "kernel", "systems", "数据库")),
+        ("数学", ("mathematics", "theorem", "algebra", "数学")),
+        ("生物医学", ("biology", "medicine", "genome", "生物", "医学")),
+    )
+    domains = [domain for domain, words in patterns if any(word in text for word in words)]
+    kinds = []
+    if any(word in text for word in ("paper", "arxiv", "论文")):
+        kinds.append("论文聚合")
+    if any(word in text for word in ("tutorial", "course", "课程", "教程")):
+        kinds.append("课程")
+    if any(word in text for word in ("blog", "engineering", "技术")):
+        kinds.append("技术博客")
+    if any(word in text for word in ("news", "新闻")):
+        kinds.append("新闻")
+    return {
+        "domains": domains[:6],
+        "content_kinds": kinds[:4],
+        "summary": f"（fake）根据 {len(samples)} 条内容样本：{samples[0]['title'][:120]}",
+        "confidence": "medium" if domains and len(samples) >= 3 else "low",
     }

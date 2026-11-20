@@ -1,22 +1,30 @@
 {% extends "base.html" %}
-{% block title %}Wiki · Second Brain{% endblock %}
+{% block title %}知识库 · Second Brain{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">{% endblock %}
 {% block content %}
-<h1>Wiki <small class="meta">{{ count }} 个页面 · <a href="/wiki/graph">知识图谱</a></small></h1>
-<section class="entry">
-  <h2>体检</h2>
-  <button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查 wiki</button>
-  <span class="meta">检查断链、缺失页面、孤立页、frontmatter 缺字段、index 不一致；只报告不修改，不调用 LLM，一秒内完成。</span>
-  <div id="lint-result"></div>
+<header class="page-header"><div><h1>知识库 <small class="meta">{{ count }} 个页面</small></h1><p class="meta">按内容分类浏览，页面正文和个人笔记保留在 Markdown 中。</p></div><div class="page-actions"><a class="fb" href="/materials?reading=read">已读材料</a><a class="fb" href="/wiki/sync">同步变更</a><a class="fb" href="/wiki/graph">关系图谱</a></div></header>
+<nav class="subnav" aria-label="知识页范围"><a href="/wiki" {% if view == 'active' %}aria-current="page"{% endif %}>知识页面</a><a href="/wiki?view=trash" {% if view == 'trash' %}aria-current="page"{% endif %}>回收区</a><a href="/wiki?view=all" {% if view == 'all' %}aria-current="page"{% endif %}>全部页面</a></nav>
+{% if notice %}<p class="saved" role="status">{{ notice }}</p>{% endif %}
+<form method="get" action="/wiki" class="toolbar collection-filters">
+  <input type="hidden" name="view" value="{{ view }}">
+  <label class="sr-only" for="knowledge-search">搜索知识页</label><input id="knowledge-search" name="q" type="search" value="{{ query }}" placeholder="搜索标题、别名或摘要">
+  <label class="sr-only" for="knowledge-kind">知识类别</label><select id="knowledge-kind" name="kind"><option value="">全部类别</option>{% for key, label in knowledge_kinds.items() %}{% if key in available_kinds or key == kind %}<option value="{{ key }}" {% if kind == key %}selected{% endif %}>{{ label }}</option>{% endif %}{% endfor %}</select>
+  <button class="fb" type="submit">筛选</button>
+</form>
+<form id="knowledge-manage" method="post" action="/wiki/manage" class="toolbar">
+  {% if view != "trash" %}<button class="fb" name="action" value="trash" type="submit">回收所选…</button>{% endif %}
+  {% if view != "active" %}<button class="fb" name="action" value="restore" type="submit">恢复所选</button>{% endif %}
+  <span class="help">回收不删除正文；确认前展示反向链接影响。</span>
+</form>
+<section class="compact-list knowledge-list" aria-label="知识页面列表">
+{% for entry in entries %}{% set p = entry.page %}
+<article class="list-row">
+  <input type="checkbox" name="slugs" value="{{ p.slug }}" form="knowledge-manage" aria-label="选择 {{ p.title }}">
+  <div class="row-main"><h3><a href="/wiki/page/{{ p.slug }}">{{ p.title }}</a><span class="tag">{{ knowledge_kinds[entry.kind] }}</span>{% if p.meta.get("trashed") %}<span class="tag warn">已回收</span>{% elif not p.is_visible %}<span class="tag">草稿 / 待复核</span>{% endif %}</h3>{% if p.meta.get("summary") %}<p class="meta">{{ p.meta.summary }}</p>{% endif %}</div>
+  <form method="post" action="/wiki/manage"><input type="hidden" name="slugs" value="{{ p.slug }}"><button class="fb small" name="action" value="{{ 'restore' if p.meta.get('trashed') else 'trash' }}" type="submit">{{ '恢复' if p.meta.get('trashed') else '回收…' }}</button></form>
+</article>
+{% else %}<p class="empty panel">没有匹配的知识页。</p>{% endfor %}
 </section>
-<section class="entry">
-  <h2>今日到期复习 <small>{{ due | length }}</small></h2>
-  {% for d in due %}
-  <div class="fyi" data-concept="{{ d.page.slug }}">
-    <a href="/wiki/page/{{ d.page.slug }}">{{ d.page.title }}</a>
-    <span class="meta">（掌握度 {{ d.page.meta.mastery or "—" }} · 间隔 {{ d.page.meta.interval_days }} 天 · 到期 {{ d.due }}）</span>
-    {% with slug=d.page.slug %}{% include "_review_buttons.html" %}{% endwith %}
-  </div>
-  {% else %}<p class="empty">（没有到期的概念）</p>{% endfor %}
-</section>
-<section class="entry wiki-body">{{ index_html | safe }}</section>
+{% if pending_read and view == "active" %}<details class="panel"><summary>已登记，待整理（{{ pending_read|length }}）</summary><ul class="wiki-link-list">{% for item in pending_read %}<li><a href="/item/{{ item.id }}#register-read">{{ item.title }}</a></li>{% endfor %}</ul></details>{% endif %}
+<details class="panel"><summary>知识库维护</summary><p class="help">检查断链、孤立页、元数据与目录，不修改正文、不调用模型。</p><button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查知识库</button><div id="lint-result"></div><p><a href="/wiki/graph?drafts=1">查看草稿与待复核内容的图谱</a></p></details>
 {% endblock %}

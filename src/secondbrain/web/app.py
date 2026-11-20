@@ -5,21 +5,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
+import json
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
-import markdown
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 from pydantic import ValidationError
 
 from secondbrain import __version__, config, db, ops, schedule, sources_file
@@ -37,19 +47,19 @@ from secondbrain.pipeline.summary import (
 )
 from secondbrain.pipeline.tiering import TOP_LANES
 from secondbrain.profile.feedback import recent_feedback
-from secondbrain.profile.loader import Profile, load_profile, parse_profile, weak_prerequisites
+from secondbrain.profile.loader import Profile, load_profile, parse_profile
 from secondbrain.profile.rewrite import generate_update, save_profile, text_sha
 from secondbrain.profile.tune import DISTRIBUTION_KINDS, feedback_distribution, source_yields
-from secondbrain.sources import FETCHERS
 from secondbrain.sources.homepage import safe_url, source_homepage
 from secondbrain.web import filters
+from secondbrain.web.render import render_markdown
 from secondbrain.web.tasks import Task, TaskRegistry, TaskRunning
-from secondbrain.wiki.graph import build_graph
+from secondbrain.wiki.classification import classify_material, migrate_machine_blocks
+from secondbrain.wiki.graph import build_graph, page_connections
 from secondbrain.wiki.ingest import pending_items
 from secondbrain.wiki.lint import lint, report_sections
-from secondbrain.wiki.loop import wiki_refresh_link
-from secondbrain.wiki.review import GRADE_HINTS, GRADES, due_concepts, due_date, review
-from secondbrain.wiki.store import WIKILINK_RE, Wiki, open_wiki, slugify_safe
+from secondbrain.wiki.management import KIND_TITLES, manage_pages, removal_impact, set_kind
+from secondbrain.wiki.store import Wiki, WikiError, open_wiki
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -65,14 +75,40 @@ PAGE_LANES = (
 )
 LANE_TITLES = dict(PAGE_LANES) | {"fyi": "速览", "archived": "归档"}
 
+
+@lru_cache(maxsize=64)
+def _asset_digest(path: Path, _stamp: tuple[int, int, int]) -> str:
+    """文件元数据作为缓存失效键，避免每次渲染重复读取静态资源。"""
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()[:16]
+
+
+@pass_context
+def _static_asset(context, name: str) -> str:
+    path = STATIC_DIR / name
+    stat = path.stat()
+    digest = _asset_digest(path, (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+    return str(context["request"].url_for("static", path=name).include_query_params(v=digest))
+
+
+@pass_context
+def _wiki_title(context, slug: str) -> str:
+    request = context["request"]
+    if not hasattr(request.state, "wiki_titles"):
+        request.state.wiki_titles = {page.slug: page.title for page in _wiki().pages.values()}
+    return request.state.wiki_titles.get(slug, "知识页")
+
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 templates.env.globals.update(
     feedback_kinds=db.FEEDBACK_KINDS,
     feedback_hints=db.FEEDBACK_HINTS,
     feedback_groups=(("读之前", db.BEFORE_READ_KINDS), ("读完后", db.AFTER_READ_KINDS)),
-    grade_hints=GRADE_HINTS,
+    knowledge_kinds=KIND_TITLES,
     lane_titles=LANE_TITLES,
     version=__version__,
+    static_asset=_static_asset,
+    wiki_title=_wiki_title,
 )
 
 
@@ -109,26 +145,56 @@ def _wiki() -> Wiki:
     return open_wiki(config.wiki_dir(), config.raw_dir())
 
 
-def refresh_hints(
-    prereqs: list[str], profile: Profile, wiki: Wiki | None
-) -> tuple[list[tuple[str, str | None]], list[str]]:
-    """前置知识分成 (建议先回炉 [(概念, wiki 链接或 None)], 其余)。
-
-    命中 wiki 中掌握度不是"扎实"的概念页 → 链接到该页；否则命中 profile 中不扎实的领域 → 无链接。"""
-    weak_profile = set(weak_prerequisites(profile, prereqs))
-    refresh, rest = [], []
-    for prereq in prereqs:
-        page, needs = wiki_refresh_link(wiki, prereq)
-        if page is not None:
-            if needs:
-                refresh.append((prereq, f"/wiki/page/{page.slug}"))
-            else:
-                rest.append(prereq)
-        elif prereq in weak_profile:
-            refresh.append((prereq, None))
+def related_prerequisites(
+    prereqs: list[str], wiki: Wiki | None
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """已有知识仅提供参考链接，不推断掌握程度或复习需要。"""
+    related, rest = [], []
+    for name in prereqs:
+        page = wiki.find(name) if wiki else None
+        if page is not None and page.is_visible:
+            related.append((name, f"/wiki/page/{page.slug}"))
         else:
-            rest.append(prereq)
-    return refresh, rest
+            rest.append(name)
+    return related, rest
+
+
+def _page_kind(page, conn: sqlite3.Connection) -> str:
+    override = page.meta.get("knowledge_kind") or page.meta.get("material_kind")
+    if override in KIND_TITLES:
+        return override
+    if page.type != "material":
+        return page.type if page.type in KIND_TITLES else "other"
+    item_id = page.meta.get("material_id")
+    if not item_id:
+        match = re.fullmatch(r"material-(\d+)", page.slug)
+        item_id = int(match[1]) if match else None
+    row = db.item_detail(conn, int(item_id)) if item_id else None
+    return classify_material(row, db.material_bibliography(conn, int(item_id))) if row else "other"
+
+
+def _source_links(page, conn: sqlite3.Connection) -> list[dict]:
+    ids = list(page.meta.get("sources") or [])
+    if page.meta.get("material_id"):
+        ids.append(page.meta["material_id"])
+    result = []
+    for item_id in dict.fromkeys(ids):
+        row = db.item_detail(conn, int(item_id))
+        if row is not None:
+            result.append({"id": item_id, "title": row["title"]})
+    return result
+
+
+def _graph_data(wiki: Wiki, *, include_drafts: bool = False) -> dict:
+    graph = build_graph(wiki, include_drafts=include_drafts)
+    with _conn() as conn:
+        for node in graph["nodes"]:
+            page = wiki.pages[node["id"]]
+            node["type"] = _page_kind(page, conn)
+            node["source_titles"] = {
+                source["id"]: source["title"] for source in _source_links(page, conn)
+            }
+    return graph
 
 
 def _entry(
@@ -136,11 +202,10 @@ def _entry(
     l1: dict,
     l2: dict | None,
     state: str | None,
-    profile: Profile,
     wiki: Wiki | None = None,
 ) -> dict:
     prereqs = (l2 or {}).get("prerequisites", [])
-    refresh, rest = refresh_hints(prereqs, profile, wiki)
+    related, rest = related_prerequisites(prereqs, wiki)
     return {
         "item_id": row["item_id"],
         "title": row["title"],
@@ -154,7 +219,7 @@ def _entry(
         "tldr": (l2 or {}).get("tldr"),
         "reason": (l2 or {}).get("why_for_you") or l1.get("one_line_reason", ""),
         "content_type": l1.get("content_type"),
-        "refresh_first": refresh,
+        "related_prerequisites": related,
         "prerequisites": rest,
         "state": state,
         "has_l2": l2 is not None,
@@ -184,12 +249,23 @@ def _schedule_checks(fs: FilterSettings, at: str) -> list[str]:
     ]
 
 
+def _material_form(row, bibliography: dict) -> str:
+    values = dict(row)
+    return filters.item_form(
+        values.get("source_type"), values.get("url"), values.get("extract_method"),
+        doi=values.get("doi"), arxiv_id=values.get("arxiv_id"), bibliography=bibliography,
+    )
+
+
 def _filtered_days(conn: sqlite3.Connection, form: str | None, ctype: str | None) -> list[dict]:
     """历史页：按形式 / 类型筛选后各日期各 lane 的条数（与 db.digest_dates 同样的列）。"""
     l1 = db.latest_assessments(conn, "L1")
     days: dict[str, dict] = {}
+    bibliographies = {}
     for r in db.digest_lane_rows(conn):
-        item_form = filters.item_form(r["source_type"], r["url"], r["extract_method"])
+        if r["item_id"] not in bibliographies:
+            bibliographies[r["item_id"]] = db.material_bibliography(conn, r["item_id"])
+        item_form = _material_form(r, bibliographies[r["item_id"]])
         content_type = l1.get(r["item_id"], {}).get("content_type")
         if not filters.matches(item_form, content_type, form, ctype):
             continue
@@ -269,7 +345,7 @@ def _active_sources() -> int:
 
 def _ingest_task(task: Task) -> dict:
     with _conn() as conn:
-        ids = pending_items(conn)
+        ids = pending_items(conn, _wiki())
     task.log(f"待编进 wiki：{len(ids)} 条")
     s = ops.ingest_items(ids, task.log)
     return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
@@ -329,7 +405,9 @@ class CostHints:
 
 
 PREVIEW_ENTRIES = 10
-SOURCE_FIELDS = ("id", "type", "url", "query", "trust", "role", "tags", "max_age_days")
+SOURCE_FIELDS = (
+    "id", "name", "type", "url", "homepage", "query", "trust", "role", "tags", "max_age_days",
+)
 
 
 def _http_client(fs: FetchSettings) -> HttpClient:
@@ -353,11 +431,18 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
             data[key] = value
     if "tags" in data:
         data["tags"] = [t.strip() for t in re.split(r"[,，]", data["tags"]) if t.strip()]
+    if data.get("type") == "rss":
+        data["rss_categories"] = [
+            item.strip() for item in re.split(r"[,，]", form.get("rss_categories", ""))
+            if item.strip()
+        ]
     if data.get("type") in ("sitemap", "html_index"):
         if (form.get("url_pattern") or "").strip():
             data["url_pattern"] = form["url_pattern"].strip()
     if data.get("type") == "sitemap":
         data["use_lastmod"] = bool(form.get("use_lastmod"))
+    if data.get("type") == "html_index" and form.get("max_links"):
+        data["max_links"] = int(form["max_links"])
     try:
         return SourceConfig.model_validate(data)
     except ValidationError as exc:
@@ -368,7 +453,7 @@ def _source_from_form(form: dict[str, str]) -> SourceConfig:
 
 
 def _editable_sources() -> tuple[Path, list[SourceConfig]]:
-    """config/sources.yaml（不存在时先从 example 复制）及其中的信源。"""
+    """个人来源文件及当前关注；缺失时只初始化空列表。"""
     path, _ = ops.ensure_sources_file()
     return path, config.load_sources(path)
 
@@ -422,6 +507,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     app = FastAPI(title="Second Brain", docs_url=None, redoc_url=None, openapi_url=None)
     allowed = LOCAL_HOSTS | {_hostname(h) for h in extra_hosts}
 
+    @app.exception_handler(db.MaterialMergedError)
+    async def merged_material(request: Request, exc: db.MaterialMergedError):
+        return PlainTextResponse(str(exc), status_code=409)
+
     @app.middleware("http")
     async def same_origin_only(request: Request, call_next):
         h = request.headers
@@ -430,10 +519,27 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         )
         if problem:
             return PlainTextResponse(f"403 Forbidden：{problem}", status_code=403)
-        return await call_next(request)
+        if request.method.upper() not in SAFE_METHODS:
+            target = re.fullmatch(r"/(?:item|reading)/(\d+)(?:/.*)?", request.url.path)
+            if target:
+                item_id = int(target[1])
+                with _conn() as conn:
+                    canonical_id = db.resolve_material_id(conn, item_id)
+                if canonical_id != item_id:
+                    return PlainTextResponse(
+                        "此材料已归并，请打开主材料后操作",
+                        status_code=409,
+                    )
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        elif response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-    tasks = TaskRegistry()
+    tasks = TaskRegistry(config.data_dir() / "web_tasks.db")
+    tasks.recover_papers(db.db_path().resolve())
     app.state.tasks = tasks
 
     def task_fragment(
@@ -441,44 +547,185 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     ) -> HTMLResponse:
         """refresh：首页的"开始今日过滤"轮询；任务完成时让 HTMX 刷新整页（HX-Refresh）。"""
         task = tasks.get(kind)
+        if request.url.path == "/add" and message and task and not task.running:
+            task = None
+        kind = task.kind if task else kind
+        paper_page = None
+        if task and kind.startswith("paper-") and task.result.get("material_id"):
+            paper_page = _wiki().material_page(task.result["material_id"])
         response = templates.TemplateResponse(
             request,
             "_task.html",
-            {"kind": kind, "task": task, "message": message, "refresh_on_done": refresh},
+            {
+                "kind": kind, "task": task, "message": message,
+                "refresh_on_done": refresh, "paper_page": paper_page,
+                "detail": request.url.path.startswith("/task-history/"),
+            },
         )
-        if refresh and task is not None and task.status == "done":
+        if refresh and task is not None and not task.running and (
+            task.status == "done" or kind == "wiki-sync" or kind.startswith("rewrite-")
+        ):
             response.headers["HX-Refresh"] = "true"
         return response
 
+    def material_filters(values) -> dict:
+        return {
+            "query": str(values.get("q") or "").strip(),
+            "reading": str(values.get("reading") or ""),
+            "processing": str(values.get("processing") or ""),
+            "completeness": str(values.get("completeness") or ""),
+            "view": str(values.get("view") or "active"),
+        }
+
+    def materials_location(values) -> str:
+        filters = material_filters(values)
+        query = urlencode({
+            ("q" if key == "query" else key): value
+            for key, value in filters.items() if value
+        })
+        return "/materials" + (f"?{query}" if query else "")
+
+    @app.get("/materials", response_class=HTMLResponse)
+    def materials(request: Request) -> HTMLResponse:
+        from secondbrain.material_management import list_materials
+
+        filters = material_filters(request.query_params)
+        try:
+            offset = max(0, int(request.query_params.get("offset", "0")))
+            rows = list_materials(**filters, offset=offset)
+        except (ValueError, ops.OpsError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        with _conn() as conn:
+            bibliographies = {
+                row["id"]: db.material_bibliography(conn, row["id"]) for row in rows[:50]
+            }
+        forms = {row["id"]: _material_form(row, bibliographies[row["id"]]) for row in rows[:50]}
+        return templates.TemplateResponse(
+            request, "materials.html",
+            {**filters, "rows": rows[:50], "offset": offset,
+             "bibliographies": bibliographies, "material_forms": forms,
+             "next_offset": offset + 50 if len(rows) > 50 else None,
+             "filter_url": materials_location(request.query_params),
+             "notice": request.query_params.get("notice", "")},
+        )
+
+    @app.post("/materials/manage", response_class=HTMLResponse)
+    async def materials_manage(request: Request):
+        from secondbrain.material_management import manage_materials
+
+        form = await request.form()
+        action = str(form.get("action") or "")
+        if action not in {"hide", "unhide", "trash", "restore"}:
+            raise HTTPException(400, "未知材料管理操作")
+        try:
+            ids = list(dict.fromkeys(int(value) for value in form.getlist("item_ids")))
+        except ValueError as exc:
+            raise HTTPException(400, "材料ID必须为整数") from exc
+        if not ids:
+            raise HTTPException(400, "请先选择材料")
+        if action == "trash" and form.get("confirm") != "yes":
+            with _conn() as conn:
+                rows = [db.item_detail(conn, item_id) for item_id in ids]
+            if any(row is None for row in rows):
+                raise HTTPException(404, "材料不存在")
+            return templates.TemplateResponse(request, "material_manage_confirm.html", {
+                "rows": rows, "count": len(rows), "ids": ids, "action": action,
+                "filters": material_filters(form), "return_url": materials_location(form),
+            })
+        try:
+            result = manage_materials(ids, action=action)
+        except (ValueError, ops.OpsError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        target = materials_location(form)
+        return RedirectResponse(
+            target + "&" + urlencode({"notice": f"已处理 {len(result['changed'])} 份材料"}),
+            status_code=303,
+        )
+
+    @app.post("/materials/hide-read", response_class=HTMLResponse)
+    async def materials_hide_read(request: Request):
+        from secondbrain.material_management import hide_read, read_to_hide
+
+        form = await request.form()
+        if form.get("confirm") != "yes":
+            rows = read_to_hide()
+            return templates.TemplateResponse(request, "material_manage_confirm.html", {
+                "rows": rows[:50], "count": len(rows), "ids": [], "action": "hide_read",
+                "filters": material_filters(form), "return_url": materials_location(form),
+            })
+        result = hide_read()
+        return RedirectResponse(
+            "/materials?" + urlencode({"notice": f"已隐藏 {len(result['changed'])} 份已读材料"}),
+            status_code=303,
+        )
+
+    @app.get("/vault/{relative:path}")
+    def vault_resource(relative: str):
+        root = config.wiki_dir().resolve()
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(404, "资源不存在或路径越界")
+        suffix = path.suffix.lower()
+        if suffix in {".md", ".txt"}:
+            return PlainTextResponse(
+                path.read_text(encoding="utf-8"), headers={"X-Content-Type-Options": "nosniff"}
+            )
+        if suffix not in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            raise HTTPException(400, "不支持在 Web 打开的资源类型")
+        return FileResponse(
+            path, headers={"X-Content-Type-Options": "nosniff",
+                           "Content-Security-Policy": "default-src 'none'; sandbox"}
+        )
+
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
+    def home(request: Request) -> HTMLResponse:
+        wiki = _wiki()
+        with _conn() as conn:
+            queue = db.reading_list_items(conn)
+            rows = queue[:8]
+            count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+            unread = len(queue)
+            to_ingest = len(pending_items(conn, wiki))
+            later_count = len(queue)
+        return templates.TemplateResponse(
+            request, "home.html",
+            {"rows": rows, "count": count, "unread": unread,
+             "pages": len(build_graph(wiki)["nodes"]),
+             "sources_count": len(config.load_sources()),
+             "to_ingest": to_ingest, "later": later_count, "hints": CostHints(_settings()),
+             "ingest_task": tasks.get("wiki_ingest")},
+        )
+
+    @app.get("/recommendations", response_class=HTMLResponse)
+    def recommendations(request: Request) -> HTMLResponse:
         day = request.query_params.get("date")
         if day:
             try:
                 date.fromisoformat(day)
             except ValueError as exc:
                 raise HTTPException(400, "date 格式应为 YYYY-MM-DD") from exc
-        profile = _profile()
         wiki = _wiki()
         with _conn() as conn:
             latest = db.latest_digest_date(conn)
             day = day or latest
             rows = db.digest_rows(conn, day) if day else []
-            concept_rows = db.digest_concepts(conn, day) if day else []
             l1 = db.latest_assessments(conn, "L1")
             l2 = db.latest_assessments(conn, "L2")
             states = db.feedback_state(conn, [r["item_id"] for r in rows])
             backlog = len(db.past_must_reads(conn, day)) if day else 0
-            later = len(db.items_in_state(conn, "later"))
+            later = len(db.reading_list_items(conn))
             summarized = db.ai_item_ids(conn, "summary")
-            to_ingest = len(pending_items(conn))
+            to_ingest = len(pending_items(conn, wiki))
+            bibliographies = {
+                row["item_id"]: db.material_bibliography(conn, row["item_id"]) for row in rows
+            }
         form, ctype = filters.clean_filters(
             request.query_params.get("form"), request.query_params.get("ctype")
         )
         lanes: dict[str, list[dict]] = {}
         for row in rows:
             content_type = l1.get(row["item_id"], {}).get("content_type")
-            item_form = filters.item_form(row["source_type"], row["url"], row["extract_method"])
+            item_form = _material_form(row, bibliographies[row["item_id"]])
             if not filters.matches(item_form, content_type, form, ctype):
                 continue  # 筛选只影响显示，不改 digest / 预算
             entry = _entry(
@@ -486,13 +733,11 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 l1.get(row["item_id"], {}),
                 l2.get(row["item_id"]),
                 states[row["item_id"]],
-                profile,
                 wiki,
             )
             entry["has_summary"] = row["item_id"] in summarized
             lanes.setdefault(row["lane"], []).append(entry)
         used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
-        used += sum(c["est_minutes"] for c in concept_rows)
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -513,47 +758,62 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "to_ingest": to_ingest,
                 "ingest_task": tasks.get("wiki_ingest"),
                 "archived": len(lanes.get("archived", [])),
-                "concepts": [] if (form or ctype) else concept_rows,
-                "grades": GRADES,
                 "filter_bar": _filter_bar(
-                    "/", {"date": request.query_params.get("date")}, form, ctype
+                    "/recommendations", {"date": request.query_params.get("date")}, form, ctype
                 ),
             },
         )
 
     @app.get("/item/{item_id}", response_class=HTMLResponse)
     def item(request: Request, item_id: int) -> HTMLResponse:
-        profile = _profile()
         with _conn() as conn:
+            canonical_id = db.resolve_material_id(conn, item_id)
+            if canonical_id != item_id:
+                return RedirectResponse(f"/item/{canonical_id}", status_code=307)
             row = db.item_detail(conn, item_id)
             if row is None:
                 raise HTTPException(404, "条目不存在")
+            lifecycle = db.lifecycle_states(conn).get(item_id, {})
+            bibliography = db.material_bibliography(conn, item_id)
             l1 = db.item_assessment(conn, item_id, "L1")
             l2 = db.item_assessment(conn, item_id, "L2")
             history = db.feedback_for(conn, item_id)
             state = db.feedback_state(conn, [item_id])[item_id]
             summary = db.get_ai(conn, item_id, "summary")
             prereq_cached = db.get_ai(conn, item_id, "prereq") is not None
-            prereq_count = len(ops.prereq_names(conn, item_id))
+            prereq_count = (
+                len(ops.prereq_names(conn, item_id)) if not lifecycle.get("trashed") else 0
+            )
             incomplete = item_id in db.incomplete_ids(conn)
+            origins = []
+            for source in db.material_origins(conn, item_id):
+                origin = dict(source)
+                origin["metadata"] = json.loads(origin["metadata_json"])
+                origin["actual_source_url"] = safe_url(origin["metadata"].get("actual_url"))
+                origins.append(origin)
             lanes = conn.execute(
                 "SELECT date, lane, est_minutes, is_deep_read FROM digests"
                 " WHERE item_id = ? ORDER BY date DESC",
                 (item_id,),
             ).fetchall()
+            queued = any(r["id"] == item_id for r in db.reading_list_items(conn))
+            reading_record = db.get_ai(conn, item_id, "reading_record") or {}
         prereqs = (l2 or {}).get("prerequisites", [])
         return templates.TemplateResponse(
             request,
             "item.html",
             {
                 "item": row,
+                "lifecycle": lifecycle,
+                "bibliography": bibliography,
+                "material_form": _material_form(row, bibliography),
                 "l1": l1,
                 "l2": l2,
                 "key_points": _key_points(l2, row["url"]),
                 "history": history,
                 "state": state,
                 "digests": lanes,
-                "refresh_first": refresh_hints(prereqs, profile, _wiki())[0],
+                "related_prerequisites": related_prerequisites(prereqs, _wiki())[0],
                 "summary": summary,
                 "summary_points": _summary_points(summary, row["url"]),
                 "summary_task": tasks.get(f"summary-{item_id}"),
@@ -561,8 +821,76 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "prereq_count": prereq_count,
                 "incomplete": incomplete,
                 "hints": CostHints(_settings()),
+                "origins": origins,
+                "notes": ops.material_notes(item_id),
+                "material_page": _wiki().material_page(item_id),
+                "wiki_task": tasks.get(f"wiki-{item_id}"),
+                "queued": queued,
+                "read_task": tasks.get(f"read-{item_id}"),
+                "discussion_url": reading_record.get("discussion_url") or "",
             },
         )
+
+    @app.post("/item/{item_id}/reading")
+    async def material_reading(
+        request: Request, item_id: int, state: str = Form(...), notes: str | None = Form(None),
+        discussion_url: str | None = Form(None), force: bool = Form(False),
+    ) -> RedirectResponse:
+        if state not in {"unread", "reading", "read"}:
+            raise HTTPException(400, "阅读状态必须为 unread / reading / read")
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+            if state != "read":
+                db.set_reading_state(conn, item_id, state)
+        if state == "read":
+            form = await request.form()
+            if "notes" in form:
+                notes = _normalize_newlines(str(form["notes"]))
+            if "discussion_url" in form:
+                discussion_url = str(form["discussion_url"]).strip()
+            if discussion_url and safe_url(discussion_url) is None:
+                raise HTTPException(400, "讨论链接只接受 http(s)，不会自动读取私有对话")
+
+            def run(task: Task) -> dict:
+                return ops.register_read(
+                    item_id, task.log, notes=notes, discussion_url=discussion_url, force=force
+                )
+
+            try:
+                tasks.start(f"read-{item_id}", "登记阅读并整理知识", run)
+            except TaskRunning:
+                pass
+        return RedirectResponse(f"/item/{item_id}#register-read", status_code=303)
+
+    @app.post("/item/{item_id}/notes")
+    async def material_notes_save(request: Request, item_id: int) -> RedirectResponse:
+        form = await request.form()
+        if "notes" not in form or not isinstance(form["notes"], str):
+            raise HTTPException(422, "需要 notes 字段；未修改已有笔记")
+        notes = form["notes"]
+        try:
+            ops.material_notes(item_id, _normalize_newlines(notes))
+        except ops.OpsError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return RedirectResponse(f"/item/{item_id}#notes", status_code=303)
+
+    @app.post("/item/{item_id}/wiki", response_class=HTMLResponse)
+    def material_wiki(request: Request, item_id: int) -> HTMLResponse:
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+        kind = f"wiki-{item_id}"
+
+        def run(task: Task) -> dict:
+            result = ops.ingest_items([item_id], task.log)
+            return result.__dict__
+
+        try:
+            tasks.start(kind, "整理材料入 wiki", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
 
     @app.get("/history", response_class=HTMLResponse)
     def history(request: Request) -> HTMLResponse:
@@ -587,24 +915,126 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/add", response_class=HTMLResponse)
     def add_page(request: Request) -> HTMLResponse:
-        """手动添加文章（ADR 0018）：不进 L1 / L2 / 分级，只记录状态与反馈。"""
+        """统一材料导入：URL、独立 PDF 或文本。"""
         return templates.TemplateResponse(
             request,
             "add.html",
             {
-                "task": tasks.get("manual_add"),
+                "task": (
+                    tasks.get("manual_add")
+                    if tasks.get("manual_add") and tasks.get("manual_add").running else None
+                ),
+                "task_count": len(tasks.records()),
+                "active_task_count": sum(
+                    t.running or t.status == "waiting" for t in tasks.records()
+                ),
                 "read_kinds": {k: db.FEEDBACK_KINDS[k] for k in ops.READ_FEEDBACK},
+                "prefill_url": request.query_params.get("url", ""),
+                "remedy": request.query_params.get("remedy") == "1",
             },
         )
+
+    def intake_options(form) -> dict:
+        state = str(form.get("state") or "later")
+        if state not in {"later", "read", "unread"}:
+            raise HTTPException(422, "状态必须为 later / read / unread")
+        notes = _normalize_newlines(str(form.get("learning_notes") or ""))
+        discussion = str(form.get("discussion_url") or "").strip()
+        if state == "read":
+            try:
+                ops._discussion_reference(discussion)
+            except ops.OpsError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        return {
+            "state_requested": state, "read_requested": state == "read",
+            "learning_notes": notes, "discussion_url": discussion,
+        }
+
+    def archive_materials(ids: list[int]) -> None:
+        with _conn() as conn:
+            for item_id in ids:
+                db.set_reading_state(conn, item_id, "unread")
+                db.remove_from_reading_list(conn, item_id)
+            conn.commit()
+
+    def finish_paper_read(result: dict, task: Task, options: dict) -> dict:
+        result.update(options)
+        task.result = result
+        task.save()
+        material_id = result.get("material_id")
+        if material_id and options["state_requested"] == "unread":
+            archive_materials([material_id])
+        if material_id and options["state_requested"] == "read":
+            registered = ops.register_read(
+                material_id, task.log, notes=options["learning_notes"] or None,
+                discussion_url=options["discussion_url"] or None,
+            )
+            result["ingest"] = registered["ingest"]
+            result["cached"] = registered["cached"]
+        return result
+
+    @app.post("/papers/add", response_class=HTMLResponse)
+    async def paper_add(request: Request) -> HTMLResponse:
+        from secondbrain import papers
+
+        form = await request.form()
+        query = str(form.get("query") or "").strip()
+        if not query:
+            raise HTTPException(422, "请输入论文名")
+        options = intake_options(form)
+        kind = f"paper-{uuid.uuid4().hex}"
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                result = papers.import_by_name(query, task.log, client=client)
+                return finish_paper_read(result, task, options)
+
+        tasks.start(kind, f"论文：{query}", run, initial_result=options)
+        return RedirectResponse(f"/papers/result/{kind}", status_code=303)
+
+    @app.get("/papers/result/{kind}", response_class=HTMLResponse)
+    def paper_result(request: Request, kind: str) -> HTMLResponse:
+        if not kind.startswith("paper-") or tasks.get(kind) is None:
+            raise HTTPException(404, "论文任务不存在；可在任务记录中查看历史检索")
+        task = tasks.get(kind)
+        paper_page = None
+        if task.result.get("material_id"):
+            paper_page = _wiki().material_page(task.result["material_id"])
+        return templates.TemplateResponse(
+            request, "paper_result.html",
+            {"kind": kind, "task": task, "paper_page": paper_page, "detail": True},
+        )
+
+    @app.post("/papers/choose", response_class=HTMLResponse)
+    async def paper_choose(request: Request) -> HTMLResponse:
+        from secondbrain import papers
+
+        form = await request.form()
+        search_id = str(form.get("search_id") or "")
+        candidate_id = str(form.get("candidate_id") or "")
+        options = intake_options(form)
+        kind = f"paper-{uuid.uuid4().hex}"
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                result = papers.choose_candidate(search_id, candidate_id, task.log, client=client)
+                return finish_paper_read(result, task, options)
+
+        tasks.start(kind, "导入已选论文", run, initial_result=options)
+        return RedirectResponse(f"/papers/result/{kind}", status_code=303)
 
     @app.post("/add", response_class=HTMLResponse)
     async def add_submit(request: Request) -> HTMLResponse:
         form = await request.form()
         urls = str(form.get("urls") or "").splitlines()
         state = str(form.get("state") or "later")
-        feedback = str(form.get("feedback") or "") or None
+        title = str(form.get("title") or "").strip() or None
+        feedback = (str(form.get("feedback") or "") or None) if state == "read" else None
         ingest = bool(form.get("ingest"))
         text = str(form.get("text") or "").strip() or None
+        reference_only = bool(form.get("reference_only"))
+        learning_notes = str(form.get("learning_notes") or "") or None
+        discussion_url = str(form.get("discussion_url") or "").strip() or None
         upload, pdf = form.get("pdf"), None
         if upload is not None and not isinstance(upload, str) and upload.filename:
             pdf = await upload.read(ops.MAX_PDF_UPLOAD + 1)
@@ -617,32 +1047,108 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
         def run(task: Task) -> dict:
             with _http_client(_fetch_settings()) as client:
-                return ops.add_manual(
+                result = ops.add_manual(
                     urls,
                     task.log,
                     state=state,
+                    title=title,
                     feedback=feedback,
                     ingest=ingest,
                     text=text,
                     pdf=pdf,
                     client=client,
+                    reference_only=reference_only,
+                    learning_notes=learning_notes if state == "read" else None,
+                    discussion_url=discussion_url if state == "read" else None,
                 )
+                task.result = result
+                task.save()
+                if state == "unread":
+                    archive_materials([
+                        r["item_id"] for r in result["results"] if r.get("item_id")
+                    ])
+                return result
 
         try:
-            tasks.start("manual_add", f"手动添加 {len(urls)} 篇", run)
+            tasks.start(
+                "manual_add", f"导入材料 {len(urls) or 1} 篇", run,
+                initial_result={"submitted_urls": urls},
+            )
         except TaskRunning as exc:
             return task_fragment(request, "manual_add", str(exc))
         return task_fragment(request, "manual_add")
 
     @app.get("/later", response_class=HTMLResponse)
     def later(request: Request) -> HTMLResponse:
-        """稍后再看：当前状态为"稍后读"的条目（不计入积压、没有期限）。"""
+        """用户自己维护的稍后清单；信源采集与反馈不会自动填充此列表。"""
         with _conn() as conn:
-            rows = db.items_in_state(conn, "later")
+            rows = db.reading_list_items(conn)
             incomplete = db.incomplete_ids(conn)
         return templates.TemplateResponse(
             request, "later.html", {"rows": rows, "incomplete": incomplete}
         )
+
+    @app.post("/reading/{item_id}/add")
+    def reading_add(item_id: int) -> RedirectResponse:
+        with _conn() as conn:
+            if not db.item_exists(conn, item_id):
+                raise HTTPException(404, "材料不存在")
+            if db.is_trashed(conn, item_id):
+                raise HTTPException(409, "材料已在回收区，请先恢复")
+            db.add_to_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
+    @app.post("/reading/{item_id}/remove")
+    def reading_remove(item_id: int) -> RedirectResponse:
+        with _conn() as conn:
+            db.remove_from_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
+    @app.post("/reading/remove")
+    async def reading_remove_many(request: Request):
+        form = await request.form()
+        try:
+            ids = list(dict.fromkeys(int(value) for value in form.getlist("item_ids")))
+        except ValueError as exc:
+            raise HTTPException(400, "请选择有效材料") from exc
+        if not ids:
+            raise HTTPException(400, "请先选择材料")
+        with _conn() as conn:
+            for item_id in ids:
+                db.remove_from_reading_list(conn, item_id)
+            conn.commit()
+        return RedirectResponse("/later", status_code=303)
+
+    @app.post("/reading/import", response_class=HTMLResponse)
+    async def reading_import(request: Request) -> HTMLResponse:
+        form = await request.form()
+        url = str(form.get("url") or "").strip()
+        requested_source = str(form.get("origin_source_id") or "")
+        origin_source_id = (
+            requested_source if requested_source in {s.id for s in config.load_sources()}
+            else None
+        )
+        try:
+            ops.validate_manual([url], "later", None, False, None)
+        except ops.OpsError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                return ops.add_manual(
+                    [url], task.log, state="later", client=client,
+                    origin_source_id=origin_source_id,
+                )
+
+        try:
+            tasks.start(
+                "manual_add", "添加到阅读列表", run, initial_result={"submitted_urls": [url]},
+            )
+        except TaskRunning as exc:
+            return task_fragment(request, "manual_add", str(exc))
+        return task_fragment(request, "manual_add")
 
     @app.post("/item/{item_id}/complete")
     async def item_complete(request: Request, item_id: int) -> RedirectResponse:
@@ -797,6 +1303,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             },
         )
 
+    @app.post("/profile/reject", response_class=HTMLResponse)
+    def profile_reject():
+        return HTMLResponse('<p class="meta">已拒绝提案，个人画像未修改。</p>')
+
     @app.post("/deep", response_class=HTMLResponse)
     def deep(request: Request, item_id: str = Form(...)) -> HTMLResponse:
         """按需精读单条（与 sb deep 同一逻辑），返回 TL;DR 片段。"""
@@ -828,6 +1338,78 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     # ---------- 后台任务 ----------
 
+    @app.get("/task-history", response_class=HTMLResponse)
+    def task_history(request: Request) -> HTMLResponse:
+        include_dismissed = request.query_params.get("closed") == "1"
+        records = tasks.records(include_dismissed=include_dismissed)
+        try:
+            offset = max(0, int(request.query_params.get("offset", "0")))
+        except ValueError as exc:
+            raise HTTPException(400, "分页位置必须为整数") from exc
+        return templates.TemplateResponse(request, "task_history.html", {
+            "records": records[offset:offset + 30], "offset": offset,
+            "has_more": len(records) > offset + 30, "include_dismissed": include_dismissed,
+            "cleared": request.query_params.get("cleared"),
+        })
+
+    @app.post("/task-history/delete", response_class=HTMLResponse)
+    async def task_delete_finished(request: Request):
+        form = await request.form()
+        delete_all = form.get("all") == "yes"
+        ids = list(dict.fromkeys(str(value) for value in form.getlist("task_ids")))
+        if not delete_all and not ids:
+            raise HTTPException(400, "请先选择已结束任务")
+        records = tasks.records(include_dismissed=True)
+        selected = records if delete_all else [t for t in records if t.id in ids]
+        if not delete_all and len(selected) != len(ids):
+            raise HTTPException(404, "任务记录不存在")
+        protected = [t for t in selected if t.running or t.status == "waiting"]
+        if protected and not delete_all:
+            raise HTTPException(409, "运行中或等待选择的任务不能删除")
+        finished = [t for t in selected if not t.running and t.status != "waiting"]
+        if form.get("confirm") != "yes":
+            return templates.TemplateResponse(request, "task_history_clear.html", {
+                "records": finished, "finished_count": len(finished),
+                "retained_count": len(protected), "delete_all": delete_all,
+            })
+        try:
+            count = tasks.delete_finished(None if delete_all else ids)
+        except (ValueError, TaskRunning) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/task-history?cleared={count}", status_code=303)
+
+    @app.get("/task-history/{task_id}/fragment", response_class=HTMLResponse)
+    def task_record_fragment(
+        request: Request, task_id: str, refresh: str | None = None
+    ) -> HTMLResponse:
+        if tasks.get(task_id) is None:
+            raise HTTPException(404, "任务记录不存在")
+        return task_fragment(request, task_id, refresh=bool(refresh))
+
+    @app.post("/task-history/{task_id}/dismiss", response_class=HTMLResponse)
+    def task_dismiss(request: Request, task_id: str):
+        task = tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "任务记录不存在")
+        if not tasks.dismiss(task.id):
+            raise HTTPException(409, "运行中或等待选择的任务不能关闭")
+        if request.headers.get("HX-Request"):
+            return HTMLResponse(f'<div class="task" id="task-{html.escape(task.kind)}"></div>')
+        return RedirectResponse("/task-history", status_code=303)
+
+    @app.get("/task-history/{task_id}", response_class=HTMLResponse)
+    def task_record(request: Request, task_id: str) -> HTMLResponse:
+        task = tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "任务记录不存在")
+        paper_page = (
+            _wiki().material_page(task.result["material_id"])
+            if task.kind.startswith("paper-") and task.result.get("material_id") else None
+        )
+        return templates.TemplateResponse(request, "paper_result.html", {
+            "kind": task.kind, "task": task, "paper_page": paper_page, "detail": True,
+        })
+
     @app.post("/tasks/{kind}", response_class=HTMLResponse)
     async def task_start(request: Request, kind: str) -> HTMLResponse:
         if kind not in TASKS:
@@ -852,7 +1434,15 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
-        known = kind in TASKS or kind == "manual_add" or re.fullmatch(r"summary-\d+", kind)
+        known = (
+            kind in TASKS or kind in {"manual_add", "wiki-sync"}
+            or re.fullmatch(r"(summary|wiki|read)-\d+", kind)
+            or (kind.startswith(("paper-", "rewrite-")) and tasks.get(kind) is not None)
+            or (
+                re.fullmatch(r"source-(profile|repair)-[a-z0-9][a-z0-9-]*", kind)
+                or kind == "sources-repair"
+            ) and tasks.get(kind) is not None
+        )
         if not known:
             raise HTTPException(404, "未知的任务")
         return task_fragment(request, kind, refresh=bool(refresh))
@@ -874,7 +1464,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             return {"item_id": item_id, "cost": out.cost, "cached": out.cached}
 
         try:
-            tasks.start(kind, f"深度速读 #{item_id}", run)
+            tasks.start(kind, "生成深度速读", run)
         except TaskRunning as exc:
             return task_fragment(request, kind, str(exc))
         return task_fragment(request, kind)
@@ -1040,149 +1630,284 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.get("/sources", response_class=HTMLResponse)
     def sources_page(request: Request, saved: str | None = None) -> HTMLResponse:
+        from secondbrain.source_analysis import source_analyses, source_contexts
+        from secondbrain.source_visuals import read_visual
+
         path, is_example = config.sources_path()
         try:
-            sources, error = config.load_sources(path), None
+            sources, error = config.load_sources(), None
         except config.ConfigError as exc:
             sources, error = [], str(exc)
         pers = _settings().personalize
-        catalog = ops.catalog_entries()
         with _conn() as conn:
             overview = db.source_overview(conn)
             yields = source_yields(conn, sources, datetime.now(UTC), pers)
             dist = feedback_distribution(conn)
+        homepages = {
+            s.id: source_homepage(
+                s, overview[s.id]["homepage"] if s.id in overview else None
+            ) for s in sources
+        }
+        visual_versions = {
+            source_id: cached.version
+            for source_id, home in homepages.items()
+            if home and (cached := read_visual(home, config.data_dir() / "source-visuals"))
+        }
         return templates.TemplateResponse(
-            request,
-            "sources.html",
+            request, "sources.html",
             {
-                "sources": sources,
-                "overview": overview,
-                "yields": yields,
-                "dist": dist,
+                "sources": sources, "overview": overview, "yields": yields, "dist": dist,
                 "dist_kinds": DISTRIBUTION_KINDS,
-                "catalog": catalog,
-                "catalog_homepages": {s.id: source_homepage(s) for s in catalog},
-                "homepages": {
-                    s.id: source_homepage(
-                        s, overview[s.id]["homepage"] if s.id in overview else None
-                    )
-                    for s in sources
-                },
-                "pers": pers,
-                "path": path,
-                "is_example": is_example,
-                "error": error,
-                "saved": saved,
-                "types": SourceConfig.model_fields["type"].annotation.__args__,
+                "homepages": homepages, "source_visuals": visual_versions,
+                "pers": pers, "path": path, "is_example": is_example, "error": error,
+                "saved": saved, "types": SourceConfig.model_fields["type"].annotation.__args__,
+                "analyses": source_analyses(),
+                "source_contexts": source_contexts(),
+                "source_tasks": {s.id: tasks.get(f"source-profile-{s.id}") for s in sources},
+                "repair_tasks": {s.id: tasks.get(f"source-repair-{s.id}") for s in sources},
+                "bulk_repair_task": tasks.get("sources-repair"),
+                "source_cost_limit": _settings().run.max_cost_usd,
             },
         )
 
+    @app.post("/sources/home/preview", response_class=HTMLResponse)
+    def source_home_preview(request: Request, url: str = Form(...)) -> HTMLResponse:
+        from secondbrain.source_discovery import discover_source
+
+        try:
+            fs = _fetch_settings()
+            with _http_client(fs) as client:
+                result = discover_source(url, client, fs)
+            return templates.TemplateResponse(
+                request, "_home_source_preview.html", {"result": result, "error": None}
+            )
+        except (ValueError, FetchError, config.ConfigError) as exc:
+            return templates.TemplateResponse(
+                request, "_home_source_preview.html", {"result": None, "error": str(exc)}
+            )
+
+    @app.post("/sources/home/follow")
+    def source_home_follow(
+        request: Request, url: str = Form(...), source_id: str = Form(""),
+        name: str = Form(""),
+        candidate_key: str = Form(""), manual_only: bool = Form(False),
+    ):
+        from secondbrain.source_discovery import follow_source
+
+        try:
+            fs = _fetch_settings()
+            with _http_client(fs) as client:
+                result = follow_source(
+                    url, client, fs, source_id=source_id or None, name=name.strip() or None,
+                    candidate_key=candidate_key or None, manual_only=manual_only,
+                )
+            if not result.get("saved_id"):
+                return templates.TemplateResponse(
+                    request, "_home_source_preview.html",
+                    {"result": result, "error": "未保存；请检查发现结果"}, status_code=400,
+                )
+        except (ValueError, FetchError, config.ConfigError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={result['saved_id']}", status_code=303)
+
     @app.post("/sources/preview", response_class=HTMLResponse)
     async def sources_preview(request: Request) -> HTMLResponse:
-        """试抓：只拉取并解析信源（不抓正文、不写库），列出前几条标题与日期。"""
+        from secondbrain.source_discovery import preview_source
+
         form = {k: str(v) for k, v in (await request.form()).items()}
         context: dict = {"form": form, "error": None, "entries": [], "source": None}
         try:
             source = _source_from_form(form)
-        except ValueError as exc:
-            context["error"] = str(exc)
-            return templates.TemplateResponse(request, "_source_preview.html", context)
-        try:
-            existing = {s.id for s in config.load_sources()}
-        except config.ConfigError:
-            existing = set()
-        if source.id in existing:
-            context["error"] = f"信源 id 已存在：{source.id}"
-            return templates.TemplateResponse(request, "_source_preview.html", context)
-        fs = _fetch_settings()
-        try:
+            if any(s.id == source.id for s in config.load_sources()):
+                raise ValueError(f"信源 id 已存在：{source.id}")
+            fs = _fetch_settings()
             with _http_client(fs) as client:
-                entries = FETCHERS[source.type](source, client, fs)
-        except FetchError as exc:
+                result = preview_source(source, client, fs)
+            if result["status"] in ("failed", "rejected", "manual", "incomplete"):
+                raise FetchError("；".join(result["warnings"]) or "无法自动列举此来源")
+        except (ValueError, FetchError, config.ConfigError) as exc:
             context["error"] = f"试抓失败：{exc}"
             return templates.TemplateResponse(request, "_source_preview.html", context)
-        entries.sort(key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True)
+        entries = result["entries"]
         context.update(source=source, entries=entries[:PREVIEW_ENTRIES], total=len(entries))
         return templates.TemplateResponse(request, "_source_preview.html", context)
 
     @app.post("/sources/add")
     async def sources_add(request: Request) -> RedirectResponse:
+        from secondbrain.source_discovery import source_matches
+
         form = {k: str(v) for k, v in (await request.form()).items()}
         try:
             source = _source_from_form(form)
             _, sources = _editable_sources()
-            if any(s.id == source.id for s in sources):
-                raise ValueError(f"信源 id 已存在：{source.id}")
-            block = sources_file.dump_entry(source)
-            ops.edit_sources(lambda text: sources_file.append_entry(text, block))
+            if any(s.id == source.id or source_matches(s, source) for s in sources):
+                raise ValueError("此来源已关注，请编辑现有来源，不要重复添加")
+            ops.edit_sources(lambda text: sources_file.append_entry(
+                text, sources_file.dump_entry(source)
+            ))
         except (ValueError, config.ConfigError) as exc:
             raise HTTPException(400, str(exc)) from exc
         return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
 
+    @app.post("/sources/{source_id}/edit")
+    async def sources_edit(request: Request, source_id: str) -> RedirectResponse:
+        from secondbrain.source_management import update_source
+
+        for kind in (f"source-profile-{source_id}", f"source-repair-{source_id}", "sources-repair"):
+            if tasks.get(kind) is not None and tasks.get(kind).running:
+                raise HTTPException(409, "来源任务运行中，请完成后再编辑")
+        form = await request.form()
+        changes = {key: str(form.get(key, "")).strip() or None
+                   for key in ("name", "url", "homepage", "query")}
+        changes.update(
+            id=str(form.get("id", source_id)).strip(),
+            type=str(form.get("type", "")),
+            tags=[s.strip() for s in re.split(r"[,，]", str(form.get("tags", ""))) if s.strip()],
+            enabled="enabled" in form, needs_scraper="needs_scraper" in form,
+            role=str(form.get("role", "core")),
+        )
+        try:
+            changes["trust"] = int(str(form.get("trust", "3")))
+            changes["max_age_days"] = int(str(form.get("max_age_days", "7")))
+            changes["url_pattern"] = (
+                str(form.get("url_pattern", "")).strip() or None
+                if changes["type"] in ("sitemap", "html_index") else None
+            )
+            changes["max_links"] = (
+                int(str(form["max_links"]))
+                if changes["type"] == "html_index" and form.get("max_links") else None
+            )
+            changes["use_lastmod"] = changes["type"] == "sitemap" and "use_lastmod" in form
+            changes["rss_categories"] = [
+                item.strip() for item in re.split(r"[,，]", str(form.get("rss_categories", "")))
+                if item.strip()
+            ] if changes["type"] == "rss" else []
+            source = update_source(source_id, changes)
+        except (ValueError, config.ConfigError, sqlite3.Error) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/sources?saved={source.id}", status_code=303)
+
+    def repair_sources_task(request: Request, ids: list[str], apply: bool, kind: str):
+        from secondbrain.source_management import repair_source
+
+        def run(task: Task) -> dict:
+            results = []
+            for source_id in ids:
+                try:
+                    summary = repair_source(source_id, task.log, apply=apply)
+                    summary.pop("discovery", None)
+                    results.append(summary)
+                except (ValueError, FetchError, config.ConfigError) as exc:
+                    task.log(f"{source_id}：{exc}")
+                    results.append({"source_id": source_id, "status": "failed",
+                                    "applied": False, "changes": {}, "warnings": [str(exc)]})
+            return {"results": results, "apply": apply}
+
+        try:
+            tasks.start(kind, "修复来源（保留关注）" if apply else "检查来源（只预览）", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
+    @app.post("/sources/repair", response_class=HTMLResponse)
+    def sources_repair_all(request: Request, apply: bool = Form(False)):
+        return repair_sources_task(
+            request, [s.id for s in config.load_sources()], apply, "sources-repair"
+        )
+
+    @app.post("/sources/{source_id}/repair", response_class=HTMLResponse)
+    def sources_repair(request: Request, source_id: str, apply: bool = Form(False)):
+        if not any(s.id == source_id for s in config.load_sources()):
+            raise HTTPException(404, "信源不存在")
+        return repair_sources_task(request, [source_id], apply, f"source-repair-{source_id}")
+
+    @app.post("/sources/{source_id}/analyze", response_class=HTMLResponse)
+    def sources_analyze(request: Request, source_id: str, force: bool = Form(False)):
+        from secondbrain.source_analysis import analyze_source
+
+        if not any(s.id == source_id for s in config.load_sources()):
+            raise HTTPException(404, "信源不存在")
+        kind = f"source-profile-{source_id}"
+
+        def run(task: Task) -> dict:
+            return analyze_source(source_id, task.log, force=force)
+
+        try:
+            tasks.start(kind, "分析来源领域（cheap 模型）", run)
+        except TaskRunning as exc:
+            return task_fragment(request, kind, str(exc))
+        return task_fragment(request, kind)
+
     @app.post("/sources/{source_id}/toggle")
     def sources_toggle(source_id: str) -> RedirectResponse:
-        _, sources = _editable_sources()
-        target = next((s for s in sources if s.id == source_id), None)
+        from secondbrain.source_management import update_source
+
+        target = next((s for s in config.load_sources() if s.id == source_id), None)
         if target is None:
             raise HTTPException(404, "信源不存在")
-        ops.edit_sources(lambda text: sources_file.set_enabled(text, source_id, not target.enabled))
+        update_source(source_id, {"enabled": not target.enabled})
         return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
 
-    @app.post("/sources/catalog/{source_id}/add")
-    def sources_catalog_add(source_id: str) -> RedirectResponse:
-        """把信源目录（sources.example.yaml）中的这一条原样追加到 config/sources.yaml。"""
-        example = (config.config_dir() / "sources.example.yaml").read_text(encoding="utf-8")
-        block = sources_file.entry_text(example, source_id)
-        if block is None:
-            raise HTTPException(404, "目录中没有该信源")
-        _, sources = _editable_sources()
-        if any(s.id == source_id for s in sources):
-            raise HTTPException(400, f"信源 id 已存在：{source_id}")
-        try:
-            ops.edit_sources(lambda text: sources_file.append_entry(text, block))
-        except config.ConfigError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return RedirectResponse(f"/sources?saved={source_id}", status_code=303)
+    def visual_home(source_id: str) -> str:
+        source = next((s for s in config.load_sources() if s.id == source_id), None)
+        if source is None:
+            raise HTTPException(404, "信源不存在")
+        with _conn() as conn:
+            overview = db.source_overview(conn)
+        detected = overview[source_id]["homepage"] if source_id in overview else None
+        home = source_homepage(source, detected)
+        if not home:
+            raise HTTPException(404, "信源没有可用主页")
+        return home
+
+    @app.get("/sources/{source_id}/visual")
+    def source_visual(source_id: str) -> FileResponse:
+        from secondbrain.source_visuals import read_visual
+
+        cached = read_visual(visual_home(source_id), config.data_dir() / "source-visuals")
+        if cached is None:
+            raise HTTPException(404, "尚无本地封面")
+        return FileResponse(
+            cached.path, media_type=cached.media_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "Cache-Control": "private, no-cache",
+            },
+        )
+
+    @app.post("/sources/{source_id}/visual")
+    def source_visual_refresh(source_id: str) -> dict:
+        from secondbrain.source_visuals import refresh_visual
+
+        home = visual_home(source_id)
+        fs = _fetch_settings()
+        with _http_client(fs) as client:
+            return refresh_visual(home, client, fs, config.data_dir() / "source-visuals")
 
     @app.post("/sources/{source_id}/peek", response_class=HTMLResponse)
     def sources_peek(request: Request, source_id: str) -> HTMLResponse:
-        """预览已配置或目录中的信源：只拉取并解析最新约 10 条，不写库、不调用 LLM。"""
-        candidates = {s.id: s for s in ops.catalog_entries()}
-        try:
-            candidates |= {s.id: s for s in config.load_sources()}
-        except config.ConfigError:
-            pass
-        source = candidates.get(source_id)
+        from secondbrain.source_discovery import preview_source
+
+        source = next((s for s in config.load_sources() if s.id == source_id), None)
         if source is None:
             raise HTTPException(404, "信源不存在")
-        context: dict = {"source": source, "entries": [], "error": None, "total": 0}
-        if source.needs_scraper:
-            context["error"] = "该信源标记为 needs_scraper：没有可用的 feed，无法预览"
-        else:
-            fs = _fetch_settings()
-            try:
-                with _http_client(fs) as client:
-                    entries = FETCHERS[source.type](source, client, fs)
-            except FetchError as exc:
-                context["error"] = f"抓取失败：{exc}"
-            else:
-                entries.sort(
-                    key=lambda e: e.published_at or datetime.min.replace(tzinfo=UTC), reverse=True
-                )
-                context.update(entries=entries[:PREVIEW_ENTRIES], total=len(entries))
-                channel = safe_url(getattr(entries, "homepage", None))
-                if channel:  # 顺手记录 channel <link>（只更新已有的 sources 行，不写 items）
-                    context["channel"] = channel
-                    with _conn() as conn:
-                        db.record_homepage(conn, source.id, channel)
-                        conn.commit()
+        fs = _fetch_settings()
+        with _http_client(fs) as client:
+            result = preview_source(source, client, fs)
+        context = {
+            "source": source, "entries": result["entries"][:PREVIEW_ENTRIES],
+            "total": len(result["entries"]), "channel": result["homepage"],
+            "error": "；".join(result["warnings"])
+            if result["status"] in ("failed", "rejected", "incomplete") else None,
+            "manual": result["status"] == "manual",
+        }
         return templates.TemplateResponse(request, "_peek.html", context)
 
     @app.post("/sources/{source_id}/delete", response_class=HTMLResponse)
     def sources_delete(
         request: Request, source_id: str, confirm: str | None = Form(None)
     ) -> HTMLResponse:
-        """二次确认：没带 confirm=yes 时只显示确认页；已入库的条目保留。"""
         path, sources = _editable_sources()
         if not any(s.id == source_id for s in sources):
             raise HTTPException(404, "信源不存在")
@@ -1198,26 +1923,256 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.get("/wiki", response_class=HTMLResponse)
     def wiki_index(request: Request) -> HTMLResponse:
         wiki = _wiki()
-        today = datetime.now().date()
-        due = [{"page": p, "due": due_date(p)} for p in due_concepts(wiki, today)]
-        index_html = render_markdown(wiki.index_path.read_text(encoding="utf-8"), wiki)
+        query = request.query_params.get("q", "").strip()
+        kind = request.query_params.get("kind", "")
+        view = request.query_params.get("view", "active")
+        if (kind and kind not in KIND_TITLES) or view not in {"active", "trash", "all"}:
+            raise HTTPException(400, "未知知识页筛选条件")
+        with _conn() as conn:
+            pending_read = conn.execute(
+                "SELECT id, title, processing_status FROM items"
+                " WHERE reading_state = 'read' AND processing_status != 'processed'"
+                " AND NOT EXISTS (SELECT 1 FROM material_lifecycle m"
+                " WHERE m.item_id = items.id AND m.trashed = 1)"
+                " ORDER BY id DESC"
+            ).fetchall()
+            entries = []
+            available_kinds = set()
+            for page in wiki.pages.values():
+                trashed = bool(page.meta.get("trashed"))
+                if (view == "trash" and not trashed) or (view == "active" and not page.is_visible):
+                    continue
+                page_kind = _page_kind(page, conn)
+                available_kinds.add(page_kind)
+                if kind and page_kind != kind:
+                    continue
+                if query and query.casefold() not in " ".join(
+                    [page.title, *page.aliases, str(page.meta.get("summary") or "")]
+                ).casefold():
+                    continue
+                entries.append({"page": page, "kind": page_kind})
+            entries.sort(key=lambda entry: entry["page"].title.casefold())
         return templates.TemplateResponse(
             request,
             "wiki.html",
-            {"index_html": index_html, "due": due, "grades": GRADES, "count": len(wiki.pages)},
+            {"entries": entries, "count": len(entries), "query": query, "kind": kind,
+             "view": view, "available_kinds": available_kinds,
+             "notice": request.query_params.get("notice", ""), "pending_read": pending_read},
         )
 
+    @app.post("/wiki/manage", response_class=HTMLResponse)
+    async def wiki_manage(request: Request):
+        form = await request.form()
+        slugs = [str(value) for value in form.getlist("slugs")]
+        action = str(form.get("action") or "")
+        wiki = _wiki()
+        try:
+            if action not in {"trash", "restore"}:
+                raise WikiError("未知知识页管理操作")
+            impact = removal_impact(wiki, slugs)
+            if action == "trash" and form.get("confirm") != "yes":
+                return templates.TemplateResponse(request, "wiki_manage_confirm.html", {
+                    "impact": impact, "slugs": slugs,
+                })
+            changed = manage_pages(wiki, slugs, action)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse("/wiki?" + urlencode({
+            "view": "trash" if action == "trash" else "active",
+            "notice": f"已{'回收' if action == 'trash' else '恢复'} {len(changed)} 个知识页",
+        }), status_code=303)
+
+    @app.post("/wiki/category")
+    def wiki_category(slug: str = Form(...), kind: str = Form(...)):
+        try:
+            set_kind(_wiki(), slug, kind)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}", status_code=303)
+
+    def rewrite_kind(slug: str) -> str:
+        return "rewrite-" + hashlib.sha256(slug.encode()).hexdigest()[:20]
+
+    def rewrite_result(session: dict) -> dict:
+        # 会话正文只保存在会话库，任务记录仅保留可恢复的引用与执行结果。
+        return {
+            "session_id": session["id"], "slug": session["slug"],
+            "status": session["status"], "cost": session["cost"], "errors": session["errors"],
+        }
+
+    @app.post("/wiki/rewrite/start")
+    def wiki_rewrite_start(slug: str = Form(...), context: str = Form(...)):
+        from secondbrain.wiki.rewrite import start_session
+
+        if not context.strip():
+            raise HTTPException(422, "请输入本轮临时语境")
+        if slug not in _wiki().pages:
+            raise HTTPException(404, "知识页不存在")
+        try:
+            tasks.start(
+                rewrite_kind(slug), "按临时语境重整知识页",
+                lambda task: rewrite_result(start_session(slug, context.strip(), echo=task.log)),
+                initial_result={"slug": slug},
+            )
+        except TaskRunning as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/continue")
+    def wiki_rewrite_continue(session_id: str = Form(...), message: str = Form(...)):
+        from secondbrain.wiki.rewrite import continue_session, get_session
+
+        try:
+            session = get_session(session_id)
+            if not message.strip():
+                raise WikiError("请输入继续讨论的内容")
+            tasks.start(
+                rewrite_kind(session["slug"]), "继续知识页重整会话",
+                lambda task: rewrite_result(
+                    continue_session(session_id, message.strip(), echo=task.log)
+                ),
+                initial_result={"slug": session["slug"], "session_id": session_id},
+            )
+        except (WikiError, TaskRunning) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(
+            f"/wiki/page/{session['slug']}?" + urlencode({"session": session_id}) + "#rewrite",
+            status_code=303,
+        )
+
+    @app.post("/wiki/rewrite/apply")
+    def wiki_rewrite_apply(session_id: str = Form(...)):
+        from secondbrain.wiki.rewrite import apply_revision, get_session
+
+        try:
+            session = get_session(session_id)
+            task = tasks.get(rewrite_kind(session["slug"]))
+            if task and task.running:
+                raise WikiError("草稿生成中，请等待完成后再采用")
+            apply_revision(session_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(
+            f"/wiki/page/{session['slug']}?" + urlencode({"session": session_id}) + "#rewrite",
+            status_code=303,
+        )
+
+    @app.post("/wiki/rewrite/restore")
+    def wiki_rewrite_restore(slug: str = Form(...), revision_id: str = Form(...)):
+        from secondbrain.wiki.rewrite import restore_revision
+
+        try:
+            task = tasks.get(rewrite_kind(slug))
+            if task and task.running:
+                raise WikiError("重整生成中，请等待完成后再回退")
+            restore_revision(slug, revision_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/delete", response_class=HTMLResponse)
+    def wiki_rewrite_delete(
+        request: Request, session_id: str = Form(...), confirm: str = Form(""),
+    ):
+        from secondbrain.wiki.rewrite import delete_session, get_session
+
+        try:
+            session = get_session(session_id)
+            task = tasks.get(rewrite_kind(session["slug"]))
+            if task and task.running:
+                raise WikiError("生成中不能删除会话，请等待任务结束")
+            if confirm != "yes":
+                return templates.TemplateResponse(request, "wiki_rewrite_confirm.html", {
+                    "slug": session["slug"], "session_id": session_id,
+                    "action": "delete", "count": 1,
+                })
+            delete_session(session_id)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{session['slug']}#rewrite", status_code=303)
+
+    @app.post("/wiki/rewrite/clear-history", response_class=HTMLResponse)
+    def wiki_rewrite_clear_history(
+        request: Request, slug: str = Form(...), confirm: str = Form(""),
+    ):
+        from secondbrain.wiki.rewrite import clear_history, history
+
+        try:
+            task = tasks.get(rewrite_kind(slug))
+            if task and task.running:
+                raise WikiError("生成中不能清空版本历史，请等待任务结束")
+            if confirm != "yes":
+                return templates.TemplateResponse(request, "wiki_rewrite_confirm.html", {
+                    "slug": slug, "action": "clear-history", "count": len(history(slug)),
+                })
+            clear_history(slug)
+        except WikiError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{slug}#rewrite", status_code=303)
+
+    @app.get("/wiki/sync", response_class=HTMLResponse)
+    def wiki_sync_preview(request: Request) -> HTMLResponse:
+        from secondbrain.wiki.sync import preview_sync
+
+        try:
+            plan = preview_sync()
+        except (ops.OpsError, WikiError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return templates.TemplateResponse(request, "wiki_sync.html", {
+            "plan": plan, "task": tasks.get("wiki-sync"), "hints": CostHints(_settings()),
+        })
+
+    @app.post("/wiki/sync", response_class=HTMLResponse)
+    async def wiki_sync_apply(request: Request):
+        from secondbrain.wiki.sync import apply_sync
+
+        form = await request.form()
+        token = str(form.get("token") or "")
+        if not token:
+            raise HTTPException(422, "请先预览知识变更")
+        if ops.is_running():
+            raise HTTPException(409, "有其他整理或运行任务，稍后重新预览并同步")
+        try:
+            tasks.start("wiki-sync", "同步材料与知识变更",
+                        lambda task: apply_sync(token, task.log))
+        except TaskRunning as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RedirectResponse("/wiki/sync", status_code=303)
+
     @app.get("/wiki/graph.json")
-    def wiki_graph_json() -> JSONResponse:
-        return JSONResponse(build_graph(_wiki(), datetime.now().date()))
+    def wiki_graph_json(drafts: bool = False) -> JSONResponse:
+        return JSONResponse(_graph_data(_wiki(), include_drafts=drafts))
 
     @app.get("/wiki/graph", response_class=HTMLResponse)
     def wiki_graph(request: Request) -> HTMLResponse:
         wiki = _wiki()
-        types = sorted({p.type for p in wiki.pages.values()})
+        include_drafts = request.query_params.get("drafts") == "1"
+        graph = _graph_data(wiki, include_drafts=include_drafts)
+        types = sorted({node["type"] for node in graph["nodes"]})
         return templates.TemplateResponse(
-            request, "wiki_graph.html", {"count": len(wiki.pages), "types": types}
+            request, "wiki_graph.html",
+            {"count": len(graph["nodes"]), "types": types, "include_drafts": include_drafts},
         )
+
+    @app.post("/wiki/relation")
+    def wiki_relation(
+        source: str = Form(...), target: str = Form(...), mode: str = Form(...),
+        reason: str = Form(""),
+    ) -> RedirectResponse:
+        from secondbrain.wiki.relations import set_relation
+
+        wiki = _wiki()
+        try:
+            result = set_relation(wiki, source, target, mode, reason)
+        except WikiError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return RedirectResponse(f"/wiki/page/{result['source']}", status_code=303)
+
+    @app.post("/wiki/reindex")
+    def wiki_reindex() -> RedirectResponse:
+        wiki = _wiki()
+        wiki.rebuild_index()
+        return RedirectResponse("/wiki/graph?reindexed=1", status_code=303)
 
     @app.post("/wiki/lint", response_class=HTMLResponse)
     def wiki_lint(request: Request) -> HTMLResponse:
@@ -1225,61 +2180,57 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         sections = report_sections(lint(_wiki()))
         return templates.TemplateResponse(request, "_lint.html", {"sections": sections})
 
-    @app.get("/wiki/page/{slug}", response_class=HTMLResponse)
+    @app.get("/wiki/page/{slug:path}", response_class=HTMLResponse)
     def wiki_page(request: Request, slug: str) -> HTMLResponse:
         wiki = _wiki()
-        page = wiki.pages.get(slug) or wiki.find(slug)
-        if page is None:
-            raise HTTPException(404, "页面不存在")
+        candidates = wiki.resolve(slug)
+        if len(candidates) > 1:
+            return templates.TemplateResponse(
+                request, "wiki_choices.html", {"name": slug, "candidates": candidates},
+                status_code=409,
+            )
+        if not candidates:
+            raise HTTPException(404, "页面不存在；可以返回知识网络按名称重新定位")
+        page = candidates[0]
+        connections = page_connections(wiki, page, include_drafts=not page.is_visible)
+        from secondbrain.wiki.relations import relation_controls
+        from secondbrain.wiki.rewrite import get_session, history, list_sessions
+
+        sessions = list_sessions(page.slug)
+        session_id = request.query_params.get("session")
+        session = None
+        try:
+            if session_id:
+                session = get_session(session_id)
+                if session["slug"] != page.slug:
+                    raise WikiError("会话不属于当前知识页")
+            elif sessions:
+                session = get_session(sessions[0]["id"])
+        except WikiError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        with _conn() as conn:
+            page_kind = _page_kind(page, conn)
+            source_links = _source_links(page, conn)
+
         return templates.TemplateResponse(
             request,
             "wiki_page.html",
             {
                 "page": page,
-                "body_html": render_markdown(page.body, wiki),
-                "due": due_date(page),
-                "grades": GRADES,
+                "body_html": render_markdown(migrate_machine_blocks(page.body), wiki, page),
+                "connections": connections,
+                "page_kind": page_kind, "source_links": source_links,
+                "rewrite_task": tasks.get(rewrite_kind(page.slug)),
+                "rewrite_session": session, "rewrite_sessions": sessions,
+                "revisions": history(page.slug),
+                "relation_controls": relation_controls(wiki, page),
             },
         )
 
-    @app.post("/wiki/review", response_class=HTMLResponse)
-    def wiki_review(
-        request: Request, slug: str = Form(...), grade: str = Form(...)
-    ) -> HTMLResponse:
-        if grade not in GRADES:
-            raise HTTPException(400, f"未知的复习结果：{grade}")
-        wiki = _wiki()
-        page = wiki.pages.get(slug)
-        if page is None or page.type != "concept":
-            raise HTTPException(404, "概念页不存在")
-        outcome = review(
-            wiki, page, grade, datetime.now().date(), _settings().wiki.mastered_interval_days
-        )
-        return templates.TemplateResponse(
-            request, "_review.html", {"outcome": outcome, "grades": GRADES, "page": page}
-        )
 
     return app
 
 
-_RAW_LINK_RE = re.compile(r"\]\((?:\.\./)+raw/(\d+)\.md\)")
-
-
-def render_markdown(text: str, wiki: Wiki) -> str:
-    """wiki Markdown → HTML：先转义 "<"（不渲染任何原始 HTML），[[slug]] 变为站内链接，
-    指向原文（raw/<id>.md）的链接变为条目详情页。"""
-
-    def link(match: re.Match) -> str:
-        target = slugify_safe(match.group(1))
-        page = wiki.pages.get(target)
-        if page is None:
-            return f'<span class="missing">{match.group(1).replace("<", "&lt;")}</span>'
-        return f"[{page.title}](/wiki/page/{page.slug})"
-
-    safe = text.replace("<", "&lt;")
-    safe = _RAW_LINK_RE.sub(r"](/item/\1)", safe)
-    safe = WIKILINK_RE.sub(link, safe)
-    return markdown.markdown(safe, extensions=["tables", "fenced_code", "sane_lists"])
 
 
 def _summary_points(summary: dict | None, url: str) -> dict[str, list[tuple[str, str | None]]]:

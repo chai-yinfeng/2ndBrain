@@ -84,7 +84,7 @@ def test_day_usage_and_pages_use_budget_minutes(conn):
     counts, minutes = db.day_usage(conn, DAY, frozenset({"must_read"}), set())
     assert (counts, minutes) == ({"must_read": 2}, 35)  # 15（速读）+ 20
 
-    html = TestClient(create_app()).get(f"/?date={DAY}").text
+    html = TestClient(create_app()).get(f"/recommendations?date={DAY}").text
     assert 'data-budget="35/105"' in html
     assert "速读约 15 分钟 · 全文约 90 分钟" in html
     assert "arxiv · 20 分钟" in html

@@ -644,3 +644,388 @@
 - 未带 key 时 S2 经常 429。此时如果先导入 DOI、再导入 arXiv（arXiv API 也没有 doi），无法按标识合并，只会提示"可能重复"。
 - html_index 依赖列表页的静态 HTML。
 - 一次全量测试中出现过 1 个未复现的失败（之后连续 16 次全绿），疑似与时间相关的测试偶发不稳定，没有定位到具体用例。
+
+## 架构调整 — 材料与个人知识网络优先（2026-11-16，仅文档）
+
+**已完成**
+- ADR 0021 记录新方向：主动导入、阅读整理、Obsidian 兼容 wiki 与个人知识网络为主线；订阅和每日推荐保留为辅助能力。
+- `docs/design.md` 区分目标架构与 M0–M12 现状，明确统一材料入口、阅读/处理/推荐状态分离、Markdown 事实来源及图谱浏览边界。
+- `docs/roadmap.md` 增加未完成的 M13–M15、端到端验收场景、Goal 执行边界与可复用任务正文；README 同步实际 M12 进度及计划。
+
+**范围与验证**
+- 只修改文档，不修改应用代码、个人数据或 OMP 审批配置，不启动 Goal。
+- 文档链接、milestone 状态与结构由本次静态检查验证；没有重跑应用测试或执行浏览器/Obsidian 验收。M13–M15 均未实施。
+
+**待讨论**
+- 图谱交互、材料页组织、关系语义的后续扩展，以及 Agent 检索、prompt 和思考强度等实现细节，未作为既定实现锁定。
+
+## M13 — 统一材料与独立知识整理（2026-11-16）
+
+**实现**
+- 在独立 worktree `2ndbrain-material-network` / 分支 `m13-m15-material-network` 实施；验收根目录 `/tmp/secondbrain-m13-m15.mrpmhR`，data/config/.env/LaunchAgents 均隔离。未改真实数据、个人配置或 launchd，未推送或创建 PR。
+- schema v10 保留材料 ID 与子表引用，移除强制 manual 信源，增加多来源、原件、完整性及独立阅读/处理状态。PDF、文本、URL、订阅、refetch/complete 共用材料持久化；身份冲突明确拒绝，不按标题强并。
+- CLI/Web 可独立导入、阅读、记笔记、整理入 wiki；稳定材料页和共享概念不依赖 L2、digest 或 gained。新概念为陌生/未复习，重复处理不覆盖个人内容。长文逐段整理，成功和失败用量按阶段记账，保守预估受费用上限约束。
+
+**实际验证**
+- 相关 15 个测试文件首轮 `190 passed, 3 failed, 1 deselected`；失败为旧页面身份/反馈契约及 textarea 行数断言。更新真实契约、删除布局断言后，三项定向回归 `3 passed`。旧库实测额外发现无信源反馈进入个性化时的 None 拼接错误，修复并新增流水线回归；该回归与 `tests/test_profile.py` 合计 `22 passed`。受影响 Python 文件 `uv run ruff check ...` 通过。
+- `m13_smoke.py` 在空信源/fake 环境用 CLI 独立导入本地 PDF、文本和真实博客 URL（Simon Willison 的 “Building Python tools with a one-shot prompt using uv run and Claude Projects”）：3 份材料、7 页 wiki；无 assessments/feedback/digest，仍全部未读，个人笔记经强制重整保留。
+- `check_legacy.py` 在真实旧库只读副本上实际完成 v8→v10：3 材料、3 反馈、3 wiki_ingests、12 个 Markdown 文件保留，原字段/ID 和引用不变，外键检查通过；材料及 wiki/source 路由均可打开。迁移副本另用受控订阅入口新增 1 条并经 fake 生成 1 条推荐，修复后的来源缺省路径正常。
+- WebKit 浏览器在 `127.0.0.1:8765` 实际导入文本、保存中文笔记、点击整理、进入材料知识页、打开来源/独立笔记和原 PDF；生成后仍为未读，刷新后处理状态为 processed。截图保存在本次运行的工具产物中。
+
+**边界**
+- 本阶段知识整理使用 fake，不声称真实模型质量通过；M13 要求的离线流程与旧库迁移已验证。跨端布局、公式和 Obsidian 验收属于 M14，尚未据此标记完成。两个验收脚本在临时目录运行，交付前清理。
+
+## M14 — 知识网络与主入口（2026-11-16，实现与 Web 验收完成；跨端验收未完成）
+
+**实现**
+- 首页、主导航调整为材料/网络/导入；推荐移到 `/recommendations`，所有历史日期/筛选调用方同步迁移，无旧 root 推荐兼容壳。CLI 增加 `wiki reindex / show / graph --focus --depth`。
+- 图谱、反向链接、lint、渲染共用中文、别名、相对路径和歧义解析；重复文件名使用 vault-relative `.md` ID，外部新增/删除/改链接可重建，代码中的 wikilink 不生成边。全局/局部图、逐步展开、名称定位、详情/来源/反链/返回图谱完整接通。
+- 安全 Markdown 白名单渲染，危险 URL/事件属性/原始 HTML 不执行。KaTeX 0.16.22（MIT，来源及哈希见 README）离线渲染公式，`trust:false`；无新增 Python 依赖。
+- Obsidian 实测发现独立笔记与材料页同名会错误跳转。改为 `notes/material-<id>-notes.md`，迁移旧文件并更新非代码引用；原字节和用户文字保留，Web/CLI 已验证迁移后笔记可读。
+
+**实际验证**
+- 首轮 `uv run pytest -q tests/test_network.py tests/test_graph.py tests/test_wiki_render.py tests/test_network_web.py tests/test_wiki.py tests/test_material_wiki.py tests/test_material_web.py tests/test_web.py tests/test_manual_run.py tests/test_summary.py tests/test_m10.py tests/test_budget.py tests/test_sources_catalog.py tests/test_feedback.py tests/test_ops.py tests/test_longform.py`：`192 passed, 4 failed`。修复旧 raw 链接语义映射及新/旧材料同标题时的旧 paper 关联；更新中文 ID/新首页契约。四个失败项与 renderer 定向复验 `37 passed`。笔记同名修复后的网络/Web/wiki 回归 `21 passed`；代码引用保护定向回归 `1 passed`，相关 `ruff check` 通过。
+- 受影响 Python 文件 `ruff check`、两个新增 JavaScript 文件 `node --check` 通过；后续图布局改动由实际浏览器解析与渲染证明。
+- 临时 vault 的 CLI `wiki reindex` 得到 14 页/12 条链接；`wiki graph --focus 跨端别名 --depth 1/2` 正确逐层包含节点，`wiki show 中文别名` 可读正文/出链/反链。
+- WebKit 实际完成全局图→别名定位→局部 5 节点→从注意力机制展开到 6 节点→正文/来源/反链→回图谱；共享验收概念连接本地论文 PDF 与真实博客 URL。验证重复标题两候选选择、孤立页 1 节点/0 边、筛选空状态、空 vault 引导。1280 桌面与 390 窄屏实际截图覆盖节点/边/长标题、表格/代码/两类公式，窄屏无横向溢出；修复孤立页切换后过度缩放/标签重叠。
+- 隔离 Obsidian 1.15.1 确实打开同一临时 vault，阅读模式截图显示中文/别名、MathJax 公式、表格与原样代码，发现了上述同名跳转缺陷。
+
+**未完成条件（M14 仍不标整体完成）**
+- 用户报告隔离 Obsidian 实例出现「找不到钥匙串」提示；立即停止实例，没有要求密码、创建/重置钥匙串或更改真实配置，不再使用临时 HOME 启动方式。
+- 修复后的 Obsidian 材料跳转重验、原文件、局部/全局图、原生编辑链接→Web 重索引一致性尚未完成。Web/CLI 的 Markdown 外部编辑、反链与链接删除已由回归覆盖，不能代替这部分原生交互验收。按 Goal 约定继续完成可达的 M15，不隐瞒缺口。
+
+## M15 — 论文名智能导入（2026-11-16）
+
+**实现**
+- 新增共享 `papers` 服务，CLI `sb paper add / choose` 与 Web `/add` 论文表单共用。完整标题或名称加作者/年份/会议可检索；明确候选自动导入，歧义只选择已保存候选。选择时不重跑查询、不信任客户端 URL；刷新可继续查看同一后台任务。
+- 复用 Semantic Scholar/Crossref/arXiv 与现有正文提取，补充 OpenAlex 和 USENIX 官方检索；搜索不调用 LLM。标题不能证明材料身份；已共享公共标识时允许作者缩写/连字符差异，来源原记录仍保留。
+- schema v11 保存不可变候选、各次导入结果、来源元数据及 LLM 错误/未知用量。所有正文仍走 M13 材料服务，摘要只作兜底，继续寻找其他已知全文地址；已知 arXiv 版本优先明确重放。CLI/材料详情页展示请求与实际版本和实际地址。
+
+**离线与迁移验证**
+- 首轮命令：`uv run pytest -q tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_materials.py tests/test_material_wiki.py tests/test_material_web.py tests/test_paper_import.py tests/test_ops.py tests/test_web.py tests/test_summary.py tests/test_network_web.py tests/test_manual_add.py tests/test_manual_fixes.py`，结果 `151 passed, 8 failed, 1 deselected`。失败来自测试把客户端类型替换成函数、无效 HTML fixture 和摘要必须不含标题的实现断言；修复 fixture/契约后定向 `9 passed`。
+- 真实多 provider 元数据的作者缩写导致原本明确的 DOI/arXiv 记录错误呈现歧义；修复仅在标识一致时的名字归一，并验证不同作者/年份/标识仍需选择，定向 `5 passed`。补充短名称+元数据、已选整理意图保留、明确版本优先与失败保留材料；相关定向 `3 passed`、`4 passed`，最终 `uv run pytest -q tests/test_paper_search.py` 得到 `40 passed`。
+- `ruff check` 对 M15 受影响 Python 文件通过。覆盖准确匹配、同名歧义、无结果、只有摘要、跨版本/已有材料、候选篡改、身份冲突、安全 URL、实际 wiki 链接、费用拒绝和未知用量错误，不把摘要冒充全文。
+- 最终代码在真实旧库的临时副本上完成 v10→v11：4 材料、3 反馈、2 assessments、1 digest、3 wiki_ingests 均保留，外键、7 个知识页及所有旧材料/页面路由和 Markdown 字节检查通过。原真实库仍只读使用，未执行重置。
+
+**真实网络 / 模型 / Web 验收**
+- `m15_live.py` 从完整论文名检索 Orca：USENIX 官方 `/conference/osdi22/presentation/yu` 找到 `https://www.usenix.org/system/files/osdi22-yu.pdf`，实际导入 19/19 页、90,213 字符及完整 PDF，材料 #1、未读、`full`。本次未能核实文件修订号，元数据版本为 published，实际修订号保留 unknown，不伪造。
+- `uv run sb paper add 'Efficient Memory Management for Large Language Model Serving with PagedAttention' --ingest` 实际解析 DOI `10.1145/3600006.3613165` / arXiv `2309.06180`，自动导入材料 #2。明确版本重放取得 `https://arxiv.org/html/2309.06180v1`，保存请求/实际版本 v1、76,477 字符、`full`；原地址和文件/HTML、提取文本保留。
+- `uv run sb paper add 'PagedAttention Kwon 2023'` 及已保存候选的 `sb paper choose` 实际命中同一材料。重复 CLI/Web 提交后仍只有 2 份材料、均未读，无 feedback/digest，外键完整。
+- 已有凭据只读取不回显；一次真实 `deepseek-flash` 整理 PagedAttention：预估预留 `$0.359218`，现有上限 `$0.5`，7 次 WIKI_MAP + 1 次 WIKI 成功、0 错误，应用按用量估算 `$0.013557558`（不是账单声明）。未放宽费用上限；生成材料页、共享概念/实体及网络，mastery 不自动提升。
+- WebKit 浏览器实际完成论文名提交→后台结果→重复材料 #1；又用带错误作者线索的查询得到候选，刷新后按真实 DOI/arXiv 选择正确候选→仍为材料 #2→未读/版本来源→真实机器整理正文→局部网络（6 节点/11 链接），完整页面与来源均可访问。全局网络 8 节点/13 链接，CLI 同样可查看来源和实际版本。
+- Semantic Scholar 曾真实返回 429，已作为 provider 错误持久记录；Crossref/arXiv/USENIX 等可达路径继续完成验收，没有用 fake 候选掩盖网络失败。知识整理同时有离线 fake 与上述一次真实模型证据。
+
+**剩余边界**
+- M15 验收通过；M14 的 Obsidian 剩余项目仍未完成，未因 M15 成功而勾选。关于钥匙串，未执行创建、重置或解锁命令；[Electron 官方说明](https://www.electronjs.org/docs/latest/api/safe-storage) macOS safeStorage 依赖 Keychain，Linux 明文后端选项不能保证解决 macOS 问题，因此没有用未确认的参数再次触发用户提示。
+
+## 阅读流程语义调整（2026-11-17，ADR 0022）
+
+**已实现**
+
+- 信源是长期关注的主页；先识别/预览，再确认关注，不自动把文章加入清单。参考目录折叠、可筛选/清除筛选；没有正式配置时默认零关注，首次保存不复制整份 example。既有正式文件按条目维护，保留其他内容和注释。
+- 通用添加接受博客/网站 URL、仅保存引用、PDF、文本和论文名，默认进入用户维护的稍后清单。来源预览中主动选择的文章保留信源出处，但仍是手动材料，不进入推荐流水线。
+- schema v12 拆出 `reading_list`；加入/移出不要求反馈。CLI `reading list/add/remove/read` 与 Web 共用登记服务；登记外部阅读后移出清单，保存学习笔记和讨论引用并整理知识。讨论不抓取；无正文时支持仅凭明确提交的学习笔记整理，完整性仍为 missing。
+- 相同输入复用知识整理，不新增模型调用，也不要求 API key；有改动或显式 force 才重做。费用预估/记录、错误与失败重试保留，失败不删除已读记录、材料或笔记。
+- 未读机器草稿与 recorded 正式知识分开，默认图/目录/复习/已知知识排除草稿；旧页面保留 legacy，不据此推断掌握度。页面与 CLI 支持 pin/block/reset 及原因，双向禁止约束在机器落盘和图/反链中执行，个人笔记保留。
+- 主导航按信源、阅读列表、知识库、设置与管理组织；旧分析和推荐是辅助入口。本次没有引入 shadcn/ui、React 或整体视觉重设计。
+
+**实际验证**
+
+- 全程在独立 worktree `2ndbrain-material-network`、临时根目录 `/tmp/secondbrain-reading.y3Cpac`；data/config/.env/LaunchAgents 隔离，没有修改真实数据、个人配置或 launchd，没有启动 Obsidian。
+- 离线分组覆盖新增 `test_reading_workflow.py`、`test_knowledge_governance.py`、`test_source_discovery.py`、`test_reading_semantics_web.py`，以及受影响的材料、配置、信源、CLI/Web 约定。分组运行中发现的旧约定用例已迁移，并单独通过；最后来源追溯端到端用例 + `tests/test_materials.py` 为 **17 passed**。相关 Python 文件的 Ruff 检查通过；本次未重跑全套测试，不把这些结果表述为全套通过。
+- 真实 Web 操作：从 `https://simonwillison.net/` 识别 RSS、确认关注、预览并选择 `Release: llm 0.37.3`；确认队列、材料原文及信源出处；保存示例外部学习笔记/讨论引用并登记。重复登记显示复用/无模型调用；新增只保存引用的网站材料停留在稍后清单，没有请求该网站。
+- 真实 DeepSeek：在该临时材料上 force 一次，保留原有 `$0.5` 应用限制，预估 `$0.0372`；一次 `deepseek-flash` WIKI 调用成功，按实际 usage 与配置价格估算 **$0.002735634**，错误为空、usage_known=1。新增 SQLite JSON functions 和依赖升级行为概念，更新材料页。仅是这份短材料的样本，不代表均价或服务商账单承诺。
+- 人工约束：网页禁止 material-1 ↔ llm 后，fake 和真实模型重新整理均未恢复该边，个人笔记保持；另用标为“验收示例”的理由固定 llm ↔ sqlite-json-functions，网页图观察到 **4 节点/4 链接**。390px 窄屏阅读列表实际观察，无水平溢出。
+- CLI 实跑主页识别预览，前后 `sources.yaml` 字节相同；`sources list` 只有明确关注的一项，`reading list` 仅剩未读引用。切到真实模型后端并移除该进程 API key，再执行 `reading read 1` 仍复用成功，数据库模型调用计数没有增加。
+- 旧 v11 验收副本再复制到临时 migration-data，注入 later/clear 历史以检查最新意图后实际升到 v12：4 材料、6 反馈、2 分析、1 digest、3 wiki_ingests 保持；仅最新 later 的 #4 入队，原阅读状态保持。12 个 Markdown 文件哈希一致，4 个材料详情和 7 个知识页均能打开，foreign_key_check 无错误。
+
+**可查看状态与限制**
+
+- 预览服务 `sb-reading-final-preview`：`http://127.0.0.1:8765/`，使用上述临时数据，默认 fake 后端，继续体验不会调用付费模型；其中已有一次真实模型的整理结果。示例笔记/人工关联明确是验收内容，不代表用户已确认的理解。
+- 真实网站主页发现实测 RSS；HTML 列表、sitemap、无订阅的手动主页、公网/重定向/体积边界由离线受控测试覆盖，不承诺任意动态或登录账号自动提取。私密 ChatGPT 对话未抓取。
+- M14 原生 Obsidian 跳转、资源、图谱与原生编辑联动的剩余验收仍未完成，不改勾选；本次新增的草稿/禁止关联规则也不声称原生 Obsidian 会执行。用户先查看业务结果，再讨论整体 UI 风格。
+- 本轮只本地提交，不 push、不创建 PR。
+
+## Web 视觉改版与图谱工作区（2026-11-17）
+
+**实现**
+
+- 按用户确认的布局采用左侧导航、紧凑列表和 shadcn/ui 风格的中性色、细边框、圆角及主次操作；统一材料/信源/设置/画像/历史/知识页面。移动导航支持抽屉、背景遮罩、Escape、焦点回归和焦点约束。
+- 亮色、暗色、跟随系统三态主题，默认跟随系统；浏览器本地持久化，跨页/刷新保持，并响应系统变化。图谱同步颜色，不修改个人 settings。
+- 阅读列表本页标题/来源搜索，次级操作收进菜单；添加材料四类 tab 分别保留本页草稿，隐藏字段禁用，文件选择在切换后保留。信源参考目录保持临时展开、筛选、清除与关闭。
+- 图谱使用画布＋节点 inspector，按类型着色、图例、标签省略/降噪、一跳高亮、别名搜索、来源跳转、全局/局部、逐步展开、缩放/适应/重置。验收发现力布局会把小图挤团，改为连接度对数分层；局部显式改变时排列当前子图，普通筛选/选择/主题不重排，返回全局恢复原位置。
+- 参考官方 [Archify](https://github.com/tt-a1i/archify) 与 [Graphify](https://github.com/Graphify-Labs/graphify) 的聚焦、详情和可解释探索，不照搬其语义边，不引入 React、依赖、CDN、MCP 或第二份图数据。
+
+**验证**
+
+- 独立 worktree、既有临时目录 `/tmp/secondbrain-reading.y3Cpac`；没有改真实数据、个人配置或 launchd，没有启动 Obsidian。
+- 相关 Web/材料/图谱/信源/论文/阅读语义分组：首轮 50 passed、2 个旧视觉断言失败；移除旧 ✗ 徽标及 table/tr 结构依赖，保留非法 id/HTTP 404 错误与数据库抓取状态验证；两例单独运行 **2 passed**。`ruff check tests/test_sources_web.py` 通过。未重跑全套。
+- WebKit 实际验证亮暗与跟随系统、刷新持久化、系统变化和手动选择优先；阅读列表搜索/清空、信源参考目录展开/筛选/清除、四类输入草稿切换。修复后小图含标签包围盒没有交叠；图谱一跳定位与展开、筛选空态、别名定位和知识页跳转通过。
+- 390px 窄屏实际遍历 add/sources/wiki/graph/item/materials/ops/profile/history/recommendations，页面宽度均为390、没有整页横向溢出；导航开关、inert 隔离、Escape 和焦点回归通过。
+- 另建独立 Markdown 验收 vault：84 页面、160 链接。真实服务渲染全局图并进入 4 节点局部范围，长中文标题、节点类型、别名和 inspector 可操作。此服务验收后已停止，样例未混入主预览知识库。
+- Chromium 验证文本材料和本地 PDF 实际新增、仅引用链接新增且不抓取正文，PDF 文件在类型切换后保留；已登记材料再次提交返回303、复用整理且个人笔记保持；drafts=1 在全局/重置后保持。实际浏览器没有应用脚本错误。
+- 主要页面最终目视检查发现导航模板的 `path` 变量遮蔽了信源配置路径，已将导航变量限定在局部作用域。新增真实配置位置的回归用例 **1 passed**，浏览器确认显示临时 `config/sources.yaml`，不是页面路由 `/sources`。
+- WebKit 截图在部分暗色切换/滚动时出现固定侧栏文字未重绘现象，已报告工具 QA；同一页面 Chromium 实际截图正常。不把截图工具现象当作原生 Obsidian 或全浏览器一致性验证。
+
+**交付与边界**
+
+- 预览继续使用 `http://127.0.0.1:8765/` 的隔离数据与 fake 后端；本轮新增的引用/文本/PDF 均为验收样例，既有真实模型知识页保留。密度验收服务8766已停止。
+- 本轮没有更改 CLI/业务接口、数据 schema、AI 费用上限或人工关系语义；M14 原生 Obsidian 未完成验收仍保留。本地提交，不 push、不创建 PR。
+
+## 修复 — 改版后的静态资源版本与缓存
+
+**用户现象与证据**
+
+- 用户在 `127.0.0.1:8765/ops#main-content` 截图中看到无固定侧栏、居中窄内容、旧深色背景及蓝色/胶囊按钮，与新版布局明显不同；这些特征与改版前 CSS 一致。直连同一端口的新浏览器能显示新版。
+- 已确认发布缺口：模板仍使用不带版本的 `/static/style.css` 等资源 URL，服务未设置 Cache-Control。这允许浏览器/代理沿用旧资源。用户浏览器缓存未能直接读取，因此“该端具体命中了哪一层缓存”仍是推断，不声称已直接检查；没有证据据此判定 React/HTMX 不兼容或端口映射错误。
+
+**修复**
+
+- 全部模板 CSS/JS（包括图谱、KaTeX）统一以 `static_asset` 生成带文件内容摘要的 URL；缓存摘要以 mtime/ctime/大小失效，文件变化自动换地址，不要求每次改样式手动改应用版本。
+- HTML 与任务片段 `no-store`，静态文件及304响应 `no-cache`，保留 ETag 条件请求。不清用户缓存、不改主题偏好、业务数据、个人配置或 launchd，不迁移 React、不增加依赖。
+- 已将原隔离预览替换为 `sb-reading-cache-preview`，仍使用 `/tmp/secondbrain-reading.y3Cpac` 的 data/config/empty.env/LaunchAgents 和 fake 后端，端口仍为8765。
+
+**验证与边界**
+
+- 新增3个回归：已缓存 CSS 内容变更后无需重启即生成新地址（覆盖大小/mtime保持不变）；未变文件条件请求304仍带缓存策略；HTML与任务状态不存储。与相关 Web/网络测试分组首轮31 passed，仅一个旧硬编码 script URL 断言失败；删除该实现/文案断言，保留推荐预算和本地 vendored 文件行为验证，原用例单独通过。相关 Python Ruff 检查通过，未跑全套。
+- 实际浏览器打开同一 `/ops`：样式 URL 为 `/static/style.css?v=11d0af502091a27d`，侧栏计算定位 fixed；知识页全部7项直接 CSS/JS 资源带版本并返回200/no-cache，图谱正常显示4节点/4链接，无应用脚本错误。
+- 给用户的重新进入地址为 `http://127.0.0.1:8765/ops?ui=asset-version#main-content`，query 仅用于绕过旧页面入口缓存。用户自身浏览器恢复情况仍需其查看，不能用本端截图替代用户端验收。仅本地提交，不 push、不创建 PR。
+
+## 开始个人试用前清理演示数据
+
+- 用户授权移除开发填充内容。停服前只读确认：只有已知5份演示材料、4个知识页、4条稍后记录、1个演示信源；笔记与验收文本一致、画像与模板一致，没有用户新增材料或知识页，也没有运行中的预览任务。
+- 停服后事务清空隔离库的演示记录及用量，移除演示 wiki/原件/笔记和当前根目录的密度、迁移验收副本；清空临时关注列表，保留默认画像、参考目录、配置模板及空 env。真实数据、个人正式配置、launchd 和源码测试 fixtures 未改。
+- 用户明确选择真实 DeepSeek。服务现在为 `sb-personal-preview`，仍在8765；只读解析已有个人密钥并仅注入该预览进程，配置/写 key 仍指向临时 empty.env，不把真实密钥写入仓库、临时文件或日志。现有费用限制不变；本轮未调用模型。
+- 浏览器实查：首页三项均为0，知识图谱空态、添加材料默认稍后、真实后端与 key 已设置状态正确，无脚本错误。未再导入任何验收样例；本轮没有代码变更，不重跑测试。用户材料的真实整理质量和本次模型连接留待其主动登记阅读检验。
+- 试用入口：`http://127.0.0.1:8765/add?workspace=clean`。导入文件默认不调用模型；登记阅读会把提取正文/学习记录交给 DeepSeek，可能产生费用。
+- **从此 `/tmp/secondbrain-reading.y3Cpac/data` 用于用户自己的试用内容，不能再当作纯开发样例清空。** 后续自动测试必须另建临时目录。该位置仍是临时试用存储，用户应保留重要原件；长期使用前需迁到持久化目录。
+
+## 来源统一识别、原位维护与内容领域补齐（ADR 0023）
+
+**完成内容**
+
+- 主页、配置预览与 CLI/Web 共用 FETCHERS；复用已关注和完整参考适配，失败时尝试匹配的不同参考适配但保留原身份，全部失败不降级书签或写配置。网络失败、空结果、手动浏览和拒绝分开。
+- 来源 name/ID 分离；按字段编辑、跨进程/线程锁、ID/实际外键/元数据原位迁移及文件/数据库失败补偿。修复不覆盖用户 tags/trust/role/启停/时间窗/主页和已有名称；检查期间采集配置被改则拒绝写旧结果。
+- sitemap index 与实际采集共用同源有界展开，保留公网/重定向/体积限制。参考目录隐藏/清空/恢复只影响候选显示，不删关注或适配规则。
+- 免费展示匹配目录标签与已有文章主题；显式 cheap 分类最多10条标题摘要，返回领域、内容性质、置信度和真实样本依据，独立缓存，不覆盖手动标签/材料/阅读状态。SOURCE 用量、错误、预算和未知价格保护；未在用户库自动调用分类模型。
+- 关注行桌面约64–65px，设置和统计不再单独占一块；空候选不渲染大框。补 CLI repair/edit/analyze/catalog，以及 Web 对应维护、任务状态和证据展示。schema v13 仅追加两张元数据表。
+
+**验证**
+
+- 所有样例和模型测试使用 `/tmp/secondbrain-sources.K79JAB`、fake与离线 fixtures；用户试用库不用于测试。核心首轮145 passed，旧 sitemap 夹具4例因新增公网DNS检查失败，补受控DNS后进入整合。
+- 整合分组188 passed、4例失败：一个fake样本缺少其已支持关键词，修正样例；旧目录文案/徽标断言删除；旧幂等用例保留新增0/重复3/记录不增长，删除已与 M13 材料补全路径不符的请求次数假设。本轮没有改 ingest.py。修正项连同新免费主题上下文及 CLI/Web 工作流共8 passed；相关 Python Ruff 通过。未重跑全套。
+- 网络只读检查现有9来源全部 ready；HF Papers 主页走 hf_papers API、DeepMind 主页走 RSS，各有50条候选。没有为已知站点另写抓取器，也未重复失败主页来证明用户报告。
+- 浏览器在独立副本验证显示名保存、显式fake领域分析及样本、目录清空/恢复仍保留9关注；390px设置展开无整页横向溢出。真实预览重启后只读核对9来源与65px紧凑行、参考标签、分类按钮，无脚本错误。实际模型分类质量尚未验证，不把fake结果当真实分类。
+
+**用户关注保留与交付**
+
+- 更新前确认用户任务未运行；当前仍为9关注、0材料。保存修复前配置副本至隔离验收目录后，仅逐项 apply 已验证修复。9项均 ready，本次实际只补缺失名称，没有重建来源或改采集规则。
+- 严格核对ID及顺序、tags/trust/role/enabled/backfill/max_age_days/homepage和既有名称保持；材料/来源记录/阅读列表/反馈/知识整理/评估/笔记与文件哈希、LLM调用记录前后完全一致。没有清理用户来源、材料或个人内容，也没有批量分类费用。
+- 当前服务 `sb-sources-personal-preview`：`http://127.0.0.1:8765/sources?update=unified`；仍为用户试用数据及真实DeepSeek进程环境，个人.env只读、临时配置隔离、上限不变。独立8767验收服务已停止。
+- 不启动Obsidian、不改launchd、不push或PR；M14原生验收缺口不变。今后该试用目录继续视为用户内容，不可自动清空。
+
+## 独立下载预算、栏目证据与 Qwen Research（ADR 0024）
+
+**实现与取舍**
+
+- 旧800000字节上限来自正文长度×4且最多1MB，已拆为 FetchSettings 独立单响应8MB/累计16MB（解压后），保留8请求/3跳/公网检查；正文窗口仍200000字符。诊断带阶段、去查询值的URL和预算；耗尽为 incomplete，不能当成已证实只能手动浏览。
+- sitemap 的HTML响应先明确拒绝，不再按XML报行列号。主页/声明RSS/同源已知RSS提供有限证据，综合RSS和同名分类分别展示，用户确认key后服务端重新发现验证；不自动扩大/缩小栏目。rss_categories 后续真实采集也过滤，scope_note 保存当时依据，现有homepage/身份和人工设置保持。
+- OpenAI Research 精选页包含 Product 等发布，而RSS也混合多个分类；同名Research过滤不等价。真实新流程2请求下载1,229,847字节，得到综合与Research两个候选：10个页面URL重合，其中分类Research命中2、另8个属于其他/无分类。页面候选链接还含导航，未核对数量不冒充可靠文章覆盖率。
+- Qwen新增公开GET适配：qwen_ai/en-US retrieval与旧research.research-list/en配置；旧60项按官方0.0.91前端53项白名单过滤，再合并新41项，本次94条，排序后预览50。真实2请求4,919,053字节；不执行脚本，不以旧站RSS冒充新列表。真实HTML文章导入走接口，legacy摘要明确区分；未知文章不回退采集SPA壳。
+
+**验证**
+
+- 全部样例在 `/tmp/secondbrain-ingress.1R2RDJ`，fake模型/离线夹具。核心分组233 passed，仅旧“请求预算耗尽=failed”断言失败，更新为 incomplete 与明确request_limit；该项及预算/范围/材料整合等40 passed。相关Ruff通过；未跑全套。
+- 浏览器在8768副本实际比较OpenAI宽/窄候选、确认Research过滤并核对保存字段；390px无整页横向溢出。Qwen从输入主页→确认关注→预览→首篇加入阅读列表成功，得到真实 `Qwen4-Max: Your New Teammate Has Arrived` 正文，不是导航页，无脚本错误、无模型调用。独立验收服务已停止。
+
+**用户预览保护**
+
+- 更新前确认无运行任务，用户现有13关注、0材料；没有自动关注OpenAI/Qwen，也没有替用户选择采集范围。
+- 只同步两个示例规则/预算模板，正式sources/settings、env、画像保持；数据库所有表和wiki文件哈希基线前后相同。未清理任何用户关注或资料，未触发模型费用。
+- 当前服务 `sb-scoped-personal-preview`，同一8765端口与用户试用目录，真实DeepSeek环境仍只在进程中读取密钥；页面只读核对13来源正常。M14原生验收缺口不变，无Obsidian/launchd/push/PR。
+
+## 来源显示排序与独立设置/预览窗口
+
+- 已关注默认最近导入（配置原顺序逆序），支持首字母排序；显示名称回退ID，使用浏览器中文collator，大小写/数字排序，本地保存选择。只改变视图，不写配置顺序或来源时间戳。
+- 点击来源名称与右侧设置均打开独立原生dialog，主页跳转只留在右侧。主页识别、关注与参考目录选文预览也进入可关闭窗口，支持Escape/遮罩、焦点回归、预览→设置切换，主体独立滚动；不再撑开整行。删除旧data-disclosure脚本和行内展开样式。
+- 预览导入反馈保留在窗口内，关闭不取消后台任务；迟到响应不重开弹窗。保持背景滚动位置，防止原生autofocus及导入状态回填造成列表位移。
+- 回答用户Meta Blog提示问题：html_index已解析10条不是失败；范围推断/未抓正文的成功提示改成中性色，手动入口与真正失败分开；关注不等于自动推送。
+- 隔离目录 `/tmp/secondbrain-dialogs.f1Ftli`：相关回归 **28 passed**、相关Ruff通过；未跑全套。浏览器实际验证排序发生改变、刷新/保存后的偏好保持、中文/数字名称、名称打开设置、保存、关闭/Escape/焦点回归、预览切设置、导入反馈和390px无横向溢出。受控延迟网络响应回归验证关闭后不重开；真实Meta列表10条成功提示为灰色，无应用脚本错误。
+- 修正后实测弹窗前后背景scrollY、列表位置与高度相同，关闭预览后也不回填长结果挤压列表。样例和实际选文仅写隔离测试库；用户预览当前25来源，读取新页面前后正式sources与数据库各表哈希一致。本轮没有业务Python、schema、模型/费用或个人配置变更，没有业务模型调用。
+- 原8765服务无需重启，版本化静态资源与HTML已更新。入口 `http://127.0.0.1:8765/sources?update=source-windows`；独立8769验收服务结束后停止。不push/PR、无launchd/Obsidian；M14原生缺口不变。
+
+## 主动输入优先、任务找回与信源视图（ADR 0025）
+
+**实现**
+
+- 清退临时参考目录的 Web/CLI 入口、隐藏/清空/恢复逻辑与目录选文后门。保留既有适配规则、历史表、全部已关注来源；不再为单个网站新增专用适配。现有 `qwen_research` 保留以保护已有配置，不承诺跟进接口变化，通用发现失败时由用户明确保存为手动入口。
+- 论文与链接/PDF/文本共用稍后、仅存档、外部已读及学习笔记/讨论引用。候选选择保存并带回这些输入，不自动决定论文版本；已有论文候选从业务库只读恢复，后续选择成功会把旧待选标为历史已选择。
+- `data/web_tasks.db` 保存任务、日志和结果；添加页提供紧凑任务入口，`/task-history` 分页列表与可返回的详情。等待选择、未找到、部分失败、失败、中断与成功明确区分；重启将 running 标中断，不重放网络或付费操作。日志默认折叠，完成反馈可关闭而记录仍保留；新表单校验失败不会带出上次完成结果。
+- 检查/修复采集配置集中在可关闭原生窗口：只读检查不保存，显式应用才修复已验证字段；关闭不取消后台工作，结果不回填挤压列表。来源支持列表/封面卡片，与排序分别保存浏览器偏好。名称/封面打开设置，主页仍在右侧。
+- 封面在设置中按需更新，页面只读本地缓存；优先分享图、其次站点图标、最后首字母，不使用模型或外部代理。共享公网逐跳预检查及有界 Reader，1MiB/响应、2MiB总计、6请求，拒SVG/HTML、类型欺骗和超大尺寸；主页超限仍在剩余预算内尝试favicon。现有DNS预检查不绑定连接IP，不声称抵御DNS rebinding。小图不强行拉伸成模糊封面。
+
+**验证**
+
+- 相关分组：`uv run pytest -q tests/test_paper_surfaces.py tests/test_ops.py tests/test_manual_add.py tests/test_manual_run.py tests/test_material_web.py tests/test_reading_semantics_web.py tests/test_source_visuals.py tests/test_source_workflow_web.py tests/test_sources_web.py tests/test_sources_catalog.py tests/test_html_index.py::test_configured_sglang_homepage_and_peek tests/test_source_discovery.py::test_known_adapter_precedes_homepage_guessing`，首轮 **84 passed、8 failed**。5例新增断言错误地将 `get_ai` 返回的时间/模型元数据当作业务差异，改为检查实际讨论引用；2例旧推荐测试补显式来源夹具并去掉旧文案/表格结构假设，以上 **7 passed**。删除另1例已失效的旧折叠标记/文案测试，不重钉实现。未跑全套。
+- 实际浏览器发现有数据库来源记录时封面路由对 `sqlite3.Row` 调 `.get` 导致500；修正并扩展现有HTTP回归覆盖已存来源，单项 **1 passed**。首次更新的隐藏懒加载图片不会发请求，修正为赋值前解除隐藏；真实浏览器再次走首次封面更新，DeepMind图片 **1200×630**、Simon站点图标 **16×16** 均实际加载。相关Python Ruff首轮4项问题修正后，针对修改文件检查通过。
+- 隔离副本 `/tmp/secondbrain-inputs.Cpv5Nt` 使用fake模型和8770端口，所有验收写入只发生在副本。从用户业务库只读备份恢复 KVM/ARM、Zap 两个待选任务，详情可重新选择身份/版本，均明确尚未导入；没有替用户选择。四种入口的三态与外部学习记录、候选保留、重启中断/恢复、部分失败和关闭保护由离线回归覆盖。
+- 浏览器实际提交一份隔离文本及学习记录，得到材料 #2、正式材料知识页，图谱可定位 **1节点/0边**；服务重启后任务结果和材料链接仍可打开，日志折叠。桌面25来源卡片与390px列表/卡片切换、设置和检查窗口关闭正常；窄屏页面宽390、弹窗宽374，未出现横向溢出，无应用脚本错误。CLI `sb sources --help` 实际启动，已无 catalog 命令。
+
+**部署与保护**
+
+- 重启前只读检查已知论文、导入、整理、运行及全部25关注的分析/修复任务均未运行。新版服务 **`sb-manual-input-personal-preview`** 继续8765与原用户试用目录；DeepSeek密钥仅从原.env只读注入进程，不复制/打印密钥，不改正式个人配置、真实数据或launchd。
+- 新版只读页面核对25关注与2个待选论文；重启前后业务库全部15表及既有14份配置/wiki文件哈希保持，仅新增任务记录库。未在用户库导入验收材料、选择候选、更新封面或触发模型费用。原.env和Obsidian均未修改/启动，M14原生验收仍未完成；本轮仅本地提交、不push/PR。
+
+## 权限恢复后的卡片预览、导航与导入修复
+
+- 暂停前仓库读取与三次博客导入同时出现 `EPERM / Operation not permitted`；后者没有日志或结果，不能定位到精确调用栈。用户完整退出 Ghostty 后仓库访问恢复。本轮没有用忽略权限错误、降级引用或自动重试掩盖故障；旧失败任务保持，不替用户重新提交。
+- 来源卡片的 `.row-main` / `.row-actions` 后代样式污染了条目内的预览窗口；现限定到来源摘要行的直接子元素。知识库两页的内部导航统一为“知识页面／关系图谱”，不再混入阅读列表或材料库。
+- 修正论文摘要回退：DOI 只给标题或较短摘要时，保留已选候选已有的较完整摘要，并在 provenance 标明 `abstract_source=selected_candidate`，仍标 metadata_only，不冒充全文。身份核对、继续寻找已知正文、材料去重和版本记录沿用原流程；增加两个离线回归覆盖无远端摘要与较短远端摘要。
+
+**验证与数据保护**
+
+- `uv run pytest -q tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_network_web.py tests/test_source_visuals.py tests/test_manual_add.py` 首轮 **91 passed、1 failed**；失败是已有首页空态文案断言，删除失效文案断言、保留无digest也能访问材料/网络的契约验证，该用例单独 **1 passed**。相关 Python Ruff 通过，未跑全套。
+- 独立 fake 环境实际浏览器：Simon RSS 长标题预览在卡片与列表模式文字区均730px；390px窗口的弹窗宽374、文字区314、主体无横向溢出。关闭/切换来源设置正常，无应用脚本错误。知识页面与图谱的两项导航文字及地址实际一致。
+- 从 Web 链接入口添加公开博客 `https://www.anthropic.com/research/components-of-agent-memory`，切页后通过任务详情找回结果，再在阅读列表看到该材料；正文 **21282字符、full、unread**，CLI `sb reading list` 也显示同一条目，**0次模型调用**。这证明权限恢复后的博客→材料→清单链路可用；不将旧失败的精确底层调用伪称已定位。
+- 用户的25来源、2份材料及业务库全部表、既有配置/wiki文件哈希保持。没有补写用户KVM正文、替用户选择Zap或触发模型调用。恢复8765服务为 `sb-recovered-personal-preview`，继续使用 `/tmp/secondbrain-reading.y3Cpac`；原.env仅只读提取必要key到进程，未打印/复制密钥、未改launchd或启动Obsidian。M14原生验收缺口不变。
+
+**交接内容归档与清理**
+
+- 删除暂停时写在 `.omp/agent/pending-2ndbrain.md` 与旧会话 `local/source-graph-current-block.md` 的两份交接记录，后续以本文件及仓库设计为准，不在工作目录外继续留独立状态文档。
+- 确认无进程占用后清理旧开发目录：`secondbrain-sources.K79JAB`、`secondbrain-ingress.1R2RDJ`、`secondbrain-dialogs.f1Ftli`、`secondbrain-inputs.Cpv5Nt`、`secondbrain-m13-m15.mrpmhR`；本轮 `secondbrain-resume.z2f7nxpr` 也已在验收服务/浏览器结束后清理。**`/tmp/secondbrain-reading.y3Cpac` 是个人试用数据，明确保留，不属于可删除的测试夹具。**
+- 保留讨论边界：KVM作者公开PDF `https://www.cs.columbia.edu/~nieh/pubs/asplos2014_kvmarm.pdf` 与Zap会议PDF `https://static.usenix.org/events/osdi02/tech/full_papers/osman/osman.pdf` 已在暂停前核对，但本轮未自动导入。不同DOI/出版载体候选的更清晰呈现、通用公开全文发现、封面自动刷新、CoSE布局与未知同义实体归并仍是讨论方案，本轮没有擅自实施。原图9节点15边分成4/5节点两组，度数3/4被现有对数同心布局放在同层，不能把空间均匀解释为没有实际链接；显式aliases已有，不承诺未知同义自动归并。
+- 本轮仅本地提交，不push或创建PR。
+
+## 持久个人工作区、专用采集清退与公开全文（ADR 0026）
+
+**数据迁移**
+
+- 用户表单明确选择 `~/Library/Application Support/SecondBrain`，随后确认暂用该位置，不与源码仓库绑定。确认无运行任务后停服，将临时工作区整体复制；**9份材料、6条阅读清单、25个关注**，原件、wiki、笔记、画像及任务记录一并迁移。原44文件摘要一致，两份SQLite integrity_check正常；库内未发现依赖旧临时根目录的绝对路径。
+- 完整迁移前副本集中保存在 `migration-backups/from-temp-20261118-041702`，已逐文件与原目录校验。正式sources仅把 `hf-daily-papers / qwen-research` 转成现有手动主页表示，保持ID、名称、主页、标签、trust/role、启停、时间窗等属性；其他23项逐字段相同。只同步新的sources示例规则，材料/任务数据库及wiki/笔记/原件不改写，不复制原项目.env密钥。
+- 恢复服务为 **`sb-persistent-personal-preview`**，继续8765，data/config/env/LaunchAgents均指向持久工作区；DeepSeek与S2必要凭据仍仅从原.env只读注入进程。来源页/阅读列表/历史HTTP200，25关注正常；实际原件HTTP链接与复制文件摘要一致（本次21460字节）。用量记录迁移前后均6条，没有新真实模型调用。
+- 完成切换后已删除旧 `/tmp/secondbrain-reading.y3Cpac`。恢复副本明确保留，不当测试垃圾清理；README记录启动覆盖变量和恢复配置注意事项。原项目data、.env、launchd与Obsidian均未修改/启动。
+
+**来源与全文**
+
+- 清除HF Papers/Qwen Research的生产枚举、FETCHERS注册、专用解析、提示词/筛选器引用及废弃夹具；原Qwen旧RSS继续按通用RSS使用。手动主页明确“不自动采集”，这些域名以后仍允许通用RSS/HTML/sitemap发现，不硬禁网站，也不保留旧enum运行别名。arXiv、YouTube保留。
+- DOI/arXiv/普通网页、订阅正文与论文候选复用公开获取流程，摘要后继续查明确开放地址及落地页citation PDF。PublicClient逐跳公网/DNS预检查、流式大小/总请求预算、失败地址记忆和跨站凭据隔离；不借登录态、不刷403、不绕验证码或付费墙。诊断URL及reason去查询值；实际正文/摘要的响应单独选择，后续失败不会覆盖实际来源或原件。
+- `acquisition`贯通ManualFetched、AddResult、论文结果和provenance，CLI、任务和材料来源详情显示完整度/实际地址/提取方式/版本与尝试原因。全文、部分、摘要、仅引用分开；未知版本不猜，出版商摘要HTML、登录/验证页不算全文。旧历史没有该字段时仍显示原有事实，不伪造补记录。
+
+**验证**
+
+- 分组命令：`uv run pytest -q tests/test_public_fulltext.py tests/test_paper_search.py tests/test_paper_surfaces.py tests/test_paper_import.py tests/test_manual_add.py tests/test_material_web.py tests/test_source_discovery.py tests/test_source_management.py tests/test_source_workflow_web.py tests/test_sources.py tests/test_sources_catalog.py tests/test_source_analysis.py tests/test_ingress_scope.py tests/test_dedupe.py tests/test_m10.py tests/test_ops.py`，首轮 **324 passed、6 failed**。修正arXiv显式版本在通用URL解析时丢失、API多条响应需按请求ID选择的问题，保留错误身份拒绝；夹具补明确v1地址。另3项旧UI类名/文案和密钥长度偶然撞上pytest目录名的断言移除，保留真实筛选、主页链接与密钥不回显契约。6个失败用例单独 **6 passed**；手动来源不发请求用例单独 **1 passed**。相关Ruff问题修正后通过；未跑全套。
+- 全部新分支使用 `/tmp/secondbrain-public.imVesw`、fake模型与受控HTTP夹具：浏览器从DOI元数据已有摘要→重定向落地页→标准citation PDF，取得full且实际来源为PDF；被拒绝的DOI回退摘要、403尝试可展开，来源仍是提供摘要的元数据响应，不是失败地址。论文名入口复用同一材料，材料来源详情一致。HF设置只显示五种有效获取方式，手动主页勾选。
+- 桌面与390px浏览器实查；发现结果里的长失败URL造成428px横向溢出，复用break-anywhere规则后页面宽恢复390，无应用脚本错误。CLI真实抓取公开Anthropic博客成功，打印full/html和真实内容地址；没有在用户工作区导入验收样例或重试其知乎/KVM/Zap记录。
+- 验收服务/浏览器结束后已清除本轮临时目录及脚本。知乎原记录只能证实HTTP403，不能推断必须Cookie；本轮未重试该被拒绝URL。未接通用搜索API、浏览器采集、OCR或视觉解析，不能承诺发现全部作者主页；M14原生Obsidian缺口不变。
+
+**独立worktree说明**
+
+- `2ndbrain-material-network` 是按最初“先建独立worktree”要求创建的隔离分支目录；Git分支创建记录为 `2026-11-16T03:50:10-05:00`。它与主目录共享Git历史，main尚未整合该分支。当前服务仍从该worktree运行代码，个人记录已与它分离；应先整合并切换服务入口，再用git worktree remove清理，不能直接删除或用旧main运行新数据。本轮不merge、不push、不创建PR。
+
+## 可恢复材料管理、手动知识同步与历史批量清理（ADR 0027）
+
+- 用户选择 `review_then_sync`：隐藏已读只整理列表；误导入材料可恢复回收，知识先保留，手动预览后同步。schema v14追加 `material_lifecycle`，仅回收/恢复真实变化增加revision；原阅读状态、来源、清单意图、原件和笔记保留。回收项从清单/自动处理排除，显式模型处理和重复导入要求先恢复，不物理删除。
+- 材料存档新增正文完整度、整理状态、可见范围筛选及批量全选、隐藏/取消隐藏、回收/恢复；隐藏全部已读和回收显示确认范围。已读绿色、阅读中蓝色、未读黄色/琥珀色，同时保留文字和圆点。CLI `items manage`、`items hide-read`复用同一服务。
+- `/wiki/sync` 与 `sb wiki sync [--apply token]`先只读预览；token覆盖材料、笔记、生命周期及知识文件，变化后必须重新预览。已读正文/笔记更新使用真实增量整理服务和既有批量预算，不自动登记未读。回收/恢复只管理机器页 `material_sync` 元数据：材料页withdrawn，共享概念有剩余来源review、无有效来源unsupported；正式目录/图谱/复习/模型上下文排除withdrawn及unsupported，review保留提示；高级视图保留所有页面。正文、个人笔记、掌握度与人工关系不删除，恢复可同步重新显示。
+- 默认索引不再重复显示recorded的“已登记”，内部仍只表示来源登记过阅读、不代表概念掌握。legacy/来源待复核等例外保留；语义召回没有冒充增强，相关页检索仍主要是名称/别名字面匹配，模型看到索引/候选后能判断关系，但不能保证未知同义或跨域关联都被找到。PDF仍建议补原材料，未增加OCR/视觉解析。
+- 历史页增加一次收起全部已结束记录的确认操作，跨分页处理，运行中和待选择保留；不删材料/原件/用量，已关闭记录仍能查看。同步页区分当前预览与最近一次任务结果，日志可折叠。
+
+**验证**
+
+- `uv run pytest -q tests/test_material_lifecycle.py tests/test_wiki_sync.py tests/test_material_management_web.py tests/test_materials.py tests/test_material_web.py tests/test_material_wiki.py tests/test_reading_workflow.py tests/test_reading_semantics_web.py tests/test_network.py tests/test_network_web.py tests/test_knowledge_governance.py tests/test_wiki.py tests/test_ops.py tests/test_paper_surfaces.py tests/test_feedback.py` 首轮 **187 passed、1 failed**。失败是旧迁移用例写死schema12，移除实现版本断言，保留跨版本清单意图、原材料/反馈/来源/个人内容保持的验证；该项单独 **1 passed**。相关Ruff修正后通过，未跑全套。
+- 新回归涵盖旧库默认active、批量原子性、回收/恢复清单和身份、回收项模型前拒绝、过期预览、多来源及恢复重试、个人内容保持。补充模型整理期间新增有效来源的场景：共享概念仍保留review，变化的生命周期不错误确认。
+- 所有操作使用 `/tmp/secondbrain-manage.vdxM3x`、fake后端。实际浏览器验证三种状态颜色（亮/暗）、全选和隐藏全部已读、取消隐藏、回收确认、恢复、正文筛选。回收后同步前图谱仍保留；同步后单个材料页撤下、共享概念review；全部来源回收后正式图0节点，高级图4节点保留withdrawn/unsupported；恢复后正式图4节点。回收/恢复全程知识正文及notes字节摘要保持，未增加模型调用。再显式保存新笔记，预览显示模型费用提示，确认后实际调用既有fake增量整理服务并更新页面；CLI隐藏/取消隐藏及只读预览、token应用通过。
+- 390px页面宽390、材料行宽356、标题区298，无横向溢出、无应用脚本错误。浏览器批量清理保留待选择任务；运行中保护及重启持久性由消费者回归覆盖（浏览器的受控运行任务在清理前已自然结束，不将它宣称为运行中保护证明）。
+
+**部署与额外阻断修复**
+
+- 部署检查发现用户一项信源检查：HTTP内存状态已done（只读预览、未改配置），磁盘状态却仍running；服务日志明确 `TypeError: Object of type SourceConfig is not JSON serializable`。根因是信源检查任务返回的discovery含富类型对象。Web任务边界现在只保存检查摘要，丢弃无需持久化的完整discovery，不使用default=str隐藏错误。新增跨重启完成记录及批量清理回归，与来源工作流/重启不重试合计 **7 passed**；Ruff通过。旧未确认完整保存记录保留日志，按重启恢复状态提示，不伪造丢失的预览结果、不自动重跑。
+- 按服务实际状态确认无执行中任务后停服，完整备份到 `~/Library/Application Support/SecondBrain/migration-backups/before-material-management-20261118-133940`：92文件摘要一致，两份SQLite完整性正常。业务库13→14仅新增生命周期表，所有旧表记录逐项一致，生命周期行0；所有知识正文、raw和notes字节保持，只重新生成派生index以去掉冗余标签。
+- 新服务 **`sb-managed-personal-preview`** 继续8765及既有持久工作区，必要key仍只读注入进程，不改原.env、launchd或启动Obsidian。材料/回收区/知识页/同步预览/历史/高级图谱均HTTP200；默认9份材料、清单6条、生命周期0行、用量15条，与升级前一致。本轮没有自动隐藏、回收、清理用户历史或调用真实模型。
+- 验收服务/浏览器关闭后，隔离目录、脚本和临时截图已清理；持久数据与明确命名的升级前备份保留。M14原生验收缺口保持，仅本地提交，不merge/push/PR。
+
+## PDF 书目身份、Zap 归并与课程论文（ADR 0028）
+
+**实现与验证**
+
+- PDF物理首页布局提取题名、作者和出版信息，跳过封面、机构、脚注及垃圾Info；HTML保留逐条citation作者，低质量标题可回退可见标题。arXiv API失败可读官方abs的标准citation元数据；不加单站规则或OCR。预印本年与出版年分开，明确出版年冲突不放松。论文名候选保留共同公共标识及原provider记录；实际下载与本地全文复用都校验书目并保存所选标识，不将未知文件版本改称出版版本。
+- schema v15追加旧ID映射与归并记录。`items merge 主ID 重复ID`先给检查点，应用保留原件、反馈、笔记和历史机器正文（含CRLF）；不同非空笔记或过期检查点拒绝。主材料pending并递增revision，旧ID链接跳转、修改请求409；同步不复活旧页。提交后重建派生索引，失败明确“归并已提交，请reindex”，不声称回滚。材料列表与详情显示论文/文档和书目依据，多作者摘要紧凑显示，完整名单仍在详情。
+- `uv run pytest -q tests/test_material_management_web.py tests/test_wiki_sync.py tests/test_material_lifecycle.py tests/test_m10.py` **69 passed**。书目/导入分组（`test_bibliographic_identity / test_paper_search / test_paper_surfaces / test_public_fulltext / test_paper_import / test_manual_add / test_materials / test_material_web`）首轮 **161 passed、1 failed**；失败为显式v3请求的旧夹具只有无版本HTML地址，补真实v3响应后该项 **1 passed**。随后标识绑定、出版/预印本日期、已有正文/版本保持与归并的定向 **7 passed**；OpenAlex明确arXiv地址提取 **2 passed**。相关Python Ruff问题逐项修正后通过，未跑全套。
+- 真实公开响应下载后在隔离库回放，初次40格为22待选择、6仅摘要、4冲突、8导入，不是20/20自动成功；保留初次与修复后的定向结果。修正PDF作者提取、所选ID未绑定、预印本/出版年混用、OpenAlex丢失明确arXiv标识等根因。无共同标识的真实姓名差异、错误作者或不同出版记录仍不自动合并。
+- 隔离个人副本实际CLI预览/应用8←10，Zap保留主ID8并从摘要补成90843字符全文、旧10保留，模型用量24条不变。实际浏览器1280/390验证书目、旧链接跳转与历史页提示；真实库上线后材料27项、清单8项可见，无应用脚本错误。TPU多作者行从桌面241px收敛到87px，窄屏页面宽390无横溢，详情仍保留Daniel Killebrew。
+
+**课程逐篇结果**
+
+用户声明前18篇已读，最后两篇稍后读。以下“标题入口”是缓存公开响应的双顺序回放及必要候选选择，不是20篇在线全provider可用性测量；未缓存响应显式失败，不据此推断公网不可得。S2/arXiv标题API/USENIX搜索没有完整缓存，Crossref/OpenAlex缓存为前5条，不能声称测到运行时前8条全量结果。KVM/Zap使用已存原件快照，不伪造本次HTTP200；原课程前4个HTTP地址的跳转可用性未测，使用已核实HTTPS地址。
+
+| 材料ID | 课程条目 | 标题入口的实际边界 |
+|---|---|---|
+| 11 | An Evaluation of the Ninth SOSP Submissions | 1983原文与1988再版待选择；候选正文未缓存。按可见原件人工补全书目，不套1988 DOI |
+| 12 | The Task of the Referee | 多候选/缓存摘要；人工核对原文姓名、1990版权与Crossref记录，明确补入DOI |
+| 2 | KVM/ARM | 多DOI；选择正确ASPLOS标识后同ID/全文，冲突候选不覆盖 |
+| 8 | Zap | 多DOI；选定身份可同ID/全文，不把不同DOI静默当同一出版记录 |
+| 13 | Borg | 本次候选仅摘要；原课程PDF403，另取官方作者档案全文；不宣称标题能发现所有作者主页 |
+| 14 | Twine | 无共同公共ID的真实作者姓名差异仍拒绝自动合并；主要PDF可导入 |
+| 15 | Google File System | 多出版候选，候选正文地址未缓存；主要PDF可导入 |
+| 16 | Bigtable | 多候选/缓存摘要，部分身份冲突；主要PDF可导入 |
+| 17 | Dynamo | 正确候选同ID/全文，绑定所选ID后不同DOI不能再次静默复用 |
+| 18 | Spanner | 多候选，候选正文未缓存；主要PDF可导入 |
+| 19 | Scaling Memcache | 候选仅摘要，所指正文未缓存；USENIX PDF可导入 |
+| 20 | TAO | 候选仅摘要/姓名差异；USENIX PDF可导入，不放宽无ID匹配 |
+| 21 | TPU | 原PDF比官方abs多列Daniel Killebrew，严格URL导入拒绝作者冲突；人工核对官方PDF响应/摘要与原件后选原PDF，保留两份作者记录 |
+| 22 | NVIDIA Volta | 自动同ID，默认30页使初次正文partial；本批次单独解析全部66页后为全文，不改个人配置 |
+| 23 | Megatron-LM | 修正OpenAlex丢失真实arXiv标识后，双顺序自动同ID/全文 |
+| 24 | ZeRO | 双顺序自动同ID/全文 |
+| 25 | Orca | 待候选选择；已下载USENIX原PDF，不冒称标题入口自动通过 |
+| 26 | PagedAttention | 双顺序自动同ID/全文 |
+| 27 | Speculative Decoding | 双顺序自动同ID/全文；保留2022预印本年与2023出版年 |
+| 28 | DiffKV | 课程项目404且题名/全部作者有误；独立官方arXiv候选选择后同ID/全文，使用正式题名和作者 |
+
+**真实工作区交付**
+
+- 本轮起始10条物理材料、24条用量，只有1项等待候选选择，无执行中任务。停服完整备份到 `migration-backups/before-paper-identity-20261118-181637`：98文件摘要一致，两份SQLite完整性正常。个人配置、原件和笔记旧文件共25份在归并与课程导入后摘要仍一致；不清理已有25个关注或旧任务记录。
+- 在隔离副本验证后应用真实Zap归并，再通过统一材料持久化入口导入课程20份全文：保留KVM主ID2、Zap主ID8，新增18份；18已读移出清单，Speculative Decoding#27和DiffKV#28未读加入清单，原6条稍后阅读保留。最终28条物理记录含1条历史映射，默认27份材料、8条清单，SQLite完整性正常，用量仍24条。
+- 两篇HTML书目和TPU原PDF是显式人工复核，不混入自动识别成功率。Volta66页超过默认30页，本批次按已知最大页数66解析（上界100），只改变该批运行参数。full表示提取未触发页数限制，不保证图片/公式/OCR理解；本轮不进行批量LLM整理。已读新材料及补全Zap仍可在 `/wiki/sync` 预览费用与变更后显式整理，不假称新知识图谱已全部生成。
+- 原件与文本位于持久wiki/resources，结果位于 `data/course-import-results.json`、`data/material-merge-result.json`。初次/定向矩阵、最终交付书目、人工核对与公开HTML/元数据响应集中归档到 `data/import-audits/course-20261118/`；其中临时stage路径仅为历史诊断，不是运行依赖。
+- 恢复服务 **`sb-bibliographic-personal-preview`**，继续8765与原持久工作区；必要key仅从原.env只读注入进程。CLI `sb reading list` 与实际浏览器均看到新增两篇及原6条，未触发付费调用。M14原生Obsidian缺口不变，不启动Obsidian，不改launchd，不push/PR。
+- 实际 `/wiki/sync` 只读预览列出17份需增量整理的已读材料，并显示费用提示；没有点击付费同步。独立8771验收服务、验收浏览器已关闭，课程临时目录、脚本及本轮截图已清理；持久资料、升级前备份与导入证据保留。仅本地提交，不merge/push/PR。
+
+## 可管理知识工作区与按需重整（ADR 0029）
+
+**交付**
+
+- 资料身份与知识展示分离：`classify_material`使用可信书目/来源判断论文、文章与网页、视频、其他资料，`Page.kind`允许人工覆盖；概念/实体保留。`wiki reindex`补旧机器资料页类别与确切机器块，不复制旧paper、不改路径。正常页面、来源和导入结果用标题，不显示材料数字；内部身份/归属标记保留。
+- 清退复习模块、CLI/routes、概念预算、掌握度画像提案及推荐/上下文作用，同步schema/prompt/fake/配置模板/消费者测试。旧个人画像原文及YAML未知字段保留，兴趣与优先级继续使用；相关知识不等于已掌握。
+- 管理覆盖阅读清单批量移出、现有材料回收恢复、任务单个/批量/全部真实删除、知识页搜索/分类/回收恢复及反链影响、明确删除信源。运行/待选任务保护，删除完成任务不删材料/用量，会话独立保留；持久删除标记防止重启从论文业务历史复活旧任务。知识回收页从图谱（含drafts）、上下文、批处理及同步排除，拒绝创建同身份替身；批量文件冲突明确已处理/未处理范围。
+- 持久单页会话支持生成/继续/切页与重启恢复/采用/版本回退；采用后仍可继续同会话。临时语境不改画像，只替换可确认AI整理区，人工正文/个人笔记/来源/人工关系保留；并发页面变化拒绝采用。会话可删除，版本可显式清空，生成中保护，用量账单独立保留。模型上下文取保存的original_text而非处理窗口，明确完整性/截断，临时语境可召回未连接但名称/别名命中的现有页。
+- 显式正文/PDF不请求原URL，仍走统一去重/补全。失败任务转补救表单，原链接预填；补充区自动展开，切到文件/文本仍保留原链接。没有Cookie、重刷403或知乎专用抓取。手动正文不再被错误描述成仅有引用/摘要。
+- 左导航、三主题与紧凑列表保留；知识列表窄屏使用复选框/正文/操作三列，不将按钮与复选框各占一整行。仅参考TasteSkill的层级/一致性方法，未安装全局skill、引入React或外部字体。图边仍来自Markdown，concentric仍按连接度布局；语义相似、关系边、社区布局分开讨论，本轮不加embedding。
+
+**回归与实际操作**
+
+- 知识管理/重整/资料/画像/流水线/Web相关32文件分组首轮 **393 passed、25 failed**。修正重整版本提取缺失的`_editable`、CLI残留复习预算变量；新测试改用隔离配置API。旧文案、裸wikilink、无版本静态资源等断言删除或改为真实连接/数据保持契约；旧纯“收起全部历史”用例由真实删除/运行与待选保护覆盖取代。回填测试不再依赖已移除掌握度排序，旧库夹具用当前库构造再还原v11，避免拿新写入口直接操作缺表旧库。失败路径定向 **22 passed、2 failed**，余下旧导航断言和未读概念草稿契约修正后 **2 passed**。未重跑整组或全套。
+- 浏览器发现安全Markdown把内部编辑边界显示为文字；只隐藏代码之外的已知自有标记，保留代码示例与HTML净化，渲染组 **34 passed**。相关Python Ruff问题逐项修正后通过；未以允许原始HTML的方式隐藏标记。
+- 临时根目录 `secondbrain-governance.w0patovh`：fake数据实际CLI完成start/continue/apply/history/restore/delete-session/clear-history/manage/kind/reindex，原有个人文字保留。浏览器1280px实查分类筛选、回收反链确认/恢复、会话切页恢复、继续与采用后再继续、回退、清单批量移出后材料仍可访问、删除全部任务后会话仍存在、删除信源后5份材料仍保留。
+- 受控403失败记录从任务详情进入补救，切文本模式原URL仍启用/保留，粘贴正文后实际得到新增材料及全文manual_text结果，无原站响应地址、不冒充网络下载；补救没有发起站点请求。这里只验证受控403恢复流程，不声称真实知乎403已解决或在线文章已抓取。
+- 首次390px列表测到405px横溢，原因是窄屏`.toolbar label`覆盖了屏幕阅读隐藏标签宽度；排除`.sr-only`后页面宽390。紧凑知识行约78px，知识详情/图谱也无横溢；三主题选择与localStorage/解析主题实际一致，无应用脚本错误。
+- 独立live-data页实际DeepSeek生成成功，记录估算费用 **$0.0024606**、用量已知；内容区分请求内KV cache与跨请求prefix caching及其边界。生成不改页面，采用后个人文字保留，再回退恢复旧解释。没有对个人知识页发起付费重整，密钥只读注入进程。
+
+**数据保护与部署**
+
+- 确认无执行中任务（保留原待选论文）后停个人服务，完整备份到 `migration-backups/before-knowledge-governance-20261118-232055`：188文件摘要一致，两份SQLite完整性正常。开发操作只写隔离目录，不清理真实阅读、任务、知识页或信源。
+- 旧个人库副本先验证分类迁移：页路径、人工关系/个人笔记段、63份旧配置/原件/笔记文件、画像原文和业务库全部表保持。正式仅执行无模型`wiki reindex`及同一迁移：15正式页、29条页面链接，所有业务表摘要与备份一致，29条物理材料、用量24条保持，未改个人配置/原件/笔记/画像或launchd。
+- 恢复服务 **`sb-knowledge-workspace-personal-preview`**，继续8765及原持久根目录；真实页面只读核对论文类别已有KVM/ARM与Zap，不再是空Papers。未自动运行批量同步/删除或付费重整；M14原生Obsidian缺口保持，不启动钥匙串提示实例。本轮仅本地提交，不merge/push/PR。
+- 部署后首页、论文知识目录、图谱、材料、阅读、添加、任务、信源、兴趣画像及运维页均HTTP200。两个隔离验收服务及浏览器已关闭；本轮手工建立的样本、脚本、个人库副本与临时根目录已删除，持久工作区和明确命名的升级前备份保留。
+
+## M13–M15 整合回主仓库
+
+- `main` 快进到 `1efb9c6`，保留材料网络分支的 17 个提交；后续从主仓库启动。个人持久工作区不迁移、不与两个 worktree 内的旧数据副本合并。
+- 主仓库用 fake 后端和临时数据验证：信源、阅读、书目身份、知识工作区、知识同步相关测试 83 项通过；启动 `sb serve` 后首页及 8 个核心入口均返回 HTTP 200。未启动个人预览、未调用真实模型。M14 原生 Obsidian 验收仍待完成。
+
+## M13–M15 发布回归（PR #19）
+
+- 保留 `html_index` 列表页结构化日期优先规则；使用不同正文的测试文章验证两条材料分别入库，正文指纹去重不变。
+- 短网页标题有 `og:title` 或 `<h1>` 印证时不再被带站点名称的 `<title>` 覆盖；仍允许从明显的通用标题回退到正文标题。
+- 将导入断言迁移到实际入库、身份、正文和 Web 材料链接；RSS 预览验证兜底主页与只读行为，不把预览当作正式采集。
+- 修正两个后台任务测试夹具：回调不再误把 `Event.wait()` 的布尔值当任务结果，测试结束前等待线程退出。
+- 全量离线测试 906 项通过，3 项 live 测试未运行；线程异常警告按错误处理，未触发。

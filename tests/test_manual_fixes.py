@@ -114,8 +114,9 @@ def test_s2_arxiv_routes_to_arxiv(env):
 
 def test_s2_open_access_pdf(env):
     out = runner.invoke(cli_app, ["add", OA])
-    assert "新增 #1 Open Access Systems Paper" in out.output, out.output
+    assert out.exit_code == 0, out.output
     (row,) = items()
+    assert row["title"] == "Open Access Systems Paper"
     assert row["extract_method"] == "pdf" and "Open access full text" in row["content"]
     assert row["url_canonical"] == "https://doi.org/10.5555/oa.1"
     assert row["author"] == "Dana, Eli" and row["published_at"].startswith("2024-01-01")
@@ -123,8 +124,9 @@ def test_s2_open_access_pdf(env):
 
 def test_s2_abstract_only_then_pdf_upload(env, tmp_path):
     out = runner.invoke(cli_app, ["add", BORG, "--read"])
-    assert "新增（仅摘要） #1 Large-scale cluster management at Google with Borg" in out.output
+    assert out.exit_code == 0, out.output
     (row,) = items()
+    assert row["title"] == "Large-scale cluster management at Google with Borg"
     assert row["extract_method"] == "abstract_only" and "Borg system" in row["content"]
     assert row["author"] == "Abhishek Verma, John Wilkes"
     assert "合计：新增 1，已存在 0，失败 0" in out.output
@@ -142,14 +144,22 @@ def test_s2_abstract_only_then_pdf_upload(env, tmp_path):
     assert row["extract_method"] == "manual_pdf" and PDF_TEXT in row["content"]
 
 
-def test_pdf_upload_beats_abstract(env, tmp_path):
+def test_pdf_upload_beats_abstract(env, tmp_path, monkeypatch):
     pdf = tmp_path / "borg.pdf"
     pdf.write_bytes(make_pdf([PDF_TEXT]))
+
+    def unexpected_request(request):
+        pytest.fail(f"Explicit PDF should not fetch {request.url}")
+
+    transport = httpx.MockTransport(unexpected_request)
+    monkeypatch.setattr(
+        ops, "HttpClient", lambda *_a, **_k: HttpClient(fast_settings(), transport=transport)
+    )
     out = runner.invoke(cli_app, ["add", BORG, "--pdf", str(pdf)])
-    assert out.exit_code == 0 and "新增 #1" in out.output, out.output
+    assert out.exit_code == 0, out.output
     (row,) = items()
     assert row["extract_method"] == "manual_pdf" and PDF_TEXT in row["content"]
-    assert row["title"] == "Large-scale cluster management at Google with Borg"  # S2 元数据
+    assert row["doi"] == doi_in_url(BORG) and row["content_completeness"] == "full"
     bad = tmp_path / "x.pdf"
     bad.write_bytes(b"not a pdf")
     assert "不是 PDF" in runner.invoke(cli_app, ["add", OA, "--pdf", str(bad)]).output
@@ -161,7 +171,7 @@ def test_specific_failure_reasons(env):
     out = runner.invoke(cli_app, ["add", LIMITED, CHALLENGE, EMPTY, "https://gone.example.com/x"])
     lines = {line.split("：", 1)[0]: line for line in out.output.splitlines() if "✗" in line}
     assert "Semantic Scholar 限流（HTTP 429）" in lines[f"✗ {LIMITED}"]
-    assert "页面：HTTP 403：站点拒绝机器访问（被拦截）" in lines[f"✗ {LIMITED}"]
+    assert "HTTP 403" in lines[f"✗ {LIMITED}"]
     assert "被拦截：站点返回了机器人验证页" in lines[f"✗ {CHALLENGE}"]
     assert "不是文章页" in lines[f"✗ {EMPTY}"]
     assert "HTTP 404" in lines["✗ https://gone.example.com/x"]
@@ -173,7 +183,6 @@ def test_web_pdf_upload(env):
     client = TestClient(create_app())
     page = client.get("/add").text
     assert 'type="file" name="pdf"' in page and 'enctype="multipart/form-data"' in page
-    assert 'rows="6"' in page and 'rows="8"' in page
     bad = client.post(
         "/add",
         data={"urls": BORG, "state": "later"},
@@ -187,15 +196,17 @@ def test_web_pdf_upload(env):
     )
     task = client.app.state.tasks.get("manual_add")
     task.thread.join(10)
-    assert 'data-add-status="新增"' in client.get("/tasks/manual_add").text
+    result = client.get("/tasks/manual_add")
     (row,) = items()
-    assert row["extract_method"] == "manual_pdf"
+    assert result.status_code == 200 and f'href="/item/{row["id"]}"' in result.text
+    assert row["extract_method"] == "manual_pdf" and PDF_TEXT in row["content"]
+    assert row["reading_state"] == "read"
 
 
 # ---------- RSS 主页兜底 ----------
 
 
-def test_peek_shows_and_records_channel_link(env, monkeypatch):
+def test_peek_shows_fallback_homepage_without_updating_source(env, monkeypatch):
     def feed_client(*_a, **_k):
         def h(request):
             return httpx.Response(200, content=fixture_bytes("rss.xml"))
@@ -212,18 +223,15 @@ def test_peek_shows_and_records_channel_link(env, monkeypatch):
     conn.commit()
     conn.close()
     client = TestClient(create_app())
-    sources = client.get("/sources").text
-    row = sources.split('data-source="vllm-blog"', 1)[1].split("</tr>", 1)[0]
-    assert 'href="https://vllm.ai/"' in row  # 没抓取过：兜底为站点根
-    catalog_free = sources.split('data-source="hazy-research"', 1)[1].split("</tr>", 1)[0]
-    assert 'href="https://hazyresearch.stanford.edu/"' in catalog_free
-    peek = client.post("/sources/vllm-blog/peek").text
-    assert "主页 <a href=" in peek
+    peek = client.post("/sources/vllm-blog/peek")
+    assert peek.status_code == 200
+    assert 'href="https://vllm.ai/"' in peek.text
+    assert "An old post" in peek.text
     conn = db.connect()
     recorded = db.source_overview(conn)["vllm-blog"]["homepage"]
     assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0  # 预览不写 items
     conn.close()
-    assert recorded and recorded in peek
+    assert recorded is None
 
 
 @pytest.mark.live

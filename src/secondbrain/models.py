@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SourceType = Literal["rss", "arxiv", "hf_papers", "youtube", "sitemap", "html_index"]
+SourceType = Literal[
+    "rss", "arxiv", "youtube", "sitemap", "html_index",
+]
 
 
 class SourceConfig(BaseModel):
@@ -18,6 +20,7 @@ class SourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
+    name: str | None = Field(default=None, max_length=200)
     type: SourceType
     url: str | None = None
     query: str | None = None
@@ -32,9 +35,16 @@ class SourceConfig(BaseModel):
     url_pattern: str | None = None  # sitemap / html_index：只保留匹配该正则的 URL（re.search）
     max_links: int | None = Field(default=None, ge=1)  # html_index：列表页最多取前 N 个链接
     use_lastmod: bool = False  # sitemap：URL 无日期时按 <lastmod> 选最新条目（页面日期优先）
+    rss_categories: list[str] = Field(default_factory=list)
+    scope_note: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _check_location(self) -> SourceConfig:
+        if self.name is not None:
+            self.name = self.name.strip() or None
+        self.rss_categories = [value.strip() for value in self.rss_categories if value.strip()]
+        if self.rss_categories and self.type != "rss":
+            raise ValueError("rss_categories 只用于 RSS 分类过滤")
         if self.type == "arxiv" and not self.query:
             raise ValueError("arxiv 信源需要 query")
         if self.type != "arxiv" and not self.url:
@@ -69,6 +79,8 @@ class FetchSettings(BaseModel):
     arxiv_max_results: int = Field(default=50, ge=1)
     min_feed_content_chars: int = Field(default=1500, ge=0)
     content_max_chars: int = Field(default=200_000, ge=1)
+    discovery_response_max_bytes: int = Field(default=8_000_000, ge=1)
+    discovery_total_max_bytes: int = Field(default=16_000_000, ge=1)
     pdf_max_pages: int = Field(default=30, ge=1)
     pdf_max_bytes: int = Field(default=20_000_000, ge=1)
     transcript_interval_seconds: float = Field(default=3.0, ge=0)  # 两次字幕请求的最小间隔
@@ -99,6 +111,8 @@ class RawEntry:
     doi: str | None = None  # 论文 DOI（arXiv API 的 arxiv:doi、S2、Crossref、citation_doi）
     # sitemap 条目：抓正文页时用页面元数据补全标题 / 作者 / 发布时间（ADR 0012）
     page_meta: bool = False
+    categories: list[str] = field(default_factory=list)
+    bibliography: dict = field(default_factory=dict)
 
 
 # ---------- M2：LLM 与过滤 / 分级设置 ----------
@@ -226,16 +240,11 @@ class BackfillSettings(BaseModel):
 class WikiSettings(BaseModel):
     """M6：知识 wiki（ADR 0010）。"""
 
-    ingest_max_chars: int = Field(default=12_000, ge=500)  # 正文短于该值才整篇送入；否则用 L2 要点
+    ingest_max_chars: int = Field(default=12_000, ge=500)  # 超过该长度逐段提要，覆盖全部可用正文
     index_max_chars: int = Field(default=8_000, ge=500)  # 送入 ingest 的 index.md 上限
     related_pages: int = Field(default=5, ge=0)  # 送入 ingest 的候选相关页面数
     related_page_chars: int = Field(default=2_000, ge=200)  # 每个相关页面的截断长度
-    known_max_chars: int = Field(default=2_000, ge=0)  # L1 "已知知识"段的上限（0 关闭）
-    review_minutes: int = Field(default=5, ge=1)  # 概念复习在时间预算中的估计耗时
-    review_slots: int = Field(default=1, ge=0)  # 每天最多放入温故栏的到期概念数
-    recent_days: int = Field(default=30, ge=1)  # 为到期概念找"近期相关条目"的时间窗
-    first_review_days: int = Field(default=3, ge=1)  # 新建概念页的首次复习间隔（ADR 0013）
-    mastered_interval_days: int = Field(default=30, ge=1)  # 复习时点"已扎实"后的最短间隔
+    related_max_chars: int = Field(default=2_000, ge=0)  # L1 wiki 内容参考上限（0 关闭）
 
 
 class SummarySettings(BaseModel):

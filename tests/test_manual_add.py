@@ -25,7 +25,7 @@ POST = "https://blog.example.com/post"
 OTHER = "https://blog.example.com/other"
 DOWN = "https://down.example.com/paywalled"
 LONG_HTML = (
-    "<html><head><title>A long arXiv paper</title></head><body><article>"
+    "<html><head><title>Speculative Decoding at Scale</title></head><body><article>"
     + "".join(
         f"<p>Section {n}: speculative decoding detail number {n} and KV cache.</p>"
         for n in range(60)
@@ -39,6 +39,7 @@ ROUTES = {
         200, content=fixture_bytes("arxiv_api.xml")
     ),
     "https://arxiv.org/html/2611.01234": httpx.Response(200, content=LONG_HTML),
+    "https://arxiv.org/html/2611.01234v3": httpx.Response(200, content=LONG_HTML),
 }
 
 
@@ -81,16 +82,16 @@ def test_validation():
         ops.validate_manual(["javascript:alert(1)"], "later", None, False, None)
     with pytest.raises(ops.OpsError, match="已读"):
         ops.validate_manual([POST], "later", "gained", False, None)
-    with pytest.raises(ops.OpsError, match="有收获"):
-        ops.validate_manual([POST], "read", "too_easy", True, None)
+    assert ops.validate_manual([POST], "read", "too_easy", True, None) == [POST]
+    assert ops.validate_manual([], None, None, True, "standalone text") == []
     with pytest.raises(ops.OpsError, match="单个"):
         ops.validate_manual([POST, OTHER], "read", None, False, "text")
     assert ops.validate_manual([POST, POST, " "], "read", None, False, None) == [POST]
 
 
-def test_cli_add_later_and_dedupe(env):
-    out = runner.invoke(cli_app, ["add", POST, OTHER, DOWN])  # 默认 --later
-    assert out.exit_code == 0, out.output
+def test_cli_add_unread_and_dedupe(env):
+    out = runner.invoke(cli_app, ["add", POST, OTHER, DOWN])  # 默认未读，不添加 later 反馈
+    assert out.exit_code == 1, out.output  # 单项失败仍导入其他材料，并返回非零
     assert "合计：新增 2，已存在 0，失败 1" in out.output
     assert (
         "✗ https://down.example.com/paywalled：HTTP 404：页面不存在。可粘贴正文或上传 PDF"
@@ -100,14 +101,14 @@ def test_cli_add_later_and_dedupe(env):
     rows = conn.execute("SELECT id, source_id, status, title, read_at FROM items").fetchall()
     later = [r["id"] for r in db.items_in_state(conn, "later")]
     conn.close()
-    assert {r["source_id"] for r in rows} == {"manual"} and {r["status"] for r in rows} == {
+    assert {r["source_id"] for r in rows} == {None} and {r["status"] for r in rows} == {
         "manual"
     }
     assert {r["title"] for r in rows} == {
         "Continuous batching in practice",
         "Hierarchical KV cache for distributed serving",
     }
-    assert sorted(later) == sorted(r["id"] for r in rows) and all(not r["read_at"] for r in rows)
+    assert later == [] and all(not r["read_at"] for r in rows)
 
     again = runner.invoke(cli_app, ["add", POST, "--read", "--feedback", "too_easy"])
     assert "已存在" in again.output and "合计：新增 0，已存在 1，失败 0" in again.output
@@ -201,10 +202,8 @@ def test_cli_ingest_gained(env):
 
 def test_web_add_page_and_task(env):
     client = TestClient(create_app())
-    page = client.get("/add").text
-    assert 'name="urls"' in page and 'value="read"' in page and 'name="ingest"' in page
     assert 'href="/add"' in client.get("/").text and 'href="/add"' in client.get("/later").text
-    bad = client.post("/add", data={"urls": POST, "state": "later", "feedback": "gained"}).text
+    bad = client.post("/add", data={"urls": POST, "state": "read", "feedback": "invalid"}).text
     assert "读后反馈只能在「已读」时选择" in bad
     client.post("/add", data={"urls": f"{POST}\n{DOWN}\n", "state": "read", "feedback": "gained"})
     task = client.app.state.tasks.get("manual_add")
@@ -212,16 +211,12 @@ def test_web_add_page_and_task(env):
     status = client.get("/tasks/manual_add").text
     assert 'data-add-status="新增"' in status and 'data-add-status="失败"' in status
     assert "Continuous batching in practice" in status
-    home = client.get("/").text
-    assert 'data-to-ingest="1"' in home  # 有收获的手动条目进入队列（没有 digest 时也显示）
     sources = client.get("/sources").text
     assert 'data-source="manual"' not in sources  # 虚拟信源不出现在信源页
     conn = db.connect()
-    assert conn.execute("SELECT type, enabled FROM sources WHERE id = 'manual'").fetchone()[:] == (
-        "manual",
-        0,
-    )
+    assert conn.execute("SELECT id FROM sources WHERE id = 'manual'").fetchone() is None
     item = conn.execute("SELECT id FROM items").fetchone()[0]
     conn.close()
     detail = client.get(f"/item/{item}").text
+    assert client.get(f"/wiki/page/material-{item}").status_code == 200
     assert f'hx-post="/summary/{item}"' in detail and f'hx-post="/prereq/{item}"' in detail

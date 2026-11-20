@@ -1,0 +1,41 @@
+<section class="paper-result" data-paper-status="{{ 'resolved' if result.resolved_by else result.status }}">
+<h2>{% if result.resolved_by %}历史候选（已选择）{% else %}{{ {"ambiguous":"请选择论文与版本", "not_found":"未找到论文", "imported":"已导入材料", "abstract_only":"已导入，仅摘要", "failed":"论文导入失败"}.get(result.status, result.status) }}{% endif %}</h2>
+{% if result.resolved_by %}<p>本次候选已处理；<a href="/task-history/{{ result.resolved_by }}">查看后续导入结果</a>。</p>{% else %}<p>{{ result.message }}</p>{% endif %}
+{% for error in result.errors %}<p class="refresh break-anywhere">{{ error }}</p>{% endfor %}
+{% with acquisition=result.acquisition %}{% include "_acquisition.html" %}{% endwith %}
+{% if result.ingest %}
+<p class="meta">wiki：新建 {{ result.ingest.get('created', []) | length }} 页、更新 {{ result.ingest.get('updated', []) | length }} 页；整理不代表已读或已掌握。</p>
+{% if result.ingest.get('failures') %}<p class="refresh">wiki 整理有 {{ result.ingest.failures }} 项失败，尚未完成；原因见任务日志。材料仍已保存。</p>{% endif %}
+{% for error in result.ingest.get('errors', []) %}<p class="refresh">wiki 整理失败：{{ error }}</p>{% endfor %}
+{% endif %}
+{% if result.material_id %}
+<p class="toolbar"><a class="fb primary" href="/item/{{ result.material_id }}">打开材料</a>
+ <a class="fb" href="/later">阅读列表</a> <a class="fb" href="/item/{{ result.material_id }}#register-read">登记阅读与学习记录</a>
+{% if paper_page %}
+ · <a href="/wiki/page/{{ paper_page.slug }}">{% if paper_page.knowledge_status == "draft" %}草稿{% else %}材料知识页{% endif %}</a>{% if paper_page.is_visible %} · <a href="/wiki/graph?focus={{ paper_page.slug|urlencode }}">局部知识网络</a>{% endif %}
+{% endif %}</p>
+{% endif %}
+{% if result.status == 'abstract_only' %}<p class="meta">未获得全文；摘要不会冒充完整正文。可在材料详情页补充 PDF 或文本。</p>{% endif %}
+{% for c in result.candidates if result.status == 'ambiguous' or (result.selected and c.id == result.selected.id) %}
+<article class="panel paper-candidate" data-candidate-id="{{ c.id }}">
+<h3>{{ c.title }}</h3>
+<p class="meta">{{ c.authors | join(', ') }} · {{ c.year or '年份未知' }} · {{ c.venue or '会议/期刊未知' }}</p>
+<p class="meta break-anywhere">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
+{% if c.abstract %}<details><summary>摘要</summary><p>{{ c.abstract }}</p></details>{% endif %}
+{% if result.status == 'ambiguous' and not result.resolved_by %}
+<form action="/papers/choose" method="post" class="add-form">
+<input type="hidden" name="search_id" value="{{ result.search_id }}">
+<input type="hidden" name="candidate_id" value="{{ c.id }}">
+{% with field_prefix="candidate-" ~ c.id,
+  intake_state=result.state_requested|default('read' if result.read_requested else 'later'),
+  learning_notes=result.learning_notes|default(''),
+  discussion_url=result.discussion_url|default('') %}
+{% include "_intake_state.html" %}
+{% endwith %}
+<button type="submit" class="fb primary">选择此论文与版本</button>
+</form>
+<p class="meta">CLI：sb paper choose {{ result.search_id }} {{ c.id }}</p>
+{% endif %}
+</article>
+{% endfor %}
+</section>

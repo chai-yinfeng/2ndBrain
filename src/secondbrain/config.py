@@ -199,8 +199,11 @@ def sources_path() -> tuple[Path, bool]:
 
 
 def load_sources(path: Path | None = None) -> list[SourceConfig]:
-    """读取并校验信源清单；id 必须唯一。"""
-    path = path or sources_path()[0]
+    """读取已关注信源；正式文件缺失时为空，显式传 example 路径才读取参考目录。"""
+    if path is None:
+        path = config_dir() / "sources.yaml"
+        if not path.is_file():
+            return []
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -240,6 +243,8 @@ _OMIT_DEFAULTS = ("backfill", "needs_scraper", "use_lastmod")
 
 def source_to_dict(source: SourceConfig) -> dict[str, Any]:
     data = source.model_dump(exclude_none=True)
+    if not data.get("rss_categories"):
+        data.pop("rss_categories", None)
     for key in _OMIT_DEFAULTS:
         if data.get(key) is False:
             del data[key]

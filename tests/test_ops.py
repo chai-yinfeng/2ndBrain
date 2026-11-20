@@ -146,14 +146,19 @@ def test_web_run_task(env):
 def test_running_task_fragment_polls(env):
     app = create_app()
     gate = threading.Event()
-    task = app.state.tasks.start("run", "立即运行（与 sb run 相同）", lambda t: gate.wait(5))
+
+    def blocked_run(_task):
+        gate.wait(5)
+
+    task = app.state.tasks.start("run", "立即运行（与 sb run 相同）", blocked_run)
     client = TestClient(app)
-    html = client.get("/tasks/run").text
-    assert 'hx-trigger="every 2s"' in html and "运行中" in html
-    again = client.post("/tasks/run")
-    assert "正在运行" in again.text
-    gate.set()
-    wait(task)
+    try:
+        html = client.get("/tasks/run").text
+        assert 'data-task-status="running"' in html and 'hx-trigger="every 2s"' in html
+        assert "正在运行" in client.post("/tasks/run").text
+    finally:
+        gate.set()
+        wait(task)
 
 
 def _gained_item(n: int, title: str) -> int:
@@ -194,20 +199,21 @@ def _seed_digest(item: int) -> None:
     conn.close()
 
 
-def test_home_ingest_button_runs_in_background(env):
+def test_registered_pending_materials_compile_in_background(env):
     item = _gained_item(1, "PagedAttention explained")
     _seed_digest(item)
     client = TestClient(create_app())
-    home = client.get("/").text
-    assert 'data-to-ingest="1"' in home and 'hx-post="/tasks/wiki_ingest"' in home
-    assert "每条约 1 分钟" in home  # 按钮旁的说明
+    page = client.get("/wiki").text
+    assert f'href="/item/{item}#register-read"' in page
     client.post("/tasks/wiki_ingest")
     wait(client.app.state.tasks.get("wiki_ingest"))
     status = client.get("/tasks/wiki_ingest").text
     assert 'data-task-status="done"' in status
-    assert '<a href="/wiki/page/pagedattention-explained">' in status
+    assert f'<a href="/wiki/page/material-{item}">' in status
     assert '<a href="/wiki/page/kv-cache">' in status and "估算费用" in status
-    assert 'data-to-ingest="0"' in client.get("/").text
+    conn = db.connect()
+    assert db.item_detail(conn, item)["processing_status"] == "processed"
+    conn.close()
 
 
 # ---------- /ops ----------
@@ -263,6 +269,6 @@ def test_wiki_lint_button(env):
     wiki.save_page(Page("a", new_meta("A", "concept", datetime.now().date()), "# A\n\n[[ghost]]"))
     client = TestClient(create_app())
     page = client.get("/wiki").text
-    assert 'hx-post="/wiki/lint"' in page and "不调用 LLM" in page
+    assert 'hx-post="/wiki/lint"' in page
     result = client.post("/wiki/lint").text
     assert "断链（指向不存在的页面）" in result and "[[a]] → ghost" in result

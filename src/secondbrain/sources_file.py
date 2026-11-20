@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from secondbrain import config
 from secondbrain.models import SourceConfig
@@ -97,6 +100,96 @@ def set_enabled(text: str, source_id: str, enabled: bool) -> str:
         field_indent = " " * (_indent(lines[start]) + 2)
         lines.insert(end, f"{field_indent}enabled: {value}")
     return "\n".join(lines) + "\n"
+
+
+def _yaml_value(value: Any) -> str:
+    # JSON flow values are YAML-compatible and keep multiline strings on one line.
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _value_comments(text: str, start: int, end: int) -> list[str]:
+    scalars = [
+        (token.start_mark.index, token.end_mark.index)
+        for token in yaml.scan(text)
+        if isinstance(token, yaml.ScalarToken)
+    ]
+    comments = []
+    offset = start
+    for line in text[start:end].splitlines(keepends=True):
+        for match in re.finditer("#", line):
+            position = offset + match.start()
+            if not any(left <= position < right for left, right in scalars):
+                comments.append(" " * _indent(line) + line[match.start():].rstrip("\r\n"))
+                break
+        offset += len(line)
+    return comments
+
+
+def update_entry(text: str, source_id: str, changes: dict) -> str:
+    """只更新指定字段；原位保留其他条目、字段顺序及不相关注释。"""
+    sources = config.parse_sources_text(text)
+    current = next((source for source in sources if source.id == source_id), None)
+    if current is None:
+        raise config.ConfigError(f"找不到信源：{source_id}")
+    try:
+        updated = SourceConfig.model_validate({**current.model_dump(), **changes})
+    except ValidationError as exc:
+        raise config.ConfigError(f"信源 {source_id} 不合法：{exc}") from exc
+    if any(source.id == updated.id and source.id != source_id for source in sources):
+        raise config.ConfigError(f"信源 id 已存在：{updated.id}")
+    if not changes:
+        return text
+
+    document = yaml.compose(text)
+    sequence = next(value for key, value in document.value if key.value == "sources")
+    entry = next(
+        node
+        for node in sequence.value
+        if any(key.value == "id" and value.value == source_id for key, value in node.value)
+    )
+    fields = {key.value: (key, value) for key, value in entry.value}
+    edits: list[tuple[int, int, str]] = []
+    missing: list[str] = []
+    for field in changes:
+        value = _yaml_value(getattr(updated, field))
+        if field not in fields:
+            missing.append(f"{field}: {value}")
+            continue
+        key_node, value_node = fields[field]
+        start = text.index(":", key_node.end_mark.index) + 1
+        end = value_node.end_mark.index
+        if value_node.tag == "tag:yaml.org,2002:null" and value_node.start_mark.index == end:
+            end = start
+        value = " " + value
+        block_value = (
+            isinstance(value_node, (yaml.SequenceNode, yaml.MappingNode))
+            and not value_node.flow_style
+        )
+        if block_value:
+            comments = _value_comments(text, start, end)
+            if comments:
+                value += "\n" + "\n".join(comments)
+            value += "\n" + " " * value_node.end_mark.column
+        elif isinstance(value_node, yaml.ScalarNode) and value_node.style in ("|", ">"):
+            value += "\n" + " " * value_node.end_mark.column
+        edits.append((start, end, value))
+    if missing:
+        if entry.flow_style:
+            end = entry.end_mark.index - 1
+            edits.append((end, end, ", " + ", ".join(missing)))
+        else:
+            id_value = fields["id"][1]
+            end = id_value.end_mark.index
+            newline = text.find("\n", end)
+            end = len(text) if newline < 0 else newline + 1
+            prefix = "\n" if end and text[end - 1] != "\n" else ""
+            indent = " " * entry.value[0][0].start_mark.column
+            body = "".join(f"{indent}{field}\n" for field in missing)
+            edits.append((end, end, prefix + body))
+    for start, end, value in sorted(edits, reverse=True):
+        text = text[:start] + value + text[end:]
+    config.parse_sources_text(text)
+    return text
 
 
 def write(text: str) -> list[SourceConfig]:

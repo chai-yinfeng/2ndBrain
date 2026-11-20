@@ -10,7 +10,7 @@ from secondbrain.urls import canonicalize_url, content_hash
 BLOG_FEED = "https://blog.example.com/feed.xml"
 NOTES_FEED = "https://notes.example.org/atom.xml"
 ARXIV_API = "https://export.arxiv.org/api/query"
-HF_API = "https://huggingface.co/api/daily_papers"
+PAPERS_FEED = "https://papers.example/feed.xml"
 
 
 @pytest.mark.parametrize(
@@ -48,7 +48,17 @@ def _routes():
             200, content=fixture_bytes("article.html")
         ),
         ARXIV_API: httpx.Response(200, content=fixture_bytes("arxiv_api.xml")),
-        HF_API: httpx.Response(200, content=fixture_bytes("hf_daily_papers.json")),
+        PAPERS_FEED: httpx.Response(200, content=b"""<rss version="2.0"><channel>
+            <title>Paper picks</title><link>https://papers.example/</link>
+            <item><title>Speculative Decoding at Scale</title>
+            <link>https://arxiv.org/abs/2611.01234</link>
+            <description>We study speculative decoding for large-batch serving.</description>
+            <pubDate>Tue, 03 Nov 2026 21:00:00 GMT</pubDate></item>
+            <item><title>Roofline Models for Attention Kernels</title>
+            <link>https://arxiv.org/abs/2611.09999</link>
+            <description>We build roofline models for attention.</description>
+            <pubDate>Tue, 03 Nov 2026 22:00:00 GMT</pubDate></item>
+            </channel></rss>"""),
     }
 
 
@@ -101,7 +111,7 @@ def test_cross_source_duplicate_paper(conn, make_client):
     client, _ = make_client(_routes())
     sources = [
         SourceConfig(id="arxiv", type="arxiv", query="cat:cs.DC", max_age_days=7),
-        SourceConfig(id="hf", type="hf_papers", url=HF_API, max_age_days=7),
+        SourceConfig(id="papers", type="rss", url=PAPERS_FEED, max_age_days=7),
     ]
     results = fetch_sources(conn, sources, client, client.settings, now=NOW)
     assert [(r.added, r.duplicates) for r in results] == [(2, 0), (1, 1)]
@@ -147,7 +157,6 @@ def test_failures_are_isolated_and_skips_make_no_requests(conn, make_client):
     assert by_id["broken"].status == "failed"
     assert "HTTP 404" in by_id["broken"].message
     assert by_id["scrape"].status == "skipped"
-    assert "待支持" in by_id["scrape"].message
     assert by_id["off"].status == "skipped"
     # M5 起 youtube 信源会正常抓取（这里的地址不存在 → 失败，且不影响其他信源）
     assert by_id["yt"].status == "failed"

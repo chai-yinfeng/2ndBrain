@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -19,19 +20,25 @@ from secondbrain.net import HttpClient
 from secondbrain.profile.loader import load_profile
 from secondbrain.wiki.store import open_wiki
 
-app = typer.Typer(help="Second Brain：知识过滤 + 分级推荐 + 知识 wiki。", no_args_is_help=True)
+app = typer.Typer(help="Second Brain：信源、稍后阅读列表与 AI 知识库。", no_args_is_help=True)
 sources_app = typer.Typer(help="信源管理。", no_args_is_help=True)
 items_app = typer.Typer(help="已采集条目。", no_args_is_help=True)
 digest_app = typer.Typer(help="每日分级推荐。", no_args_is_help=True)
 schedule_app = typer.Typer(help="macOS launchd 定时运行 sb run。", no_args_is_help=True)
 profile_app = typer.Typer(help="用户画像（profile.md）。", no_args_is_help=True)
 wiki_app = typer.Typer(help="知识 wiki（data/wiki，Obsidian 兼容）。", no_args_is_help=True)
+paper_app = typer.Typer(help="按论文名检索、消歧并导入材料。", no_args_is_help=True)
+reading_app = typer.Typer(help="自己维护的稍后清单与外部阅读登记。", no_args_is_help=True)
+rewrite_app = typer.Typer(help="按临时上下文调整知识页，显式采用并保留版本。", no_args_is_help=True)
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
 app.add_typer(digest_app, name="digest")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(profile_app, name="profile")
 app.add_typer(wiki_app, name="wiki")
+app.add_typer(paper_app, name="paper")
+app.add_typer(reading_app, name="reading")
+wiki_app.add_typer(rewrite_app, name="rewrite")
 
 OK, FAIL, WARN = "✓", "✗", "!"
 
@@ -39,6 +46,287 @@ OK, FAIL, WARN = "✓", "✗", "!"
 @app.callback()
 def main() -> None:
     """Second Brain 命令行工具。"""
+
+
+def _show_acquisition(acquisition: dict) -> None:
+    if not acquisition:
+        return
+    status = {
+        "full": "全文", "partial": "正文不完整", "abstract": "仅摘要", "missing": "未取得正文"
+    }.get(acquisition.get("status"), "未知")
+    typer.echo(
+        f"取得内容：{status} · 提取方式：{acquisition.get('method') or '无'}"
+        f" · 实际版本：{acquisition.get('version') or 'unknown'}"
+    )
+    typer.echo(f"实际内容来源：{acquisition.get('actual_url') or '无可核对的正文响应地址'}")
+    for attempt in acquisition.get("attempts") or []:
+        typer.echo(
+            f"  [{attempt.get('status', 'unknown')}] {attempt.get('url', '')}"
+            f" · {attempt.get('reason') or '未提供原因'}"
+        )
+
+
+def _paper_result(result: dict, ingest: bool, *, read: bool = False) -> None:
+    typer.echo(f"{result['status']}：{result['message']}")
+    _show_acquisition(result.get("acquisition") or {})
+    for error in result.get("errors", []):
+        typer.echo(f"! {error}", err=True)
+    for error in (result.get("ingest") or {}).get("errors", []):
+        typer.echo(f"wiki 整理失败：{error}", err=True)
+    candidates = (
+        result.get("candidates", []) if result["status"] == "ambiguous"
+        else [result["selected"]] if result.get("selected") else []
+    )
+    for candidate in candidates:
+        typer.echo(
+            f"{candidate['id']}  {candidate['title']}\n"
+            f"  {', '.join(candidate.get('authors', []))} · {candidate.get('year') or '?'}"
+            f" · {candidate.get('venue', '')} · {candidate.get('version', '')}\n"
+            f"  DOI={candidate.get('doi') or '-'} arXiv={candidate.get('arxiv_id') or '-'}"
+            f" · {candidate.get('provider', '')}"
+        )
+        if result["status"] == "ambiguous":
+            typer.echo(
+                f"  sb paper choose {result['search_id']} {candidate['id']}"
+                + (" --read" if read else " --ingest" if ingest else "")
+            )
+    if result.get("material_id"):
+        item_id = result["material_id"]
+        typer.echo(f"材料：/item/{item_id}")
+        page = open_wiki(config.wiki_dir(), config.raw_dir()).find(f"material-{item_id}")
+        if page:
+            label = "机器草稿" if page.knowledge_status == "draft" else "知识页"
+            typer.echo(f"{label}：/wiki/page/{page.slug}")
+            if page.knowledge_status != "draft":
+                typer.echo(f"局部网络：/wiki/graph?focus={page.slug}")
+    if (
+        result["status"] in {"failed", "not_found"}
+        or (result.get("ingest") or {}).get("failures")
+        or (result.get("ingest") or {}).get("errors")
+    ):
+        raise typer.Exit(code=1)
+
+
+@paper_app.command("add")
+def paper_add(
+    query: str = typer.Argument(..., help="论文标题或名称"),
+    ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
+    read: bool = typer.Option(False, "--read", help="已在外部读过，登记并整理知识"),
+) -> None:
+    """检索论文；身份不明确时只列出候选，不自动导入。"""
+    from secondbrain import ops, papers
+
+    try:
+        result = papers.import_by_name(query, typer.echo, ingest=ingest and not read)
+        if read and result.get("material_id"):
+            result["ingest"] = ops.register_read(result["material_id"], typer.echo)["ingest"]
+    except (ValueError, ops.OpsError) as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _paper_result(result, ingest, read=read)
+
+
+@paper_app.command("choose")
+def paper_choose(
+    search_id: str,
+    candidate_id: str,
+    ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
+    read: bool = typer.Option(False, "--read", help="已在外部读过，登记并整理知识"),
+) -> None:
+    """从已保存的检索结果中选择；不会重新搜索或接收候选 URL。"""
+    from secondbrain import ops, papers
+
+    try:
+        result = papers.choose_candidate(
+            search_id, candidate_id, typer.echo, ingest=ingest and not read
+        )
+        if read and result.get("material_id"):
+            result["ingest"] = ops.register_read(result["material_id"], typer.echo)["ingest"]
+    except (ValueError, ops.OpsError) as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _paper_result(result, ingest, read=read)
+
+
+@sources_app.command("follow")
+def source_follow(
+    url: str, apply: bool = typer.Option(False, "--apply", help="确认关注；默认只识别预览"),
+    source_id: str | None = typer.Option(None, "--id"),
+    name: str | None = typer.Option(None, "--name", help="来源显示名称"),
+    candidate: str | None = typer.Option(None, "--candidate", help="预览列出的候选范围 key"),
+    manual_only: bool = typer.Option(
+        False, "--manual-only", help="明确仅保存主页，不表示自动识别成功"
+    ),
+) -> None:
+    """输入普通主页，发现 RSS/HTML 列表；不可枚举时明确保存为手动浏览入口。"""
+    from secondbrain.net import FetchError
+    from secondbrain.source_discovery import discover_source, follow_source
+
+    settings = config.fetch_settings(config.load_settings())
+    try:
+        with HttpClient(settings) as client:
+            result = (
+                follow_source(url, client, settings, source_id=source_id, name=name,
+                              candidate_key=candidate, manual_only=manual_only)
+                if apply else discover_source(url, client, settings)
+            )
+    except (ValueError, FetchError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{result['title']} · {result['method']} · {result['homepage']}")
+    for warning in result["warnings"]:
+        typer.echo(f"! {warning}")
+    for entry in result["entries"]:
+        typer.echo(f"- {entry.title} · {entry.url}")
+    for choice in result.get("candidates", []):
+        typer.echo(
+            f"候选 {choice['key']} · {choice['source'].url} · "
+            f"分类：{', '.join(choice['source'].rss_categories) or '综合RSS'}"
+        )
+        typer.echo(choice["note"])
+    if result["source"] is None or result["status"] in ("failed", "rejected", "incomplete"):
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"已关注：{result['saved_id']}" if apply
+        else "仅预览；加 --apply 才保存，不自动加入阅读材料"
+    )
+
+
+@sources_app.command("edit")
+def source_edit(
+    source_id: str,
+    fields: Annotated[list[str] | None, typer.Option(
+        "--set", help='字段=值，可重复；列表/布尔值用 JSON，如 tags=["AI","systems"]',
+    )] = None,
+) -> None:
+    """原位编辑来源；改 ID 同步迁移历史引用，不删除材料。"""
+    from secondbrain.source_management import update_source
+
+    changes = {}
+    for field in fields or []:
+        key, separator, value = field.partition("=")
+        if not separator or not key.strip():
+            raise typer.BadParameter("--set 需要 字段=值")
+        try:
+            changes[key.strip()] = json.loads(value)
+        except json.JSONDecodeError:
+            changes[key.strip()] = value
+    if not changes:
+        raise typer.BadParameter("至少提供一个 --set 字段=值")
+    try:
+        source = update_source(source_id, changes)
+    except (ValueError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已更新：{source.name or source.id} · {source.id}")
+
+
+@sources_app.command("repair")
+def source_repair(
+    source_id: str | None = typer.Argument(None, help="省略则检查所有关注来源"),
+    apply: bool = typer.Option(False, "--apply", help="仅修复已验证的采集字段，保留关注与人工配置"),
+) -> None:
+    """复用已有适配重新识别；默认只预览，不调用模型。"""
+    from secondbrain.source_management import repair_source
+
+    ids = [source_id] if source_id else [s.id for s in _load_sources_or_exit()]
+    failed = False
+    for source in ids:
+        try:
+            result = repair_source(source, typer.echo, apply=apply)
+        except (ValueError, config.ConfigError) as exc:
+            typer.echo(f"{source}：{exc}")
+            failed = True
+            continue
+        typer.echo(
+            f"{source} · {result['status']} · "
+            f"{'已更新' if result['applied'] else '未改配置'} · "
+            f"字段：{', '.join(result['changes']) or '无需更改'}"
+        )
+        for warning in result["warnings"]:
+            typer.echo(f"! {warning}")
+        failed |= result["status"] in ("failed", "rejected", "incomplete")
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@sources_app.command("analyze")
+def source_analyze(
+    source_id: str, force: bool = typer.Option(False, "--force", help="不复用同输入的已有分类"),
+) -> None:
+    """显式分析来源领域和内容性质；可能调用 cheap 模型，不覆盖人工标签。"""
+    from secondbrain.source_analysis import analyze_source
+
+    try:
+        result = analyze_source(source_id, typer.echo, force=force)
+    except (LLMError, ValueError, config.ConfigError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    profile = result["profile"]
+    typer.echo(f"领域：{', '.join(profile['domains']) or '证据不足'}")
+    typer.echo(f"性质：{', '.join(profile['content_kinds']) or '证据不足'}")
+    typer.echo(profile["summary"])
+    typer.echo(f"{'复用' if result['cached'] else '新分析'} · 估算费用 ${result['cost']:.4f}")
+    for evidence in profile["evidence"]:
+        typer.echo(f"- {evidence['title']} · {evidence['url']}")
+
+
+@reading_app.command("list")
+def reading_list() -> None:
+    conn = db.connect()
+    try:
+        rows = db.reading_list_items(conn)
+        for row in rows:
+            typer.echo(f"#{row['id']} {row['title']} · {row['url'] or '本地材料'}")
+        if not rows:
+            typer.echo("阅读列表为空；信源发现不会自动加入。")
+    finally:
+        conn.close()
+
+
+@reading_app.command("add")
+def reading_add(item_id: int) -> None:
+    conn = db.connect()
+    try:
+        if not db.item_exists(conn, item_id):
+            raise typer.BadParameter("材料不存在")
+        db.add_to_reading_list(conn, item_id)
+        conn.commit()
+    finally:
+        conn.close()
+    typer.echo(f"#{item_id} 已加入阅读列表")
+
+
+@reading_app.command("remove")
+def reading_remove(item_id: int) -> None:
+    conn = db.connect()
+    try:
+        db.remove_from_reading_list(conn, item_id)
+        conn.commit()
+    finally:
+        conn.close()
+    typer.echo(f"#{item_id} 已移出清单，材料和知识保留")
+
+
+@reading_app.command("read")
+def reading_read(
+    item_id: int, notes_file: str | None = typer.Option(None, "--notes-file"),
+    discussion_url: str | None = typer.Option(None, "--discussion-url"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """登记外部已读；增量整理，正文和笔记未变时不重复付费。"""
+    from pathlib import Path
+
+    from secondbrain import ops
+
+    try:
+        notes = Path(notes_file).read_text(encoding="utf-8") if notes_file else None
+        result = ops.register_read(
+            item_id, typer.echo, notes=notes, discussion_url=discussion_url, force=force
+        )
+    except (OSError, ops.OpsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    message = "；复用已有整理，无新增模型调用" if result["cached"] else ""
+    typer.echo(f"#{item_id} 已登记阅读{message}")
+    if result["ingest"]["failures"]:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -124,17 +412,29 @@ def _truncate(text: str, width: int) -> str:
 @sources_app.command("list")
 def sources_list() -> None:
     """列出配置中的信源。"""
+    from secondbrain.source_analysis import source_contexts
+
     path, is_example = config.sources_path()
     sources = _load_sources_or_exit()
-    typer.echo(f"{len(sources)} 个信源（{'example' if is_example else '正式'}：{path.name}）")
+    label = "尚未建立关注列表，示例仅供参考" if is_example else f"正式：{path.name}"
+    typer.echo(f"{len(sources)} 个已关注信源（{label}）")
     width = max(len(s.id) for s in sources) if sources else 0
+    contexts = source_contexts() if sources else {}
     for s in sources:
-        status = ingest.skip_reason(s) or "启用"
+        status = "停用" if not s.enabled else "手动浏览主页" if s.needs_scraper else "启用"
         location = s.query if s.type == "arxiv" else s.url
         typer.echo(
-            f"{s.id.ljust(width)}  {s.type:<9}  {s.role:<9}  trust={s.trust}  "
+            f"{s.id.ljust(width)}  {'homepage' if s.needs_scraper else s.type:<9}  "
+            f"{s.role:<9}  trust={s.trust}  "
             f"{status:<20}  {_truncate(location or '', 70)}"
         )
+        if s.name or s.tags:
+            typer.echo(f"  {s.name or s.id} · 标签：{', '.join(s.tags) or '未设置'}")
+        hints = contexts.get(s.id, {})
+        if hints.get("existing_topics"):
+            typer.echo("  历史文章主题：" + "、".join(hints["existing_topics"]))
+        elif hints.get("catalog_tags"):
+            typer.echo("  已知规则标签：" + "、".join(hints["catalog_tags"]))
 
 
 @app.command()
@@ -202,6 +502,54 @@ def parse_since(value: str) -> timedelta:
     return timedelta(**{_SINCE_UNITS[m.group(2)]: int(m.group(1))})
 
 
+@items_app.command("manage")
+def items_manage(
+    action: str = typer.Argument(help="hide / unhide / trash / restore"),
+    item_ids: Annotated[list[int], typer.Argument(help="材料ID，可多个")] = ...,
+) -> None:
+    """批量隐藏、回收或恢复；原件与笔记保留，知识变更需单独同步。"""
+    from secondbrain import ops
+    from secondbrain.material_management import manage_materials
+
+    try:
+        result = manage_materials(item_ids, action=action)
+    except (ops.OpsError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已处理 {len(result['changed'])} 份，未变化 {len(result['unchanged'])} 份")
+
+
+@items_app.command("merge")
+def items_merge(
+    canonical_id: int = typer.Argument(help="保留的主材料ID"),
+    duplicate_id: int = typer.Argument(help="重复材料ID；旧ID保留为只读映射"),
+    apply: str | None = typer.Option(None, "--apply", help="应用预览返回的检查点token"),
+) -> None:
+    """凭身份依据预览归并；确认后保留主ID、原件、笔记和历史，不调用模型。"""
+    from secondbrain import material_identity, ops
+
+    try:
+        result = (
+            material_identity.apply_merge(canonical_id, duplicate_id, apply)
+            if apply else material_identity.preview_merge(canonical_id, duplicate_id)
+        )
+    except (ops.OpsError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if not apply:
+        typer.echo(
+            f"确认后执行：sb items merge {canonical_id} {duplicate_id} --apply {result['token']}"
+        )
+
+
+@items_app.command("hide-read")
+def items_hide_read() -> None:
+    """隐藏全部已读材料；不改变阅读事实或知识内容，可在已隐藏视图恢复。"""
+    from secondbrain.material_management import hide_read
+
+    result = hide_read()
+    typer.echo(f"已隐藏 {len(result['changed'])} 份已读材料")
+
+
 @items_app.command("incomplete")
 def items_incomplete() -> None:
     """列出"正文不完整"的条目：只有摘要，或手动添加的论文类正文短于 1500 字符（ADR 0020）。"""
@@ -247,6 +595,70 @@ def items_list(
         )
     if not rows:
         typer.echo("（没有条目）")
+
+
+@items_app.command("show")
+def item_show(item_id: int) -> None:
+    """阅读材料原文，不要求推荐或机器评估。"""
+    from secondbrain import ops
+
+    conn = db.connect()
+    try:
+        row = db.item_detail(conn, item_id)
+        if row is None:
+            raise typer.BadParameter(f"材料不存在：{item_id}")
+        typer.echo(f"# {row['title']}\n")
+        typer.echo(
+            f"阅读：{row['reading_state']} · 处理：{row['processing_status']}"
+            f" · 完整性：{row['content_completeness']}\n"
+        )
+        for origin in db.material_origins(conn, item_id):
+            typer.echo(f"来源：{origin['kind']} · {origin['locator']}")
+            metadata = json.loads(origin["metadata_json"])
+            if metadata:
+                typer.echo(
+                    f"  请求版本：{metadata.get('requested_version') or '未指定'}"
+                    f"；实际版本：{metadata.get('actual_version') or '未知'}"
+                    f"；实际地址：{metadata.get('actual_url') or '未获得正文'}"
+                )
+        typer.echo("\n" + (row["original_text"] or row["content"]))
+        notes = ops.material_notes(item_id)
+        if notes:
+            typer.echo("\n## 个人笔记\n\n" + notes)
+    finally:
+        conn.close()
+
+
+@items_app.command("read-state")
+def item_read_state(item_id: int, state: str) -> None:
+    """设置 unread / reading / read；不改变推荐或机器处理状态。"""
+    if state not in {"unread", "reading", "read"}:
+        raise typer.BadParameter("阅读状态必须为 unread / reading / read")
+    if state == "read":
+        reading_read(item_id, None, None, False)
+        return
+    conn = db.connect()
+    try:
+        if not db.item_exists(conn, item_id):
+            raise typer.BadParameter(f"材料不存在：{item_id}")
+        db.set_reading_state(conn, item_id, state)
+    finally:
+        conn.close()
+    typer.echo(f"#{item_id} 阅读状态：{state}")
+
+
+@items_app.command("notes")
+def item_notes(item_id: int, file: str | None = typer.Option(None, "--file")) -> None:
+    """查看个人笔记；--file 从文件保存笔记到 vault。"""
+    from pathlib import Path
+
+    from secondbrain import ops
+
+    try:
+        text = Path(file).read_text(encoding="utf-8") if file else None
+        typer.echo(ops.material_notes(item_id, text))
+    except (OSError, ops.OpsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 LANE_TITLES = {
@@ -339,7 +751,6 @@ def digest_show(
         l1 = db.latest_assessments(conn, "L1")
         l2 = db.latest_assessments(conn, "L2")
         backlog = [d for _, d in db.past_must_reads(conn, day)]
-        concept_rows = db.digest_concepts(conn, day)
     finally:
         conn.close()
     if not rows:
@@ -356,13 +767,6 @@ def digest_show(
         typer.echo(f"## {LANE_TITLES[lane]}（{len(entries)}）")
         if not entries:
             typer.echo("（空）")
-        if lane == "refresher":
-            for c in concept_rows:
-                mastery = c["mastery"] or "—"
-                typer.echo(f"* 概念复习：{c['title']}（掌握度 {mastery}）· {c['est_minutes']} 分钟")
-                typer.echo(f"   wiki：[[{c['slug']}]]；复习：sb wiki review {c['slug']} <结果>")
-                if c["related_title"]:
-                    typer.echo(f"   相关条目：{c['related_title']}  {c['related_url']}")
         for position, row in enumerate(entries, start=1):
             item = row["item_id"]
             for line in _lane_line(position, row, l1.get(item, {}), l2.get(item)):
@@ -377,7 +781,6 @@ def digest_show(
         typer.echo(f"- …… 另有 {len(fyi) - FYI_SHOWN} 条")
     typer.echo(f"\n归档 {len(by_lane.get('archived', []))} 条")
     used = sum(r["budget"] for r in rows if r["lane"] in TOP_LANES)
-    used += sum(c["est_minutes"] for c in concept_rows)
     typer.echo(
         f"总耗时 {used} / 预算 {fs.daily_budget_minutes} 分钟；此前未读的必读积压 {len(backlog)} 条"
     )
@@ -642,54 +1045,61 @@ def deep(
 
 @app.command()
 def add(
-    urls: Annotated[list[str], typer.Argument(help="一个或多个文章 URL")],
-    read: bool = typer.Option(
-        False, "--read/--later", help="已读（--read）或准备读（--later，默认）"
-    ),
+    urls: Annotated[list[str] | None, typer.Argument(help="文章 URL；本地 PDF/文本可省略")] = None,
+    read: bool = typer.Option(False, "--read/--later", help="登记已读并整理；默认加入稍后清单"),
+    title: str | None = typer.Option(None, "--title", help="本地材料标题"),
     feedback: str | None = typer.Option(
         None, "--feedback", help="读后反馈（仅 --read）：gained | too_easy | too_hard | worthless"
     ),
-    ingest: bool = typer.Option(
-        False, "--ingest", help="添加后编入 wiki（仅 --read --feedback gained）"
-    ),
-    text_file: str | None = typer.Option(
-        None, "--text-file", help="正文文件（单个 URL；付费墙 / 需登录页面抓取失败时的备选）"
-    ),
-    pdf_file: str | None = typer.Option(
-        None, "--pdf", help="PDF 文件（单个 URL；抓取失败或只有摘要时用它的文本，≤ 30MB）"
-    ),
+    ingest: bool = typer.Option(False, "--ingest", help="导入后整理入 wiki，不改变阅读状态"),
+    text_file: str | None = typer.Option(None, "--text-file", help="独立文本或单个 URL 的正文"),
+    pdf_file: str | None = typer.Option(None, "--pdf", help="独立 PDF 或单个 URL 的原文件，≤30MB"),
+    reference_only: bool = typer.Option(False, "--reference", help="仅保存网页引用，不抓取正文"),
+    notes_file: str | None = typer.Option(None, "--notes-file", help="已读材料的外部学习笔记"),
+    discussion_url: str | None = typer.Option(None, "--discussion-url"),
     refetch: bool = typer.Option(
         False, "--refetch", help="已存在的条目也重新抓取（仅在拿到更完整正文时替换）"
     ),
 ) -> None:
-    """手动添加文章：不进 L1 / L2 / 分级，只记录状态与反馈（ADR 0018）。"""
+    """导入 URL、本地 PDF 或文本到材料库；不要求信源、推荐或读后反馈。"""
     from pathlib import Path
 
     from secondbrain import ops
 
-    text = Path(text_file).read_text(encoding="utf-8") if text_file else None
-    pdf = Path(pdf_file).read_bytes() if pdf_file else None
+    try:
+        text = Path(text_file).read_text(encoding="utf-8") if text_file else None
+        pdf = Path(pdf_file).read_bytes() if pdf_file else None
+        learning_notes = Path(notes_file).read_text(encoding="utf-8") if notes_file else None
+    except OSError as exc:
+        raise typer.BadParameter(f"无法读取材料文件：{exc}") from exc
     try:
         out = ops.add_manual(
-            urls,
+            urls or [],
             typer.echo,
             state="read" if read else "later",
+            title=title,
             feedback=feedback,
             ingest=ingest,
             text=text,
             pdf=pdf,
             refetch=refetch,
+            reference_only=reference_only, learning_notes=learning_notes,
+            discussion_url=discussion_url,
         )
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
     results = out["results"]
+    for result in results:
+        _show_acquisition(result.get("acquisition") or {})
     counts = {
         k: sum(r["status"].startswith(k) for r in results) for k in ("新增", "已存在", "失败")
     }
     typer.echo("合计：" + "，".join(f"{k} {v}" for k, v in counts.items()))
     if out["ingest"]:
         typer.echo(f"编入 wiki 费用 ${out['ingest']['cost']:.4f}")
+    if counts["失败"] or (out["ingest"] and out["ingest"]["failures"]):
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -738,7 +1148,7 @@ def prereq(
     item_id: int = typer.Argument(..., help="条目 id"),
     force: bool = typer.Option(False, "--force", help="重新生成 AI 讲解"),
 ) -> None:
-    """补前置：列出该条目的前置知识；wiki 已有的给出页面与掌握度，没有的生成简短讲解。"""
+    """补前置：链接已有知识页，为缺少的知识点生成简短讲解。"""
     from secondbrain import ops
 
     try:
@@ -749,11 +1159,9 @@ def prereq(
     for e in report.entries:
         typer.echo(f"\n## {e.name}" + (f"（{_flat(e.why)}）" if e.why else ""))
         if e.page_slug:
-            typer.echo(
-                f"{OK} wiki 已有：[[{e.page_slug}]] {e.page_title}（掌握度 {e.mastery or '—'}）"
-            )
+            typer.echo(f"{OK} wiki 已有：[[{e.page_slug}]] {e.page_title}")
         elif e.explanation:
-            typer.echo(f"AI 讲解（AI 生成）：{_flat(e.explanation)}")
+            typer.echo(_flat(e.explanation))
         else:
             typer.echo(f"{WARN} 没有生成讲解")
         for x in e.explainers:
@@ -780,11 +1188,125 @@ def _open_wiki():
     return open_wiki(config.wiki_dir(), config.raw_dir())
 
 
+@wiki_app.command("sync")
+def wiki_sync(
+    apply: str | None = typer.Option(None, "--apply", help="确认应用预览token；省略则只读预览"),
+) -> None:
+    """预览并显式同步材料变更；回收/恢复不删除个人内容。"""
+    from secondbrain import ops
+    from secondbrain.wiki.store import WikiError
+    from secondbrain.wiki.sync import apply_sync, preview_sync
+
+    try:
+        if apply is not None:
+            result = apply_sync(apply, typer.echo)
+            typer.echo(
+                f"新建 {len(result['created'])} 页，更新 {len(result['updated'])} 页，"
+                f"撤下 {len(result['withdrawn'])} 页，待复核 {len(result['review'])} 页，"
+                f"恢复 {len(result['restored'])} 页；估算费用 ${result['cost']:.4f}"
+            )
+            for error in result["errors"]:
+                typer.echo(error, err=True)
+            if result["failures"]:
+                raise typer.Exit(code=1)
+            return
+        plan = preview_sync()
+        for change in plan["changes"]:
+            typer.echo(f"#{change['item_id']} {change['title']}：{change['reason']}")
+            for page in change["pages"]:
+                typer.echo(f"  {page['slug']} · {page['effect']}")
+        if not plan["changes"]:
+            typer.echo("没有待同步变更")
+        if any(change["needs_ingest"] for change in plan["changes"]):
+            typer.echo("确认后包含模型增量整理，仍受既有单次费用上限约束。")
+        typer.echo(f"预览token：{plan['token']}")
+        typer.echo(f"应用：sb wiki sync --apply {plan['token']}")
+    except (ops.OpsError, WikiError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@wiki_app.command("reindex")
+def wiki_reindex() -> None:
+    """从同一 vault 的 Markdown 重建目录；图谱与反向链接实时派生。"""
+    from secondbrain.wiki.classification import sync_material_kinds
+    from secondbrain.wiki.graph import build_graph
+
+    wiki = _open_wiki()
+    conn = db.connect()
+    try:
+        sync_material_kinds(wiki, conn)
+    finally:
+        conn.close()
+    wiki.rebuild_index()
+    graph = build_graph(wiki)
+    typer.echo(f"已重新索引：{len(graph['nodes'])} 页，{len(graph['edges'])} 条页面链接")
+
+
+@wiki_app.command("show")
+def wiki_show(name: str) -> None:
+    """打开知识页正文、关联与反向链接；同名时要求使用稳定 ID。"""
+    from secondbrain.wiki.graph import page_connections
+
+    wiki = _open_wiki()
+    candidates = wiki.resolve(name)
+    if len(candidates) != 1:
+        choices = "、".join(page.slug for page in candidates) or "无匹配页面"
+        raise typer.BadParameter(f"无法唯一定位 {name}：{choices}")
+    page = candidates[0]
+    typer.echo(page.body)
+    connections = page_connections(wiki, page)
+    for key, label in (("outgoing", "关联"), ("backlinks", "反向链接")):
+        typer.echo(f"\n{label}：" + "、".join(p.slug for p in connections[key]))
+    for key, label in (("missing", "缺失"), ("ambiguous", "歧义")):
+        if connections[key]:
+            typer.echo(f"{label}：" + "、".join(connections[key]))
+
+
+@wiki_app.command("graph")
+def wiki_graph(
+    focus: str | None = typer.Option(None, "--focus", help="以名称或稳定 ID 为中心"),
+    depth: int = typer.Option(1, "--depth", min=1, help="局部网络的直接邻居展开层数"),
+    drafts: bool = typer.Option(False, "--drafts", help="额外显示未登记阅读的机器草稿"),
+) -> None:
+    """列出全局或局部网络；普通连线仅表示 Markdown 页面链接。"""
+    from secondbrain.wiki.graph import build_graph
+
+    wiki = _open_wiki()
+    graph = build_graph(wiki, include_drafts=drafts)
+    selected = {node["id"] for node in graph["nodes"]}
+    if focus:
+        candidates = wiki.resolve(focus)
+        if len(candidates) != 1:
+            choices = "、".join(page.slug for page in candidates) or "无匹配页面"
+            raise typer.BadParameter(f"无法唯一定位 {focus}：{choices}")
+        if candidates[0].slug not in selected:
+            raise typer.BadParameter("这是机器草稿；先登记阅读，或显式加 --drafts 查看")
+        selected = {candidates[0].slug}
+        adjacent = {node["id"]: set() for node in graph["nodes"]}
+        for edge in graph["edges"]:
+            adjacent[edge["source"]].add(edge["target"])
+            adjacent[edge["target"]].add(edge["source"])
+        frontier = selected.copy()
+        for _ in range(depth):
+            frontier = {neighbor for node in frontier for neighbor in adjacent[node]} - selected
+            selected.update(frontier)
+            if not frontier:
+                break
+    for node in graph["nodes"]:
+        if node["id"] in selected:
+            typer.echo(f"{node['id']} · {node['label']} · {node['url']}")
+    for edge in graph["edges"]:
+        if edge["source"] in selected and edge["target"] in selected:
+            typer.echo(f"[[{edge['source']}]] — [[{edge['target']}]]")
+    if not selected:
+        typer.echo("知识网络为空；可先导入材料并整理入 wiki。")
+
+
 @wiki_app.command("ingest")
 def wiki_ingest(
     item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
     pending: bool = typer.Option(
-        False, "--pending", help='编入所有当前标为"有收获"但尚未编入的条目'
+        False, "--pending", help="整理已登记阅读且尚未完成整理的材料"
     ),
     force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
 ) -> None:
@@ -798,21 +1320,22 @@ def wiki_ingest(
     conn = db.connect()
     try:
         if pending:
-            ids = pending_items(conn)
+            ids = pending_items(conn, wiki)
         else:
             done = db.ingested_ids(conn)
-            if item_id in done and not force:
+            row = db.item_detail(conn, item_id)
+            if item_id in done and row["processing_status"] == "processed" and not force:
                 typer.echo(f"{WARN} #{item_id} 已编入 wiki（如需重新编入加 --force）")
                 return
             ids = [item_id]
         typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
         if not ids:
-            typer.echo('0 条待 ingest（没有标为"有收获"且尚未编入的条目）')
+            typer.echo("没有需要整理的已读材料")
             return
     finally:
         conn.close()
     try:
-        summary = ops.ingest_items(ids, typer.echo)
+        summary = ops.ingest_items(ids, typer.echo, force=force)
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -855,58 +1378,183 @@ def wiki_lint(
     typer.echo(f"\n共 {sum(len(lines) for _, lines in sections)} 项")
 
 
-@wiki_app.command("due")
-def wiki_due(
-    day: str | None = typer.Option(None, "--date", help="日期 YYYY-MM-DD，默认今天"),
+@wiki_app.command("relation")
+def wiki_relation(
+    source: str, target: str, mode: str,
+    reason: str = typer.Option("", "--reason", help="人工关联依据或禁止原因"),
 ) -> None:
-    """列出到期复习的概念。"""
-    from datetime import date as date_cls
-
-    from secondbrain.wiki.review import due_concepts, due_date
+    """pin / block / reset 人工关联；不调用模型，后续 AI 必须遵守。"""
+    from secondbrain.wiki.relations import set_relation
+    from secondbrain.wiki.store import WikiError
 
     try:
-        target = date_cls.fromisoformat(day) if day else datetime.now().date()
-    except ValueError as exc:
-        raise typer.BadParameter("日期格式应为 YYYY-MM-DD") from exc
-    wiki = _open_wiki()
-    due = due_concepts(wiki, target)
-    typer.echo(f"{target} 到期的概念：{len(due)} 个（共 {len(wiki.concepts())} 个概念页）")
-    for page in due:
-        typer.echo(
-            f"- [[{page.slug}]] {page.title}（掌握度 {page.meta.get('mastery') or '—'}；"
-            f"间隔 {page.meta.get('interval_days')} 天；到期 {due_date(page)}）"
-        )
-    if due:
-        typer.echo(
-            "复习后记录：sb wiki review <slug> remembered|fuzzy|forgot|needs_refresh|mastered"
-            "（或在 Web /wiki 点按钮）"
-        )
+        result = set_relation(_open_wiki(), source, target, mode, reason)
+    except WikiError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"{result['source']} ↔ {result['target']}：{result['mode']} · {result['reason']}")
 
 
-@wiki_app.command("review")
-def wiki_review(
-    slug: str = typer.Argument(..., help="概念页 slug"),
-    grade: str = typer.Argument(
-        ...,
-        help="remembered（还记得）| fuzzy（模糊）| forgot（忘了）"
-        "| needs_refresh（需要回炉）| mastered（已扎实）",
-    ),
-) -> None:
-    """记录一次概念复习，按 SM-2 简化版更新间隔、ease 与掌握度。"""
-    from secondbrain.wiki.review import GRADES, review
-
-    if grade not in GRADES:
-        raise typer.BadParameter("结果应为 " + " / ".join(GRADES))
-    _, fs, _ = _load_pipeline_settings()
-    wiki = _open_wiki()
-    page = wiki.find(slug)
-    if page is None or page.type != "concept":
-        typer.echo(f"{FAIL} 找不到概念页：{slug}", err=True)
+def _rewrite_output(result: dict) -> None:
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("status") in {"failed", "interrupted"}:
         raise typer.Exit(code=1)
-    out = review(wiki, page, grade, datetime.now().date(), fs.wiki.mastered_interval_days)
-    interval = f"间隔 {out.interval_before} → {out.interval_after} 天"
-    mastery = f"掌握度 {out.mastery_before} → {out.mastery_after}"
-    typer.echo(
-        f"{OK} [[{out.slug}]] {GRADES[grade]}：{interval}，ease {out.ease_after}，"
-        f"{mastery}，下次 {out.next_due}"
-    )
+
+
+@rewrite_app.command("start")
+def rewrite_start(
+    page: str = typer.Argument(help="页面名称或稳定路径"),
+    context: str = typer.Option(..., "--context", help="仅本轮使用的语境与调整要求"),
+) -> None:
+    """生成新草稿；不改画像、不写回原页面。"""
+    from secondbrain.wiki.rewrite import start_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = start_session(page, context, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("continue")
+def rewrite_continue(session: str, message: str) -> None:
+    """在同一会话继续调整草稿；仍不修改页面。"""
+    from secondbrain.wiki.rewrite import continue_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = continue_session(session, message, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("show")
+def rewrite_show(session: str) -> None:
+    """读取持久会话，不重放模型请求。"""
+    from secondbrain.wiki.rewrite import get_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = get_session(session)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("sessions")
+def rewrite_sessions(page: str) -> None:
+    """查找该知识页的会话。"""
+    from secondbrain.wiki.rewrite import list_sessions
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = list_sessions(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@rewrite_app.command("apply")
+def rewrite_apply(session: str) -> None:
+    """采用草稿，先核对页面未变化并保存旧版本。"""
+    from secondbrain.wiki.rewrite import apply_revision
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = apply_revision(session, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("history")
+def rewrite_history(page: str) -> None:
+    """查看此页可恢复的版本。"""
+    from secondbrain.wiki.rewrite import history
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = history(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@rewrite_app.command("restore")
+def rewrite_restore(page: str, revision: str) -> None:
+    """恢复一个历史版本；当前版本仍保留，不调用模型。"""
+    from secondbrain.wiki.rewrite import restore_revision
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = restore_revision(page, revision, echo=typer.echo)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("delete-session")
+def rewrite_delete_session(session: str) -> None:
+    """删除会话与草稿，不改已采用正文、版本或用量记录。"""
+    from secondbrain.wiki.rewrite import delete_session
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        result = delete_session(session)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@rewrite_app.command("clear-history")
+def rewrite_clear_history(page: str, yes: bool = typer.Option(False, "--yes")) -> None:
+    """显式清空回退点，不改当前页面或会话。"""
+    from secondbrain.wiki.rewrite import clear_history
+    from secondbrain.wiki.store import WikiError
+
+    if not yes:
+        raise typer.BadParameter("此操作移除旧版本回退点；确认后加 --yes，当前正文保留")
+    try:
+        result = clear_history(page)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _rewrite_output(result)
+
+
+@wiki_app.command("manage")
+def wiki_manage(
+    action: str = typer.Argument(help="trash / restore"),
+    pages: Annotated[list[str], typer.Argument(help="一个或多个知识页稳定路径")] = ...,
+    yes: bool = typer.Option(False, "--yes", help="确认回收；不删除正文或来源"),
+) -> None:
+    """回收前展示受影响反链；恢复不生成模型请求。"""
+    from secondbrain.wiki.management import manage_pages, removal_impact
+    from secondbrain.wiki.store import WikiError
+
+    wiki = _open_wiki()
+    try:
+        if action == "trash" and not yes:
+            for impact in removal_impact(wiki, pages):
+                typer.echo(f"{impact['page'].title}：{len(impact['backlinks'])} 个引用页面")
+                for source in impact["backlinks"]:
+                    typer.echo(f"  {source.title}")
+            typer.echo("确认回收后加 --yes；正文、个人笔记与原材料保留。")
+            return
+        changed = manage_pages(wiki, pages, action)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"已{'回收' if action == 'trash' else '恢复'} {len(changed)} 个知识页")
+
+
+@wiki_app.command("kind")
+def wiki_kind(page: str, kind: str) -> None:
+    """手动归类：concept / entity / paper / article / video / other。"""
+    from secondbrain.wiki.management import set_kind
+    from secondbrain.wiki.store import WikiError
+
+    try:
+        set_kind(_open_wiki(), page, kind)
+    except (WikiError, ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo("知识页类别已更新；正文和链接保持不变")

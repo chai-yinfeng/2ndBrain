@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ task.title }} · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><p class="eyebrow">后台任务</p><h1>{{ task.title }}</h1><p class="meta">进度、结果和待选候选会保留。切页或重启后仍可查看；中断任务不会自动重试。</p></div>
+  <div class="page-actions"><a class="fb" href="/add">添加另一份材料</a><a class="fb" href="/task-history">全部任务记录</a></div>
+</header>
+<section class="panel">
+{% include "_task.html" %}
+</section>
+<script src="{{ static_asset('intake.js') }}" defer></script>
+{% endblock %}

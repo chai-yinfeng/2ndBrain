@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlencode, urlsplit
 
-FORMS = {"paper": "论文", "blog": "博客", "video": "视频"}
+FORMS = {"paper": "论文", "blog": "博客", "video": "视频", "document": "文档"}
 CTYPES = {
     "frontier": "前沿",
     "explainer": "讲解",
@@ -12,24 +13,41 @@ CTYPES = {
     "tutorial": "教程",
     "opinion": "观点",
 }
-PAPER_SOURCES = {"arxiv", "hf_papers"}
-PAPER_METHODS = {"arxiv_html", "pdf"}
+PAPER_SOURCES = {"arxiv"}
+PAPER_METHODS = {"arxiv_html"}
 
 
-def item_form(source_type: str | None, url: str | None, extract_method: str | None) -> str:
-    """条目的形式：paper / video / blog。只看信源类型、URL 与正文提取方式，不调用 LLM。"""
+def item_form(
+    source_type: str | None,
+    url: str | None,
+    extract_method: str | None,
+    *,
+    doi: str | None = None,
+    arxiv_id: str | None = None,
+    bibliography: dict | None = None,
+) -> str:
+    """书目证据与文件格式分开；未知 PDF 是文档，不凭扩展名编造论文身份。"""
     parts = urlsplit(url or "")
     host, path = parts.netloc.lower(), parts.path.lower()
     if (
-        source_type in PAPER_SOURCES
+        doi
+        or arxiv_id
+        or (
+            bibliography
+            and bibliography.get("kind") == "paper"
+            and bibliography.get("verified") is True
+        )
+        or (host in {"doi.org", "dx.doi.org"} and re.match(r"/10\.\d{4,9}/", path))
+        or source_type in PAPER_SOURCES
         or host == "arxiv.org"
         or host.endswith(".arxiv.org")
-        or path.endswith(".pdf")
         or extract_method in PAPER_METHODS
     ):
         return "paper"
     if source_type == "youtube" or host.endswith("youtube.com") or host == "youtu.be":
         return "video"
+    if path.endswith(".pdf") or extract_method in {"pdf", "manual_pdf"}:
+        return "document"
     return "blog"
 
 

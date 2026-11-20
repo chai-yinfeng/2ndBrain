@@ -1,16 +1,48 @@
 {% extends "base.html" %}
 {% block title %}{{ page.title }} · Wiki{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ static_asset('wiki_graph.css') }}">
+<link rel="stylesheet" href="{{ static_asset('katex/katex.min.css') }}">
+<script src="{{ static_asset('katex/katex.min.js') }}" defer></script>
+<script src="{{ static_asset('wiki_math.js') }}" defer></script>
+{% endblock %}
 {% block content %}
-<article class="detail" data-wiki-page="{{ page.slug }}">
-  <p class="meta"><a href="/wiki">← Wiki</a></p>
-  <p class="meta">
-    {{ page.type }}
-    {% if page.meta.mastery %}· 掌握度 {{ page.meta.mastery }}{% endif %}
-    {% if page.type == "concept" and due %}· 下次复习 {{ due }}（间隔 {{ page.meta.interval_days }} 天，ease {{ page.meta.ease }}）{% endif %}
-    {% if page.aliases %}· 别名：{{ page.aliases | join("、") }}{% endif %}
-    {% if page.meta.sources %}· 来源：{% for sid in page.meta.sources %}<a href="/item/{{ sid }}">#{{ sid }}</a>{% if not loop.last %} {% endif %}{% endfor %}{% endif %}
-  </p>
-  {% if page.type == "concept" %}{% with slug=page.slug %}{% include "_review_buttons.html" %}{% endwith %}{% endif %}
-  <section class="wiki-body">{{ body_html | safe }}</section>
+<article class="detail wiki-article" data-wiki-page="{{ page.slug }}">
+  <nav class="wiki-breadcrumb" aria-label="面包屑"><a href="/wiki">知识库</a><span aria-hidden="true">/</span><a href="/wiki?kind={{ page_kind }}">{{ knowledge_kinds[page_kind] }}</a><span aria-hidden="true">/</span><span>{{ page.title }}</span></nav>
+  <header class="page-header"><div><h1>{{ page.title }}</h1><p class="meta">{{ knowledge_kinds[page_kind] }}{% if page.knowledge_status == "draft" %} · 草稿{% endif %}</p></div><div class="page-actions">{% if not page.meta.get('trashed') %}<a class="fb" href="/wiki/graph?focus={{ page.slug|urlencode }}{% if not page.is_visible %}&amp;drafts=1{% endif %}">在图谱中定位</a>{% endif %}<a class="fb" href="#rewrite">按语境重整</a></div></header>
+  {% if page.meta.get("trashed") %}<section class="panel" role="status"><p>此页已回收，不进入知识网络和自动整理。正文与原有链接保留。</p><form method="post" action="/wiki/manage"><input type="hidden" name="slugs" value="{{ page.slug }}"><button class="fb" name="action" value="restore" type="submit">恢复知识页</button></form></section>{% endif %}
+  {% if page.meta.get("merged_into") %}<p class="refresh panel" role="status">此历史材料页已归并，正文与人工内容仍保留；正式知识网络使用 <a href="/item/{{ page.meta.merged_into }}">主材料</a>。</p>
+  {% elif page.material_sync_status %}<p class="refresh panel" role="status">{{ {'withdrawn':'来源材料已回收，此自动材料页已从正式目录撤下；正文和个人内容仍保留。','unsupported':'没有有效来源，此机器内容保留待复核，不进入正式知识网络。','review':'部分来源已回收；共享知识保留，内容需要复核。'}.get(page.material_sync_status) }} <a href="/wiki/sync">查看知识变更</a></p>{% endif %}
+  <div class="wiki-page-layout">
+    <div class="wiki-reading-column">
+      <section class="wiki-body panel wiki-prose">{{ body_html | safe }}</section>
+      {% include "_wiki_rewrite.html" %}
+      <section class="page-connections panel">
+        <h2>页面链接</h2><p class="help">以下关系从 Markdown 派生，仅表示页面链接；依据与机器推断请阅读正文。</p>
+        <div class="wiki-connection-columns"><div><h3>关联页面</h3><ul class="wiki-link-list">{% for target in connections.outgoing %}<li><a href="/wiki/page/{{ target.slug }}">{{ target.title }}</a><span class="tag">{{ knowledge_kinds.get(target.kind, target.kind) }}</span></li>{% else %}<li class="empty">暂无指向其他知识页的链接。</li>{% endfor %}</ul></div><div><h3>反向链接</h3><ul class="wiki-link-list">{% for source in connections.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a><span class="tag">{{ knowledge_kinds.get(source.kind, source.kind) }}</span></li>{% else %}<li class="empty">尚无其他知识页链接到这里。</li>{% endfor %}</ul></div></div>
+        {% if connections.missing %}<p class="missing">缺失目标：{{ connections.missing|join("、") }}</p>{% endif %}
+        {% if connections.ambiguous %}<p class="ambiguous">同名歧义（请使用完整路径）：{{ connections.ambiguous|join("、") }}</p>{% endif %}
+      </section>
+      <section id="human-relations" class="panel">
+        <h2>人工关联</h2><p class="help">固定或禁止页面关系，后续 AI 整理遵守此决定。解除约束可恢复自动维护。</p>
+        {% for control in relation_controls %}<div class="fyi wiki-human-rule" data-human-mode="{{ control.mode }}"><div><b>{{ wiki_title(control.other) }}</b> <span class="tag">{{ "固定关联" if control.mode == "pin" else "禁止关联" }}</span><p class="meta">{{ control.reason or "未填写原因" }}{% if control.incoming %}（来自对端页面）{% endif %}</p></div>
+          <form method="post" action="/wiki/relation"><input type="hidden" name="source" value="{{ page.slug }}"><input type="hidden" name="target" value="{{ control.other }}"><input type="hidden" name="mode" value="reset"><button class="fb" type="submit">恢复自动关联</button></form>
+        </div>{% else %}<p class="empty">尚无人工约束。</p>{% endfor %}
+        <form method="post" action="/wiki/relation" class="add-form form-panel wiki-relation-form">
+          <input type="hidden" name="source" value="{{ page.slug }}">
+          <div class="field"><label for="relation-target">对端知识页名称</label><input id="relation-target" name="target" required><p class="help">同名页面可在高级页面信息中找到完整路径。</p></div>
+          <div class="field"><label for="relation-mode">人工决定</label><select id="relation-mode" name="mode"><option value="pin">固定关联，后续 AI 保留</option><option value="block">禁止关联，后续 AI 不得恢复</option><option value="reset">解除约束，允许自动维护</option></select></div>
+          <div class="field"><label for="relation-reason">关系依据或禁止原因</label><textarea id="relation-reason" name="reason" rows="3"></textarea></div>
+          <button class="fb" type="submit">保存人工决定（不调用模型）</button>
+        </form>
+      </section>
+    </div>
+    <aside class="wiki-page-sidebar">
+      <section class="panel"><h2>分类</h2><form method="post" action="/wiki/category" class="add-form"><input type="hidden" name="slug" value="{{ page.slug }}"><label class="sr-only" for="page-kind">知识类别</label><select id="page-kind" name="kind">{% for key, label in knowledge_kinds.items() %}<option value="{{ key }}" {% if key == page_kind %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><button class="fb small" type="submit">保存类别</button><p class="help">只改分类，不移动文件或重写正文。</p></form></section>
+      <section class="panel"><h2>来源材料</h2>{% if source_links %}<ul class="wiki-link-list">{% for source in source_links %}<li><a href="/item/{{ source.id }}">{{ source.title }}</a></li>{% endfor %}</ul>{% else %}<p class="empty">未记录来源材料。</p>{% endif %}</section>
+      <details class="panel"><summary>高级页面信息</summary><dl class="wiki-facts"><dt>路径</dt><dd class="wiki-stable-path">{{ page.slug }}</dd><dt>别名</dt><dd>{{ page.aliases|join("、") or "暂无别名" }}</dd></dl></details>
+      {% if not page.meta.get('trashed') %}<form method="post" action="/wiki/manage"><input type="hidden" name="slugs" value="{{ page.slug }}"><button class="fb" name="action" value="trash" type="submit">回收知识页…</button></form>{% endif %}
+    </aside>
+  </div>
 </article>
 {% endblock %}

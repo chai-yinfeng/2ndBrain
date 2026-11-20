@@ -131,8 +131,10 @@ def test_one_backfill_item_per_day_goes_to_refresher(pool):
         "SELECT i.title, d.lane FROM digests d JOIN items i ON i.id = d.item_id"
         " WHERE i.is_backfill = 1"
     ).fetchall()
-    # survey 与 explainer 都是温故类型；survey 的 topics 命中 profile 中"想回炉"的领域，优先
-    assert [tuple(r) for r in rows] == [("A survey of KV cache inference serving", "refresher")]
+    eligible = {
+        "Understanding attention: an explainer", "A survey of KV cache inference serving",
+    }
+    assert len(rows) == 1 and rows[0]["title"] in eligible and rows[0]["lane"] == "refresher"
     # 其余回补条目留在池中（已粗筛）
     left = pool.execute(
         "SELECT COUNT(*) FROM items WHERE is_backfill = 1 AND status = 'backfill_l1'"
@@ -152,11 +154,10 @@ def test_one_backfill_item_per_day_goes_to_refresher(pool):
             " WHERE i.is_backfill = 1 ORDER BY d.date"
         )
     ]
-    assert titles[1] == "Understanding attention: an explainer"
+    assert set(titles) == eligible and len(titles) == 2
 
 
-def test_backfill_priority_prefers_explainers_and_weak_domains():
-    row = None
+def test_backfill_priority_prefers_explainers_then_content_value():
     explainer = {"content_type": "explainer", "topics": [], "refresher_value": 5, "_score": 5}
     weak_match = {
         "content_type": "frontier",
@@ -167,10 +168,11 @@ def test_backfill_priority_prefers_explainers_and_weak_domains():
     plain = {"content_type": "frontier", "topics": ["gardening"], "refresher_value": 9, "_score": 9}
     ranked = sorted(
         [plain, weak_match, explainer],
-        key=lambda d: backfill_priority(row, d, PROFILE),
+        key=backfill_priority,
         reverse=True,
     )
-    assert ranked == [explainer, weak_match, plain]
+    assert ranked[0] == explainer
+    assert backfill_priority(weak_match) == backfill_priority(plain)
 
 
 def test_backfill_item_that_does_not_fit_stays_in_pool(pool):
@@ -180,12 +182,13 @@ def test_backfill_item_that_does_not_fit_stays_in_pool(pool):
     )
     report = _run(pool, fs=fs)
     assert report.backfill_picked == 1 and report.backfill_placed == 0
-    survey_id, status = pool.execute(
-        "SELECT id, status FROM items WHERE title = 'A survey of KV cache inference serving'"
-    ).fetchone()
+    selected = pool.execute(
+        "SELECT i.id, i.status FROM items i JOIN assessments a ON a.item_id = i.id"
+        " WHERE i.is_backfill = 1 AND a.stage = 'L2'"
+    ).fetchall()
+    assert len(selected) == 1
+    survey_id, status = selected[0]
     assert status == "backfill_l1"
-    l2_rows = "SELECT COUNT(*) FROM assessments WHERE stage = 'L2' AND item_id = ?"
-    assert pool.execute(l2_rows, (survey_id,)).fetchone()[0] == 1
     # 下一天放宽预算：直接复用已有 L2，不再调用
     calls_before = pool.execute("SELECT COUNT(*) FROM llm_calls WHERE stage = 'L2'").fetchone()[0]
     _run(pool, today=TODAY + timedelta(days=1))

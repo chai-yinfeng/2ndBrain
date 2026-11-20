@@ -232,7 +232,7 @@ def test_web_deep_button_and_endpoint(env):
     )
     conn.close()
     client = TestClient(create_app())
-    html = client.get("/").text
+    html = client.get("/recommendations").text
     assert 'hx-post="/deep"' in html and "将调用 strong 模型" in html
     assert "无字幕" in html
     resp = client.post("/deep", data={"item_id": "1"})

@@ -14,7 +14,7 @@ from secondbrain.pipeline.l1_screen import interleave_by_source
 from secondbrain.pipeline.l2_deep import build_l2_text, paper_sections
 from secondbrain.pipeline.run import run_pipeline, system_prompt
 from secondbrain.pipeline.tiering import TOP_LANES
-from secondbrain.profile.loader import load_profile, parse_profile, render_mastery
+from secondbrain.profile.loader import load_profile, parse_profile
 from secondbrain.urls import content_hash
 
 NOW = datetime(2026, 11, 4, 12, tzinfo=UTC)
@@ -41,24 +41,22 @@ References
 
 def test_parse_profile_fixture():
     profile = load_profile(FIXTURES / "profile.md")
-    assert [d.mastery for d in profile.domains] == ["想回炉", "陌生", "接触过", None]
-    assert profile.domains[2].raw_mastery == "接触过（偶尔写）"
+    assert len(profile.domains) == 4
     assert profile.domains[0].priority == "最高"
-    assert len(profile.warnings) == 1 and "精通" in profile.warnings[0]
-    rendered = render_mastery(profile)
-    assert "Inference serving（batching、KV cache）：想回炉；优先级 最高" in rendered
-    assert "未识别（原文：精通）" in rendered
+    assert not profile.warnings
+    assert "| 掌握度 |" not in profile.context
+    assert "接触过（偶尔写）" in profile.text
+    assert "接触过（偶尔写）" not in profile.context
 
 
 def test_profile_without_table_falls_back_to_full_text():
     profile = parse_profile("# 画像\n\n只写了一段话，没有表格。\n")
-    assert not profile.parsed
-    assert "未找到领域掌握度表" in profile.warnings[0]
-    assert "未能解析掌握度表" in render_mastery(profile)
+    assert not profile.domains
+    assert profile.context == profile.text.rstrip()
 
 
 def test_example_profile_parses():
-    assert load_profile(config.CONFIG_DIR / "profile.example.md").parsed
+    assert load_profile(config.CONFIG_DIR / "profile.example.md").domains
 
 
 def test_ensure_profile_never_overwrites(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -75,7 +73,6 @@ def test_system_prompt_contains_profile_and_json():
     for name in ("l1_system", "l2_system"):
         text = system_prompt(name, profile)
         assert "<profile>\n# 测试用画像（虚构）" in text
-        assert "领域掌握度（解析结果）" in text
         assert "json" in text
 
 

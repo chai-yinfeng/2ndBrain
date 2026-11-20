@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections import deque
 from datetime import UTC, datetime
-from urllib.parse import urlsplit
+from typing import Protocol
+from urllib.parse import urljoin, urlsplit
+
+import httpx
 
 from secondbrain.extract.html import extract_page_meta
 from secondbrain.models import FetchSettings, RawEntry, SourceConfig
@@ -19,6 +23,15 @@ from secondbrain.net import FetchError, HttpClient
 from secondbrain.sources.base import clean_title, parse_iso_datetime, plausible
 
 _URL_DATE_RE = re.compile(r"(?<!\d)(\d{4})([-/])(\d{2})\2(\d{2})(?!\d)")
+MAX_SITEMAP_DEPTH = 2
+MAX_SITEMAP_REQUESTS = 6
+MAX_SITEMAP_ENTRIES = 500
+
+
+class SitemapReader(Protocol):
+    warnings: list[str]
+
+    def get(self, url: str, *, origin: tuple[str, str] | None = None) -> httpx.Response: ...
 
 
 def _local(tag: str) -> str:
@@ -50,7 +63,7 @@ def parse_sitemap(
     except ET.ParseError as exc:
         raise FetchError(f"不是有效的 sitemap XML：{exc}") from exc
     if _local(root.tag) == "sitemapindex":
-        raise FetchError("暂不支持 sitemap index，请配置具体的 urlset sitemap 地址")
+        raise FetchError("sitemap index 需要通过 fetch 展开，请勿作为单个 urlset 解析")
     if _local(root.tag) != "urlset":
         raise FetchError(f"不是有效的 sitemap：根元素为 <{_local(root.tag)}>")
     pattern = re.compile(url_pattern) if url_pattern else None
@@ -69,10 +82,99 @@ def parse_sitemap(
     return entries
 
 
+def collect_sitemap(
+    reader: SitemapReader,
+    url: str,
+    url_pattern: str | None = None,
+    use_lastmod: bool = False,
+    *,
+    max_entries: int = MAX_SITEMAP_ENTRIES,
+    origin: tuple[str, str] | None = None,
+    initial_response: httpx.Response | None = None,
+) -> list[RawEntry]:
+    """有界展开同源 index；发现与真实采集共用，跳转/公网/体积限制由 reader 保证。"""
+    from secondbrain.source_discovery import _origin, _public_url
+
+    url = _public_url(url)
+    origin = origin or _origin(url)
+    pending = deque([(url, 0)])
+    visited: set[str] = set()
+    seen_entries: set[str] = set()
+    entries: list[RawEntry] = []
+    requests = 0
+    while pending:
+        current, depth = pending.popleft()
+        current = _public_url(current)
+        if current in visited:
+            reader.warnings.append("sitemap index 含重复或循环引用，已跳过。")
+            continue
+        if requests >= MAX_SITEMAP_REQUESTS:
+            reader.warnings.append(f"sitemap 最多读取 {MAX_SITEMAP_REQUESTS} 个文档。")
+            break
+        visited.add(current)
+        response = (
+            initial_response
+            if initial_response is not None and current == url
+            else reader.get(current, origin=origin)
+        )
+        visited.add(str(response.url))
+        requests += 1
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" in content_type or re.match(
+            br"\s*(?:<!doctype\s+html|<html\b)", response.content[:1024], re.I
+        ):
+            raise reader.error(
+                str(response.url), "候选 sitemap 返回 HTML 页面，不是 XML，未继续解析", "format"
+            )
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise reader.error(
+                str(response.url), f"不是有效的 sitemap XML：{exc}", "format"
+            ) from exc
+        if _local(root.tag) == "sitemapindex":
+            if depth >= MAX_SITEMAP_DEPTH:
+                reader.warnings.append(f"sitemap index 超过 {MAX_SITEMAP_DEPTH} 层，未继续展开。")
+                continue
+            for node in root:
+                if _local(node.tag) != "sitemap":
+                    continue
+                loc = next(
+                    ((child.text or "").strip() for child in node if _local(child.tag) == "loc"),
+                    "",
+                )
+                if not loc:
+                    continue
+                target = _public_url(urljoin(str(response.url), loc))
+                if _origin(target) != origin:
+                    raise FetchError("sitemap index 引用了其他站点，未自动扩大抓取范围")
+                if len(pending) >= MAX_SITEMAP_REQUESTS:
+                    reader.warnings.append("sitemap index 子文档过多，仅检查有界候选。")
+                    break
+                pending.append((target, depth + 1))
+            continue
+        for entry in parse_sitemap(response.content, url_pattern, use_lastmod):
+            try:
+                entry.url = _public_url(urljoin(str(response.url), entry.url))
+            except FetchError:
+                continue
+            if _origin(entry.url) != origin:
+                continue
+            if entry.url not in seen_entries:
+                seen_entries.add(entry.url)
+                entries.append(entry)
+            if len(entries) >= max_entries:
+                reader.warnings.append(f"sitemap 仅检查前 {max_entries} 个候选。")
+                return entries
+    return entries
+
+
 def fetch(source: SourceConfig, client: HttpClient, settings: FetchSettings) -> list[RawEntry]:
+    from secondbrain.source_discovery import _Reader
+
     assert source.url
-    resp = client.get(source.url)
-    return parse_sitemap(resp.content, source.url_pattern, source.use_lastmod)
+    reader = client if isinstance(client, _Reader) else _Reader(client, settings)
+    return collect_sitemap(reader, source.url, source.url_pattern, source.use_lastmod)
 
 
 def apply_page_meta(entry: RawEntry, html: str, url: str | None = None) -> None:

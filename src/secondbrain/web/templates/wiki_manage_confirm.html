@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}回收知识页 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><h1>确认回收 {{ impact|length }} 个知识页</h1></header>
+<section class="panel">
+<p>页面将从目录、图谱和自动整理中撤下，Markdown 正文、来源、人工笔记及关系不删除。下列反向链接仍保留，但会显示目标已回收；恢复后可重新使用。</p>
+{% for entry in impact %}<section class="fyi"><h2>{{ entry.page.title }}</h2><p class="meta">{{ entry.backlinks|length }} 个页面链接到这里</p><ul>{% for source in entry.backlinks %}<li><a href="/wiki/page/{{ source.slug }}">{{ source.title }}</a></li>{% else %}<li>没有其他页面链接到这里。</li>{% endfor %}</ul></section>{% endfor %}
+<form method="post" action="/wiki/manage" class="toolbar"><input type="hidden" name="action" value="trash"><input type="hidden" name="confirm" value="yes">{% for slug in slugs %}<input type="hidden" name="slugs" value="{{ slug }}">{% endfor %}<button class="fb" type="submit">确认回收（可恢复）</button><a class="fb" href="/wiki">取消</a></form>
+</section>
+{% endblock %}
