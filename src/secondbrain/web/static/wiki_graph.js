@@ -59,21 +59,46 @@
       layout: {name: "preset"},
       minZoom: 0.04, maxZoom: 3, wheelSensitivity: 0.2, boxSelectionEnabled: false,
       selectionType: "single"});
-    // Log-degree bands keep sparse networks readable without a force simulation.
-    // Only explicit scope changes arrange nodes; selection, themes and filters do not.
-    function arrange(collection) {
-      if (collection.nodes().length < 2) return;
-      collection.layout({name: "concentric", animate: false, fit: false, minNodeSpacing: 85,
-        nodeDimensionsIncludeLabels: true, avoidOverlap: true, spacingFactor: 1.25,
-        concentric: node => Math.floor(Math.log2(node.degree() + 1)), levelWidth: () => 1}).run();
+    if (data.nodes.length > 1) {
+      // Seed CoSE with separated, reproducible positions instead of randomizing.
+      cy.layout({name: "circle", animate: false, fit: false}).run();
+      cy.layout({name: "cose", animate: false, fit: false, randomize: false,
+        idealEdgeLength: 115, nodeOverlap: 20, componentSpacing: 100}).run();
     }
-    arrange(cy.elements());
     const initialPositions = new Map(cy.nodes().map(node => [node.id(), {...node.position()}]));
     let selected = null;
     let root = null;
     let expanded = new Set();
     let visible = new Set();
     const picker = $("node-picker");
+
+    function arrangeLocal() {
+      // Measure shortest paths in the expanded subgraph, independent of type filters.
+      const visited = new Set([root]);
+      cy.getElementById(root).position({x: 0, y: 0});
+      let ring = [root];
+      let radius = 0;
+      const spacing = 110;
+      while (ring.length) {
+        const next = [];
+        for (const id of ring) {
+          for (const neighbor of neighbors.get(id)) {
+            if (!expanded.has(neighbor) || visited.has(neighbor)) continue;
+            visited.add(neighbor);
+            next.push(neighbor);
+          }
+        }
+        if (!next.length) break;
+        // Leave at least one node spacing between rings and between adjacent nodes.
+        radius = Math.max(radius + spacing,
+          next.length > 1 ? spacing / (2 * Math.sin(Math.PI / next.length)) : 0);
+        next.forEach((id, index) => {
+          const angle = 2 * Math.PI * index / next.length - Math.PI / 2;
+          cy.getElementById(id).position({x: radius * Math.cos(angle), y: radius * Math.sin(angle)});
+        });
+        ring = next;
+      }
+    }
 
     function updateLocation(focus) {
       const url = new URL(location.href);
@@ -165,6 +190,10 @@
       $("graph-filter-empty").hidden = visible.size !== 0;
       $("graph-global").setAttribute("aria-pressed", String(root === null));
       $("graph-local").setAttribute("aria-pressed", String(root !== null && root === selected));
+      $("graph-expand").disabled = !selected || (root !== null && !expanded.has(selected));
+      $("graph-layout-hint").textContent = root === null
+        ? "位置由页面链接布局，不代表语义距离"
+        : "中心外第 1、2… 圈分别对应 1、2… 跳";
       highlight();
       if (fit) fitView();
     }
@@ -235,10 +264,10 @@
       if (!selected) return;
       root = selected;
       expanded = new Set([root, ...neighbors.get(root)]);
+      cy.autoungrabify(true);
+      cy.batch(arrangeLocal);
       updateLocation(root);
-      updateVisibility();
-      arrange(cy.elements(":visible"));
-      fitView();
+      updateVisibility(true);
     }
 
     cy.on("tap", "node", event => choose(event.target.id(), false));
@@ -255,14 +284,14 @@
     $("graph-expand").addEventListener("click", () => {
       if (!selected) return;
       if (root === null) return localView();
-      expanded.add(selected);
+      if (!expanded.has(selected)) return;
       neighbors.get(selected).forEach(id => expanded.add(id));
-      updateVisibility();
-      arrange(cy.elements(":visible"));
-      fitView();
+      cy.batch(arrangeLocal);
+      updateVisibility(true);
     });
     $("graph-global").addEventListener("click", () => {
       root = null;
+      cy.autoungrabify(false);
       cy.nodes().positions(node => initialPositions.get(node.id()));
       updateLocation(null);
       updateVisibility(true);
@@ -271,6 +300,7 @@
     $("graph-reset").addEventListener("click", () => {
       root = null;
       expanded.clear();
+      cy.autoungrabify(false);
       typeFilters.forEach(el => { el.checked = true; });
       $("node-search").value = "";
       $("graph-labels").value = "auto";
