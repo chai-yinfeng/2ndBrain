@@ -14,11 +14,11 @@
     const color = name => style.getPropertyValue(name).trim();
     return [
       {selector: "node", style: {"background-color": color("--graph-concept"), label: "",
-        width: "data(size)", height: "data(size)", "font-size": 11, color: color("--fg"),
-        "text-valign": "bottom", "text-margin-y": 7, "text-wrap": "ellipsis",
-        "text-max-width": 140, "min-zoomed-font-size": 8,
-        "text-background-color": color("--bg"), "text-background-opacity": 0.9,
-        "text-background-padding": "3px", "border-width": 2, "border-color": color("--card"),
+        width: "data(size)", height: "data(size)", "font-size": 12, color: color("--fg"),
+        "text-valign": "bottom", "text-margin-y": 5, "text-wrap": "ellipsis",
+        "text-max-width": 144, "text-background-color": color("--bg"),
+        "text-background-opacity": 0.72, "text-background-shape": "roundrectangle",
+        "text-background-padding": 2, "border-width": 1, "border-color": color("--card"),
         "overlay-opacity": 0}},
       {selector: "node[type = 'material'], node[type = 'article'], node[type = 'video'], node[type = 'other']", style: {shape: "round-rectangle",
         "background-color": color("--graph-material")}},
@@ -27,14 +27,21 @@
       {selector: "node[type = 'entity']", style: {shape: "diamond",
         "background-color": color("--graph-entity")}},
       {selector: "node.label-visible", style: {label: "data(label)"}},
-      {selector: "edge", style: {width: 1.2, "line-color": color("--graph-edge"),
-        "curve-style": "haystack", opacity: 0.5, "overlay-opacity": 0}},
+      {selector: "edge", style: {width: 1.1, "line-color": color("--graph-edge"),
+        // Nodes cover the endpoints, even when their screen-space markers overlap.
+        "source-endpoint": "0px 0px", "target-endpoint": "0px 0px", "edge-distances": "node-position",
+        "curve-style": "unbundled-bezier", "control-point-distances": 12,
+        "control-point-weights": 0.5, opacity: 0.74, "overlay-opacity": 0}},
+      {selector: "edge.local-edge", style: {"curve-style": "straight"}},
+      {selector: "edge.overlapping-markers", style: {"curve-style": "haystack", "haystack-radius": 0}},
       {selector: ".dimmed", style: {opacity: 0.15, "text-opacity": 0}},
       {selector: "edge.dimmed", style: {opacity: 0.07}},
-      {selector: "node.one-hop", style: {"border-width": 3, "border-color": color("--accent")}},
-      {selector: "edge.focus-edge", style: {width: 2.4,
-        "line-color": color("--accent"), opacity: 0.9}},
-      {selector: "node:selected", style: {"border-width": 4, "border-color": color("--accent"),
+      {selector: "node.one-hop, node:selected", style: {
+        "underlay-color": color("--accent"), "underlay-opacity": 0.14,
+        "underlay-shape": "ellipse", "underlay-padding": 5, "border-color": color("--accent")}},
+      {selector: "edge.focus-edge", style: {width: 1.8,
+        "line-color": color("--accent"), opacity: 0.86}},
+      {selector: "node:selected", style: {"underlay-opacity": 0.25,
         "font-weight": 600, "z-index": 10}}
     ];
   }
@@ -52,16 +59,19 @@
       neighbors.get(edge.source).add(edge.target);
       neighbors.get(edge.target).add(edge.source);
     });
-    const elements = data.nodes.map(node => ({data: {...node,
-      size: 22 + Math.min(16, 4 * Math.sqrt(node.degree))}}));
+    // Give the renderer distinct initial positions before running CoSE.
+    const radius = Math.max(25, data.nodes.length * 28 / (2 * Math.PI));
+    const elements = data.nodes.map((node, index) => {
+      const angle = 2 * Math.PI * index / data.nodes.length;
+      return {data: {...node, size: 14 + Math.min(8, 2.5 * Math.sqrt(node.degree))},
+        position: {x: radius * Math.cos(angle), y: radius * Math.sin(angle)}};
+    });
     data.edges.forEach((edge, index) => elements.push({data: {...edge, id: `edge-${index}`}}));
     const cy = cytoscape({container: canvas, elements, style: graphStyle(),
       layout: {name: "preset"},
       minZoom: 0.04, maxZoom: 3, wheelSensitivity: 0.2, boxSelectionEnabled: false,
       selectionType: "single"});
     if (data.nodes.length > 1) {
-      // Seed CoSE with separated, reproducible positions instead of randomizing.
-      cy.layout({name: "circle", animate: false, fit: false}).run();
       cy.layout({name: "cose", animate: false, fit: false, randomize: false,
         idealEdgeLength: 115, nodeOverlap: 20, componentSpacing: 100}).run();
     }
@@ -133,6 +143,41 @@
       $("node-results").textContent = `${matches} 个匹配 · 列表包含筛选隐藏的页面，同名可打开页面核对来源。`;
     }
 
+    function updateEdgeClearance(edges, zoom) {
+      edges.forEach(edge => {
+        const source = edge.source(), target = edge.target();
+        const a = source.position(), b = target.position();
+        const dx = (a.x - b.x) * zoom, dy = (a.y - b.y) * zoom;
+        const clearance = (source.data("size") + target.data("size")) * Math.SQRT1_2 + 2;
+        // When markers overlap, draw a straight center-to-center line behind them.
+        edge.toggleClass("overlapping-markers", dx * dx + dy * dy <= clearance * clearance);
+      });
+    }
+
+    let markerZoom = 0;
+    function updateMarkerScale(repositioned = false) {
+      const zoom = cy.zoom();
+      if (markerZoom === zoom) {
+        if (repositioned) cy.batch(() => updateEdgeClearance(cy.edges(), zoom));
+        return;
+      }
+      markerZoom = zoom;
+      // Cytoscape styles use model units; compensate only the screen-space marks.
+      cy.batch(() => {
+        const nodes = cy.nodes();
+        nodes.style({
+          "font-size": 12 / zoom, "text-margin-y": 5 / zoom, "text-max-width": 144 / zoom,
+          "text-background-padding": 2 / zoom, "border-width": 1 / zoom,
+          "underlay-padding": 5 / zoom,
+        });
+        nodes.forEach(node => {
+          const size = node.data("size") / zoom;
+          node.style({width: size, height: size});
+        });
+        updateEdgeClearance(cy.edges(), zoom);
+      });
+    }
+
     function updateLabels() {
       const mode = $("graph-labels").value;
       const labeled = new Set();
@@ -168,10 +213,24 @@
 
     function fitView() {
       if (!visible.size) return;
-      const shown = cy.elements(":visible");
-      cy.fit(shown, 55);
-      if (cy.zoom() > 1.25) cy.zoom(1.25);
-      cy.center(shown);
+      // Fit the node centers, leaving screen-space padding for markers and labels.
+      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+      cy.nodes(":visible").forEach(node => {
+        const {x, y} = node.position();
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+      });
+      const width = cy.width(), height = cy.height();
+      const zoom = Math.max(cy.minZoom(), Math.min(1.25,
+        (width - 2 * Math.min(86, width / 4)) / Math.max(1, right - left),
+        (height - 2 * Math.min(48, height / 4)) / Math.max(1, bottom - top)));
+      cy.viewport({zoom, pan: {
+        x: (width - (left + right) * zoom) / 2,
+        y: (height - (top + bottom) * zoom) / 2,
+      }});
+      updateMarkerScale(true);
     }
 
     function updateVisibility(fit = false) {
@@ -182,6 +241,7 @@
         cy.nodes().forEach(node => node.style("display", visible.has(node.id()) ? "element" : "none"));
         cy.edges().forEach(edge => edge.style("display", visible.has(edge.source().id())
           && visible.has(edge.target().id()) ? "element" : "none"));
+        cy.edges().toggleClass("local-edge", root !== null);
       });
       const edges = data.edges.filter(edge => visible.has(edge.source) && visible.has(edge.target)).length;
       const scope = root === null ? "全局概览" : `局部中心：${records.get(root).label}`;
@@ -270,6 +330,9 @@
       updateVisibility(true);
     }
 
+    cy.on("drag", "node", event => {
+      cy.batch(() => updateEdgeClearance(event.target.connectedEdges(), cy.zoom()));
+    });
     cy.on("tap", "node", event => choose(event.target.id(), false));
     cy.on("tap", event => { if (event.target === cy) clearSelection(); });
     picker.addEventListener("change", () => choose(picker.value));
@@ -319,7 +382,11 @@
     cy.on("zoom", () => {
       $("graph-zoom-level").textContent = `${Math.round(cy.zoom() * 100)}%`;
       if (zoomFrame !== null) return;
-      zoomFrame = requestAnimationFrame(() => { zoomFrame = null; updateLabels(); });
+      zoomFrame = requestAnimationFrame(() => {
+        zoomFrame = null;
+        updateMarkerScale();
+        updateLabels();
+      });
     });
     $("graph-labels").addEventListener("change", updateLabels);
     typeFilters.forEach(el =>
@@ -342,6 +409,7 @@
       fitView();
       if (initial) status.textContent += " · 请求的节点不存在，请按名称重新定位";
     }
+    updateMarkerScale();
     $("graph-zoom-level").textContent = `${Math.round(cy.zoom() * 100)}%`;
   }).catch(error => {
     status.textContent = `${error.message}。请重新索引或刷新页面。`;

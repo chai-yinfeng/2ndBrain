@@ -61,7 +61,14 @@ main:has(.graph-workspace), main:has(.wiki-article) { max-width: 1600px; }
 .graph-statusbar p { margin: 0; color: var(--muted); }
 .graph-statusbar .meta { font-size: 11px; }
 .graph-canvas-wrap { position: relative; }
-.graph-workspace #graph { border: 0; border-radius: 0; background-color: var(--bg); background-image: radial-gradient(var(--border) .8px, transparent .8px); background-size: 20px 20px; height: 62vh; min-height: 430px; max-height: 820px; }
+.graph-workspace #graph {
+  border: 0; border-radius: 0; height: 62vh; min-height: 430px; max-height: 820px;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse at 22% 22%, color-mix(in srgb, var(--graph-concept) 13%, transparent), transparent 62%),
+    radial-gradient(ellipse at 78% 75%, color-mix(in srgb, var(--graph-material) 11%, transparent), transparent 63%),
+    linear-gradient(150deg, var(--surface), var(--bg));
+}
 .graph-zoom { position: absolute; bottom: 14px; left: 14px; display: flex; gap: 1px; align-items: center; border: 1px solid var(--border); border-radius: 7px; padding: 3px; background: var(--card); }
 .graph-zoom .fb { border: 0; padding: 3px 10px; font-size: 17px; }
 .graph-zoom output { min-width: 44px; text-align: center; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
