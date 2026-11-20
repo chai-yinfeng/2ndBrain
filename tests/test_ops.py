@@ -146,14 +146,19 @@ def test_web_run_task(env):
 def test_running_task_fragment_polls(env):
     app = create_app()
     gate = threading.Event()
-    task = app.state.tasks.start("run", "立即运行（与 sb run 相同）", lambda t: gate.wait(5))
+
+    def blocked_run(_task):
+        gate.wait(5)
+
+    task = app.state.tasks.start("run", "立即运行（与 sb run 相同）", blocked_run)
     client = TestClient(app)
-    html = client.get("/tasks/run").text
-    assert 'hx-trigger="every 2s"' in html and "运行中" in html
-    again = client.post("/tasks/run")
-    assert "正在运行" in again.text
-    gate.set()
-    wait(task)
+    try:
+        html = client.get("/tasks/run").text
+        assert 'data-task-status="running"' in html and 'hx-trigger="every 2s"' in html
+        assert "正在运行" in client.post("/tasks/run").text
+    finally:
+        gate.set()
+        wait(task)
 
 
 def _gained_item(n: int, title: str) -> int:

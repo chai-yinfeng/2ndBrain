@@ -80,8 +80,10 @@ def test_fetch_uses_page_date_and_limit(tmp_path, monkeypatch):
     routes[INDEX + "/kimi-k3.1-pro-day0-support"] = httpx.Response(200, text=ARTICLE)
     routes[INDEX + "/minimax-m3.1-flash-day0-support"] = httpx.Response(
         200,
-        text=ARTICLE.replace("HiCache deep dive", "MiniMax day 0").replace(
-            "2026-10-20", "2026-10-29"
+        text=(
+            ARTICLE.replace("HiCache deep dive", "MiniMax day 0")
+            .replace("2026-10-20", "2026-10-29")
+            .replace("hierarchical KV caching", "sparse attention in MiniMax")
         ),
     )
     client = _client(routes)

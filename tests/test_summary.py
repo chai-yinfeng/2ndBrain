@@ -318,10 +318,17 @@ def test_summary_task_runs_one_per_item(env):
     item = add_item("Paper", PAPER)
     app = create_app()
     gate = threading.Event()
-    app.state.tasks.start(f"summary-{item}", "深度速读", lambda t: gate.wait(5))
-    resp = TestClient(app).post(f"/summary/{item}")
-    assert "正在运行" in resp.text
-    gate.set()
+
+    def blocked_summary(_task):
+        gate.wait(5)
+
+    task = app.state.tasks.start(f"summary-{item}", "深度速读", blocked_summary)
+    try:
+        resp = TestClient(app).post(f"/summary/{item}")
+        assert "正在运行" in resp.text
+    finally:
+        gate.set()
+        task.thread.join(5)
 
 
 def test_prereq_names_prefer_summary_and_normalize(env):

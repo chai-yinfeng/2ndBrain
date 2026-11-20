@@ -157,8 +157,9 @@ def test_arxiv_api_doi_is_parsed():
 
 def test_citation_pdf_preferred(env):
     out = runner.invoke(cli_app, ["add", USENIX])
-    assert "新增 #1 Twine: A Unified Cluster Management System" in out.output, out.output
+    assert out.exit_code == 0, out.output
     (row,) = rows()
+    assert row["title"] == "Twine: A Unified Cluster Management System"
     assert row["extract_method"] == "pdf" and row["doi"] == "10.5555/twine.1"
     assert row["author"] == "Chunqiang Tang, Kenny Yu" and row["published_at"].startswith(
         "2020-11-04"
@@ -191,9 +192,10 @@ def test_crossref_when_s2_rate_limited(env, monkeypatch):
     sleeps = []
     monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(routes, sleeps))
     out = runner.invoke(cli_app, ["add", f"https://doi.org/{DOI}"])
-    assert "新增（仅摘要） #1 Expert Parallelism Without Tears" in out.output, out.output
+    assert out.exit_code == 0, out.output
     assert 3.0 in sleeps  # 按 Retry-After 等待
-    assert rows()[0]["author"] == "Erin Example"  # Crossref 的作者
+    (row,) = rows()
+    assert row["author"] == "Erin Example" and row["extract_method"] == "abstract_only"
 
 
 def test_retry_after_is_capped_and_retries_bounded():
@@ -229,9 +231,11 @@ def test_s2_api_key_header(env, monkeypatch):
 def test_doi_then_arxiv_merges_and_completes(env):
     first = runner.invoke(cli_app, ["add", f"https://doi.org/{DOI}"])
     assert "新增（仅摘要）" in first.output
+    (before,) = rows()
     second = runner.invoke(cli_app, ["add", f"https://arxiv.org/abs/{ARXIV_ID}"])
-    assert "已存在（补全正文） #1" in second.output, second.output
+    assert second.exit_code == 0, second.output
     (row,) = rows()
+    assert row["id"] == before["id"]
     assert row["extract_method"] == "arxiv_html" and row["arxiv_id"] == ARXIV_ID
     assert row["doi"] == DOI
 
@@ -241,7 +245,9 @@ def test_arxiv_then_doi_is_existing(env):
     (row,) = rows()
     assert (row["arxiv_id"], row["doi"]) == (ARXIV_ID, DOI)  # arXiv API 带了 arxiv:doi
     again = runner.invoke(cli_app, ["add", f"https://dl.acm.org/doi/pdf/{DOI}"])
-    assert "已存在 #1" in again.output and len(rows()) == 1
+    assert again.exit_code == 0, again.output
+    (after,) = rows()
+    assert after["id"] == row["id"] and after["original_text"] == row["original_text"]
 
 
 def test_same_title_does_not_guess_identity(env, monkeypatch):
@@ -261,8 +267,8 @@ def test_same_title_does_not_guess_identity(env, monkeypatch):
     monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(routes))
     runner.invoke(cli_app, ["add", USENIX])
     out = runner.invoke(cli_app, ["add", other])
-    assert "新增 #2" in out.output and "可能重复" not in out.output
-    assert len(rows()) == 2
+    assert out.exit_code == 0, out.output
+    assert {r["doi"] for r in rows()} == {"10.5555/twine.1", "10.5555/other"}
 
 
 def test_migration_v9_backfills_ids(tmp_path):
@@ -337,7 +343,8 @@ def test_ops_s2_key_settings(env):
 def test_existing_abstract_only_is_completed_on_reimport(env, monkeypatch):
     url = f"https://doi.org/{DOI}"
     runner.invoke(cli_app, ["add", url])
-    assert rows()[0]["extract_method"] == "abstract_only"
+    (before,) = rows()
+    assert before["extract_method"] == "abstract_only"
     routes = route_table(
         {
             "https://publisher.example.org/x.pdf": httpx.Response(
@@ -349,8 +356,9 @@ def test_existing_abstract_only_is_completed_on_reimport(env, monkeypatch):
     )
     monkeypatch.setattr(ops, "HttpClient", lambda *_a, **_k: make_client(routes))
     out = runner.invoke(cli_app, ["add", url])
-    assert "已存在（补全正文） #1" in out.output, out.output
+    assert out.exit_code == 0, out.output
     (row,) = rows()
+    assert row["id"] == before["id"]
     assert row["extract_method"] == "pdf" and "full paper text" in row["content"]
 
 
@@ -370,13 +378,15 @@ def test_refetch_button_replaces_short_html_with_citation_pdf(env, monkeypatch):
 def test_refetch_without_gain_keeps_content(env, monkeypatch):
     url = f"https://doi.org/{DOI}"
     runner.invoke(cli_app, ["add", url])
-    before = rows()[0]["content"]
+    (before,) = rows()
     out = runner.invoke(cli_app, ["add", url])  # 不完整 → 自动重抓，仍只有同样的摘要
-    assert "已存在 #1" in out.output and "重新抓取未获得更完整正文" in out.output, out.output
-    assert rows()[0]["content"] == before
+    assert "重新抓取未获得更完整正文" in out.output, out.output
+    (after,) = rows()
+    assert (after["id"], after["content"]) == (before["id"], before["content"])
     resp = TestClient(create_app()).post("/item/1/refetch")
     assert "重新抓取未获得更完整正文" in resp.text
-    assert rows()[0]["extract_method"] == "abstract_only" and rows()[0]["content"] == before
+    (after,) = rows()
+    assert after["extract_method"] == "abstract_only" and after["content"] == before["content"]
 
 
 def test_cli_refetch_forces_existing_complete_item(env, monkeypatch):
@@ -391,7 +401,7 @@ def test_cli_refetch_forces_existing_complete_item(env, monkeypatch):
 
     monkeypatch.setattr(ops, "HttpClient", counting)
     plain = runner.invoke(cli_app, ["add", USENIX])
-    assert "已存在 #1" in plain.output and "重新抓取" not in plain.output
+    assert plain.exit_code == 0, plain.output
     assert not seen[-1].seen  # 完整的已存在条目默认不重抓
     forced = runner.invoke(cli_app, ["add", USENIX, "--refetch"])
     assert "重新抓取未获得更完整正文" in forced.output, forced.output

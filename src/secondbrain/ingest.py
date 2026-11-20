@@ -137,7 +137,8 @@ def extract_content(entry: RawEntry, client: HttpClient, fs: FetchSettings) -> t
             if entry.page_meta:
                 entry.title = page.title or entry.title
                 entry.author = page.author or entry.author
-                entry.published_at = page.published_at or entry.published_at
+                if not entry.keep_date:
+                    entry.published_at = page.published_at or entry.published_at
             entry.doi = entry.doi or page.doi
             entry.arxiv_id = entry.arxiv_id or page.arxiv_id
             apply_bibliography(entry, page.bibliography)

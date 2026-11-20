@@ -48,8 +48,19 @@ def extract_page_meta(html: str | bytes, url: str | None = None) -> PageMeta:
     placeholder = not title or title.casefold().strip() in {
         "untitled", "untitled document", "home", "index", "welcome"
     }
-    shortened = bool(title and len(title) <= 20 and len(head_title) > len(title) + 5
-                     and head_title.casefold().startswith(title.casefold()))
+    shortened = (
+        title
+        and len(title) <= 20
+        and len(head_title) > len(title) + 5
+        and head_title.casefold().startswith(title.casefold())
+        # A matching article heading or OG title confirms that the short title is intentional.
+        and not any(
+            value.casefold() == title.casefold() for value in parser.values.get("og:title", ())
+        )
+        and not any(
+            tag == "h1" and value.casefold() == title.casefold() for tag, value in parser.headings
+        )
+    )
     if placeholder or shortened:
         headings = sorted(parser.headings, key=lambda entry: entry[0])
         title = next((value for _, value in headings if value != title), None) or (
@@ -77,7 +88,7 @@ class _DocumentMeta(HTMLParser):
         elif tag == "meta":
             a = dict(attrs)
             name = (a.get("name") or a.get("property") or "").strip().lower()
-            if name.startswith("citation_") and a.get("content"):
+            if (name == "og:title" or name.startswith("citation_")) and a.get("content"):
                 self.values.setdefault(name, []).append(a["content"].strip())
 
     def handle_endtag(self, tag: str) -> None:
