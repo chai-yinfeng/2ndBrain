@@ -83,7 +83,7 @@ uv run sb usage --since 7d                            # 模型用量和估算费
 
 个人记录不要长期放在 `/tmp`。本机已确认的持久工作区为 `~/Library/Application Support/SecondBrain`，包含 `data/brain.db`、`data/web_tasks.db`、`data/wiki`（原件和笔记也在其中）、画像与 `config/`。迁移应停服整体复制并校验，不要重新导入或只移动数据库；已授权迁移的恢复副本位于该目录的 `migration-backups/`。
 
-在本机以持久目录启动（不安装或修改 launchd）：
+在主仓库 `2ndbrain` 的 `main` 中启动并使用持久目录（不安装或修改 launchd）：
 
 ```bash
 workspace="$HOME/Library/Application Support/SecondBrain"
@@ -94,7 +94,7 @@ uv run sb serve --port 8765
 
 凭据沿用启动进程的环境变量，或在 Web 服务配置中设置到该工作区的 env 文件；迁移不会复制原项目 `.env` 的密钥。普通 `uv run sb serve` 不带上述覆盖时仍使用项目默认路径，不会自动切到个人工作区。
 
-当前开发代码位于独立 worktree `2ndbrain-material-network`，分支 `m13-m15-material-network`；分支创建记录是 `2026-11-16T03:50:10-05:00`，对应用户要求的 M13–M15 隔离开发。它共享主仓库的 Git 对象，不是额外克隆。当前主目录的 main 尚未整合这些提交，上述启动命令应在这个 worktree 中执行；不要删掉它后直接用旧main打开新数据。整合代码并切换服务入口后，可用 `git worktree remove` 清理，个人工作区无需随源码移动。
+M13–M15 的代码已从 `m13-m15-material-network` 快进整合到 `main`。以后从主仓库启动；个人工作区不随源码移动，也不要把仓库内旧 `data/` 或旧来源配置覆盖到个人工作区。
 
 `migration-backups/from-temp-20261118-041702` 保留迁移前完整副本。恢复前先停服；旧副本的来源配置含已退役类型，恢复data时应保留迁移后的正式sources配置，或先按ADR 0026转换两项类型，不能直接用旧配置启动新版代码。
 
