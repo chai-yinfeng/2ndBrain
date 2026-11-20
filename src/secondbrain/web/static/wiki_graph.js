@@ -8,17 +8,18 @@
   const kinds = {concept: "概念", entity: "实体", paper: "论文", article: "文章与网页", video: "视频", other: "其他资料"};
   const knowledgeStatus = {recorded: "已登记阅读后的知识", draft: "机器草稿（未登记阅读）",
     legacy: "历史知识页（未记录登记状态）"};
+  const labelFont = 12, labelGap = 5, labelMaxWidth = 144;
+  const markerScale = zoom => Math.max(0.44, Math.min(1, zoom / 0.8));
 
   function graphStyle() {
     const style = getComputedStyle(document.documentElement);
     const color = name => style.getPropertyValue(name).trim();
     return [
       {selector: "node", style: {"background-color": color("--graph-concept"), label: "",
-        width: "data(size)", height: "data(size)", "font-size": 12, color: color("--fg"),
-        "text-valign": "bottom", "text-margin-y": 5, "text-wrap": "ellipsis",
-        "text-max-width": 144, "text-background-color": color("--bg"),
-        "text-background-opacity": 0.72, "text-background-shape": "roundrectangle",
-        "text-background-padding": 2, "border-width": 1, "border-color": color("--card"),
+        width: "data(size)", height: "data(size)", "font-size": labelFont,
+        "font-family": "sans-serif", color: color("--fg"),
+        "text-valign": "bottom", "text-margin-y": labelGap, "text-wrap": "ellipsis",
+        "text-max-width": labelMaxWidth, "border-width": 1, "border-color": color("--card"),
         "overlay-opacity": 0}},
       {selector: "node[type = 'material'], node[type = 'article'], node[type = 'video'], node[type = 'other']", style: {shape: "round-rectangle",
         "background-color": color("--graph-material")}},
@@ -142,13 +143,18 @@
       if (![...picker.options].some(option => option.value === selected)) picker.selectedIndex = -1;
       $("node-results").textContent = `${matches} 个匹配 · 列表包含筛选隐藏的页面，同名可打开页面核对来源。`;
     }
+    const labelMeasure = document.createElement("canvas").getContext("2d");
+    // Use the selected font weight as a conservative bound for regular labels too.
+    labelMeasure.font = `600 ${labelFont}px sans-serif`;
+    const labelWidths = new Map();
 
     function updateEdgeClearance(edges, zoom) {
+      const scale = markerScale(zoom);
       edges.forEach(edge => {
         const source = edge.source(), target = edge.target();
         const a = source.position(), b = target.position();
         const dx = (a.x - b.x) * zoom, dy = (a.y - b.y) * zoom;
-        const clearance = (source.data("size") + target.data("size")) * Math.SQRT1_2 + 2;
+        const clearance = (source.data("size") + target.data("size")) * scale * Math.SQRT1_2 + 2;
         // When markers overlap, draw a straight center-to-center line behind them.
         edge.toggleClass("overlapping-markers", dx * dx + dy * dy <= clearance * clearance);
       });
@@ -162,16 +168,17 @@
         return;
       }
       markerZoom = zoom;
-      // Cytoscape styles use model units; compensate only the screen-space marks.
+      const scale = markerScale(zoom);
+      // Cytoscape styles use model units; keep labels fixed and shrink distant markers.
       cy.batch(() => {
         const nodes = cy.nodes();
         nodes.style({
-          "font-size": 12 / zoom, "text-margin-y": 5 / zoom, "text-max-width": 144 / zoom,
-          "text-background-padding": 2 / zoom, "border-width": 1 / zoom,
+          "font-size": labelFont / zoom, "text-margin-y": labelGap / zoom,
+          "text-max-width": labelMaxWidth / zoom, "border-width": 1 / zoom,
           "underlay-padding": 5 / zoom,
         });
         nodes.forEach(node => {
-          const size = node.data("size") / zoom;
+          const size = node.data("size") * scale / zoom;
           node.style({width: size, height: size});
         });
         updateEdgeClearance(cy.edges(), zoom);
@@ -180,18 +187,42 @@
 
     function updateLabels() {
       const mode = $("graph-labels").value;
-      const labeled = new Set();
-      if (mode === "all" || (mode === "auto" && visible.size <= 45 && cy.zoom() >= 0.45)) {
-        visible.forEach(id => labeled.add(id));
-      } else if (mode === "auto") {
-        ranked.filter(node => visible.has(node.id)).slice(0, cy.zoom() >= 0.65 ? 24 : 10)
-          .forEach(node => labeled.add(node.id));
-      }
-      if (mode !== "none" && selected && visible.has(selected)) {
-        labeled.add(selected);
-        let count = 0;
-        for (const id of neighbors.get(selected)) {
-          if (visible.has(id) && count++ < 14) labeled.add(id);
+      const labeled = mode === "all" ? visible : new Set();
+      if (mode === "auto") {
+        const zoom = cy.zoom(), scale = markerScale(zoom);
+        const limit = zoom < 0.45 ? 6 : zoom < 1.15 ? 20 : Infinity;
+        // Cytoscape adds model-space bounds around labels; include that at high zoom too.
+        const labelPadding = 2 * zoom + 2;
+        const markers = new Map();
+        cy.nodes(":visible").forEach(node => {
+          const {x, y} = node.renderedPosition();
+          const half = node.data("size") * scale / 2 + 1;
+          markers.set(node.id(), {left: x - half, right: x + half, top: y - half, bottom: y + half});
+        });
+        const occupied = [...markers.values()];
+        const adjacent = markers.has(selected) ? neighbors.get(selected) : null;
+        function place(id) {
+          const marker = markers.get(id);
+          if (!marker || labeled.size >= limit) return;
+          let width = labelWidths.get(id);
+          if (width === undefined) {
+            width = Math.min(labelMaxWidth, labelMeasure.measureText(records.get(id).label).width);
+            labelWidths.set(id, width);
+          }
+          const x = (marker.left + marker.right) / 2;
+          const y = marker.bottom + labelGap - 1;
+          const left = x - width / 2 - labelPadding, right = x + width / 2 + labelPadding;
+          const top = y - labelPadding, bottom = y + labelFont + labelPadding;
+          if (occupied.some(box => box !== marker && left < box.right && right > box.left
+            && top < box.bottom && bottom > box.top)) return;
+          occupied.push({left, right, top, bottom});
+          labeled.add(id);
+        }
+        if (adjacent) place(selected);
+        for (const {id} of ranked) {
+          if (labeled.size >= limit) break;
+          // Off-neighborhood nodes have transparent text while a node is selected.
+          if (!adjacent || adjacent.has(id)) place(id);
         }
       }
       cy.batch(() => cy.nodes().forEach(node => node.toggleClass("label-visible", labeled.has(node.id()))));
@@ -333,6 +364,7 @@
     cy.on("drag", "node", event => {
       cy.batch(() => updateEdgeClearance(event.target.connectedEdges(), cy.zoom()));
     });
+    cy.on("dragfree", "node", updateLabels);
     cy.on("tap", "node", event => choose(event.target.id(), false));
     cy.on("tap", event => { if (event.target === cy) clearSelection(); });
     picker.addEventListener("change", () => choose(picker.value));
