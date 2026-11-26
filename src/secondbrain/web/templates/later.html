@@ -2,7 +2,7 @@
 {% block title %}阅读列表 · Second Brain{% endblock %}
 {% block content %}
 <div class="page-header">
-  <div><p class="eyebrow">阅读与学习</p><h1>阅读列表</h1><p class="meta">自己维护的稍后清单。阅读可以留在原站或 ChatGPT，读后登记，由 AI 整理知识。</p></div>
+  <div><p class="eyebrow">阅读与学习</p><h1>阅读列表</h1><p class="meta">自己维护的稍后清单。阅读可以留在原站或其他工具；读完一键标为已读，不调用 AI。</p></div>
   <div class="page-actions"><a class="fb" href="/sources">浏览信源</a><a class="fb primary" href="/add">添加材料</a></div>
 </div>
 <div class="toolbar">
@@ -21,7 +21,7 @@
   </div>
   <div class="row-actions">
     {% if r.url %}<a class="fb ghost small" href="{{ r.url }}" target="_blank" rel="noopener">原站 ↗</a>{% endif %}
-    <a class="fb small" href="/item/{{ r.id }}#register-read">登记阅读</a>
+    {% with item_id=r.id, return_to="later" %}{% include "_mark_read.html" %}{% endwith %}
     <details class="row-menu"><summary class="fb small" aria-label="{{ r.title }}：更多操作">···</summary>
       <div><a href="/item/{{ r.id }}">材料与学习记录</a><form method="post" action="/reading/{{ r.id }}/remove"><button type="submit">移出清单（保留材料）</button></form></div>
     </details>

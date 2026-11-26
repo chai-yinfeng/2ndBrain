@@ -2,13 +2,13 @@
 <fieldset class="field">
   <legend>状态</legend>
   <label class="choice"><input type="radio" name="state" value="later"{% if selected_state == 'later' %} checked{% endif %}> 加入稍后阅读清单</label>
-  <label class="choice"><input type="radio" name="state" value="read"{% if selected_state == 'read' %} checked{% endif %}> 已在外部读过，登记并整理知识</label>
+  <label class="choice"><input type="radio" name="state" value="read"{% if selected_state == 'read' %} checked{% endif %}> 已在外部读过，仅标为已读</label>
   <label class="choice"><input type="radio" name="state" value="unread"{% if selected_state == 'unread' %} checked{% endif %}> 仅保存到材料存档，不加入清单</label>
 </fieldset>
-<fieldset class="field when-read" data-intake-read>
-  <legend>外部学习记录（登记已读时使用；仅单份材料）</legend>
+<details class="field when-read" data-intake-read>
+  <summary>笔记与讨论引用（可选，仅单份已读材料）</summary>
   <label for="{{ field_prefix }}-learning-notes">可粘贴 ChatGPT 讨论结论或自己的笔记</label>
   <textarea id="{{ field_prefix }}-learning-notes" name="learning_notes" rows="5">{{ learning_notes|default('') }}</textarea>
   <label for="{{ field_prefix }}-discussion">讨论链接（只保存引用，不自动读取私有对话）</label>
   <input id="{{ field_prefix }}-discussion" type="url" name="discussion_url" value="{{ discussion_url|default('') }}">
-</fieldset>
+</details>

@@ -54,11 +54,12 @@ def test_web_import_notes_and_wiki_do_not_mark_read(isolated_materials):
         assert "KV cache web material" in client.get("/materials").text
         response = client.post(f"/item/{item_id}/notes", data={"notes": "我的独立笔记"})
         assert response.status_code == 200
-        assert client.post(f"/item/{item_id}/wiki").status_code == 200
-        task = app.state.tasks.get(f"wiki-{item_id}")
-        task.thread.join(20)
-        assert task.status == "done", task.error
-        assert not task.result["failures"], task.lines
+        assert client.post(f"/item/{item_id}/wiki").status_code == 409
+        assert app.state.tasks.get(f"wiki-{item_id}") is None
+        assert client.get(f"/wiki/page/material-{item_id}").status_code == 404
+
+        result = CliRunner().invoke(cli_app, ["wiki", "ingest", str(item_id)])
+        assert result.exit_code == 0, result.output
         html = client.get(f"/item/{item_id}").text
         assert 'data-reading-state="unread"' in html
         assert "我的独立笔记" in html

@@ -388,18 +388,77 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    migrate(conn)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        migrate(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
+_SQL_PREFIX = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.S)
+_MIGRATION_VERBS = {"ALTER", "CREATE", "DELETE", "DROP", "INSERT", "REPLACE", "UPDATE", "WITH"}
+
+
+def _run_migration(conn: sqlite3.Connection, number: int, script: str) -> None:
+    if number == 10:
+        # 历史 v10 可独立执行，保留已发布脚本；运行器接管其事务及外键开关。
+        prefix = "PRAGMA foreign_keys = OFF;\n    BEGIN;"
+        suffix = "COMMIT;\n    PRAGMA foreign_keys = ON;"
+        script = script.strip()
+        if not script.startswith(prefix) or not script.endswith(suffix):
+            raise sqlite3.DatabaseError("无法识别 v10 历史迁移的事务边界")
+        script = script[len(prefix) : -len(suffix)]
+
+    # executescript 会先隐式提交已有事务；用 SQLite 的语句边界识别器逐条执行，
+    # 从而支持引号中的分号与多语句 trigger，又不允许脚本提前结束外层事务。
+    start = 0
+    for match in re.finditer(";", script):
+        end = match.end()
+        statement = script[start:end]
+        if not sqlite3.complete_statement(statement):
+            continue
+        start = end
+        body = statement[_SQL_PREFIX.match(statement).end() :]
+        if body == ";":
+            continue
+        verb = re.match(r"[A-Za-z]+", body)
+        if verb is None or verb[0].upper() not in _MIGRATION_VERBS:
+            raise sqlite3.DatabaseError(f"迁移 v{number} 包含不支持的 SQL 语句")
+        conn.execute(statement)
+    if script[start:][_SQL_PREFIX.match(script[start:]).end() :]:
+        raise sqlite3.DatabaseError(f"迁移 v{number} 包含不完整的 SQL 语句")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
-        conn.executescript(script)
-        conn.execute(f"PRAGMA user_version = {number}")
-        conn.commit()
+    if conn.in_transaction:
+        raise sqlite3.ProgrammingError("不能在已有事务中迁移数据库")
+    if conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS):
+        return  # 已升级库的普通读取不争夺写锁；实际迁移仍在锁内重读版本。
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    # v10 重建被引用的表，必须在事务开始前关外键；提交前显式检查全部外键。
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if not 0 <= version <= len(MIGRATIONS):
+            raise sqlite3.DatabaseError(
+                f"不支持的数据库 schema v{version}（当前最高 v{len(MIGRATIONS)}）"
+            )
+        for number, script in enumerate(MIGRATIONS[version:], start=version + 1):
+            _run_migration(conn, number, script)
+            conn.execute(f"PRAGMA user_version = {number}")
+        if version < len(MIGRATIONS) and conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise sqlite3.IntegrityError("迁移后的数据库有外键不一致")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {foreign_keys}")
 
 
 def upsert_sources(conn: sqlite3.Connection, sources: list[SourceConfig]) -> None:

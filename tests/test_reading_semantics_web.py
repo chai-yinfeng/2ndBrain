@@ -80,6 +80,18 @@ def count_calls():
         conn.close()
 
 
+def organize(client, app, item_id, **options):
+    import re
+
+    url = f"/item/{item_id}/wiki"
+    preview = client.post(url, data=options)
+    assert preview.status_code == 200
+    token = re.search(r'name="token" value="([0-9a-f]+)"', preview.text)[1]
+    response = client.post(url, data={"token": token, "confirm": "yes"}, follow_redirects=False)
+    assert response.status_code == 303
+    return settle(app, f"wiki-{item_id}")
+
+
 def test_follow_preview_pick_register_cache_and_human_override(environment):
     from secondbrain.web.app import create_app
 
@@ -115,24 +127,23 @@ def test_follow_preview_pick_register_cache_and_human_override(environment):
         payload = {"state": "read", "notes": notes,
                    "discussion_url": "https://chatgpt.com/c/learning-reference"}
         client.post(f"/item/{item_id}/reading", data=payload)
-        registered = settle(app, f"read-{item_id}")
-        assert registered["ingest"]["failures"] == 0
+        assert app.state.tasks.get(f"read-{item_id}") is None
+        assert count_calls() == 0
         assert f'data-item-id="{item_id}"' not in client.get("/later").text
-        assert "已登记阅读" in client.get(f"/item/{item_id}").text
+        assert "已读" in client.get(f"/item/{item_id}").text
         assert ops.material_notes(item_id) == notes
         assert not any("chatgpt.com" in url for url in environment)
+        assert organize(client, app, item_id)["failures"] == 0
         nodes = client.get("/wiki/graph.json").json()["nodes"]
         assert any(node["id"] == f"material-{item_id}" for node in nodes)
         before = count_calls()
-        client.post(f"/item/{item_id}/reading", data=payload)
-        assert settle(app, f"read-{item_id}")["cached"]
+        assert organize(client, app, item_id)["cached"] == [item_id]
         assert count_calls() == before
         source = f"material-{item_id}"
         client.post("/wiki/relation", data={
             "source": source, "target": "kv-cache", "mode": "block", "reason": "这里不要直接连接",
         })
-        client.post(f"/item/{item_id}/reading", data={**payload, "force": "1"})
-        assert not settle(app, f"read-{item_id}")["ingest"]["failures"]
+        assert not organize(client, app, item_id, force="1")["failures"]
         edges = client.get("/wiki/graph.json").json()["edges"]
         assert not any({e["source"], e["target"]} == {source, "kv-cache"} for e in edges)
         page = client.get(f"/wiki/page/{source}").text
@@ -160,8 +171,9 @@ def test_web_reference_only_external_learning_and_cli_reuse(environment):
         assert environment == []
         notes = "学习记录：KV cache 是注意力计算中的缓存。"
         client.post(f"/item/{item_id}/reading", data={"state": "read", "notes": notes})
-        result = settle(app, f"read-{item_id}")
-        assert not result["ingest"]["failures"]
+        assert count_calls() == 0
+        result = organize(client, app, item_id, include_notes="1")
+        assert not result["failures"]
         conn = db.connect()
         row = db.item_detail(conn, item_id)
         assert row["content_completeness"] == "missing" and row["content"] == ""

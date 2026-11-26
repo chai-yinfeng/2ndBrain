@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}阅读记录未保存 · Second Brain{% endblock %}
+{% block content %}
+<h1>阅读记录未保存</h1>
+<p role="alert">{{ message }}</p>
+<p>下方保留了你提交的内容，便于复制。打开当前记录核对后，再把想保留的部分加进去。</p>
+{% if notes is not none %}<label for="unsaved-notes">你提交的笔记</label><textarea id="unsaved-notes" rows="7" readonly>{{ notes }}</textarea>{% endif %}
+{% if discussion_url is not none %}<label for="unsaved-discussion">你提交的讨论引用</label><input id="unsaved-discussion" value="{{ discussion_url }}" readonly>{% endif %}
+<p><a class="fb" href="/item/{{ item_id }}?edit_notes=1#notes" target="_blank" rel="noopener">在新标签打开当前记录</a></p>
+{% endblock %}

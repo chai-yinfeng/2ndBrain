@@ -1,5 +1,6 @@
 """M7：运维（ADR 0013）——run 锁、后台任务、/ops、首页"编进 wiki"、/wiki 体检。全部离线。"""
 
+import re
 import shutil
 import subprocess
 import sys
@@ -204,13 +205,16 @@ def test_registered_pending_materials_compile_in_background(env):
     _seed_digest(item)
     client = TestClient(create_app())
     page = client.get("/wiki").text
-    assert f'href="/item/{item}#register-read"' in page
-    client.post("/tasks/wiki_ingest")
+    assert f'href="/item/{item}"' in page and 'name="item_ids"' in page
+    preview = client.post("/tasks/wiki_ingest", data={"item_ids": item})
+    token = re.search(r'name="token" value="([^"]+)"', preview.text).group(1)
+    assert client.app.state.tasks.get("wiki_ingest") is None
+    client.post("/tasks/wiki_ingest", data={"token": token, "confirm": "yes"})
     wait(client.app.state.tasks.get("wiki_ingest"))
     status = client.get("/tasks/wiki_ingest").text
     assert 'data-task-status="done"' in status
     assert f'<a href="/wiki/page/material-{item}">' in status
-    assert '<a href="/wiki/page/kv-cache">' in status and "估算费用" in status
+    assert '<a href="/wiki/page/kv-cache">' in status and "已记录费用" in status
     conn = db.connect()
     assert db.item_detail(conn, item)["processing_status"] == "processed"
     conn.close()

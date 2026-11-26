@@ -54,6 +54,8 @@ class RunReport:
     cost_usd: float = 0.0
     errors: list[str] = field(default_factory=list)
     aborted: str | None = None
+    fetch_added: int = 0
+    fetch_failures: int = 0
 
 
 def system_prompt(name: str, profile: Profile, extra: str = "") -> str:

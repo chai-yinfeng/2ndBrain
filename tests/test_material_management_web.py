@@ -61,6 +61,7 @@ def test_web_sync_requires_preview_and_preserves_notes_on_trash_restore(monkeypa
         title="Lifecycle material", state="read", learning_notes=notes,
     )
     item_id = result["results"][0]["item_id"]
+    assert ops.ingest_items([item_id], lambda _: None, require_read=True).failures == 0
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     material = wiki.find(f"material-{item_id}")
     body = material.body

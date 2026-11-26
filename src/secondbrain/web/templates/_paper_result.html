@@ -23,6 +23,13 @@
 <p class="meta break-anywhere">元数据版本：{{ c.version or '未知' }} · 来源：{{ c.provider }} · DOI：{{ c.doi or '无' }} · arXiv：{{ c.arxiv_id or '无' }}</p>
 {% if c.abstract %}<details><summary>摘要</summary><p>{{ c.abstract }}</p></details>{% endif %}
 {% if result.status == 'ambiguous' and not result.resolved_by %}
+{% if result.quick_capture %}
+<form action="/quick-capture/papers/{{ task.id }}/choose" method="post" class="add-form">
+<input type="hidden" name="candidate_id" value="{{ c.id }}">
+<p class="meta">沿用此前对 {{ result.quick_capture.backend }} 的授权：仅有实际正文时整理，不发送个人笔记。</p>
+<button type="submit" class="fb primary">选择此论文与版本，登记已读并按授权整理</button>
+</form>
+{% else %}
 <form action="/papers/choose" method="post" class="add-form">
 <input type="hidden" name="search_id" value="{{ result.search_id }}">
 <input type="hidden" name="candidate_id" value="{{ c.id }}">
@@ -35,6 +42,7 @@
 <button type="submit" class="fb primary">选择此论文与版本</button>
 </form>
 <p class="meta">CLI：sb paper choose {{ result.search_id }} {{ c.id }}</p>
+{% endif %}
 {% endif %}
 </article>
 {% endfor %}

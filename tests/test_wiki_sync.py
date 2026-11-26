@@ -290,7 +290,7 @@ def test_apply_uses_existing_ingestion_for_new_registered_material(env):
     conn, wiki = env
     iid = material(conn, "registered")
     result = apply()
-    assert result["failures"] == 0
+    assert result["failures"] == 0, result["errors"]
     assert f"material-{iid}" in result["created"]
     assert sync.preview_sync()["changes"] == []
 

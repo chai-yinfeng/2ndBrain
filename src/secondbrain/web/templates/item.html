@@ -4,7 +4,7 @@
 <article class="detail" data-item-id="{{ item.id }}">
   <header class="page-header">
     <div><p class="eyebrow">材料详情</p><h1>{{ item.title }}</h1></div>
-    <div class="page-actions">{% if item.url.startswith("http") %}<a class="fb" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">打开原文</a>{% endif %}<a class="fb" href="/later">稍后阅读</a></div>
+    <div class="page-actions">{% if safe_item_url %}<a class="fb" href="{{ safe_item_url }}" target="_blank" rel="noopener noreferrer">打开原文</a>{% endif %}<a class="fb" href="/later">稍后阅读</a></div>
   </header>
   <p class="meta">
     {{ item.source_id or "主动导入" }}{% if item.source_id %}（trust {{ item.trust }} · {{ item.role }}）{% endif %}
@@ -27,28 +27,39 @@
   {% if lifecycle.trashed %}<section class="panel"><h2>材料已在回收区</h2><p>原件、阅读记录和笔记仍保留。恢复后可继续阅读、补全文或整理；知识变更需单独预览同步。</p><form method="post" action="/materials/manage"><input type="hidden" name="item_ids" value="{{ item.id }}"><button class="fb" name="action" value="restore">恢复到默认列表</button></form>{% if notes %}<details><summary>保留的个人笔记</summary><pre class="original-content">{{ notes }}</pre></details>{% endif %}</section>{% elif lifecycle.hidden %}<p class="meta">此材料已从默认列表隐藏；阅读与知识内容保持不变。</p>{% endif %}
   {% if not lifecycle.trashed %}
   <section id="register-read" class="panel form-panel">
-    <div class="page-header"><div><h2>外部阅读与学习记录</h2><p class="help">记录你在原网站或 ChatGPT 中学到的内容；个人笔记由你维护，AI 不覆盖。</p></div></div>
-    <p>登记状态：<strong data-reading-state="{{ item.reading_state }}">{{ {"unread":"未登记阅读","reading":"阅读中","read":"已登记阅读"}.get(item.reading_state, item.reading_state) }}</strong> · 知识整理：{{ item.processing_status }} · 正文：{{ item.content_completeness }}</p>
-    <p class="meta">可在原网站或 ChatGPT 阅读，登记后移出清单，增量整理概念和关系。个人记录可清空后保存。</p>
-    <div class="toolbar">{% if queued %}<form method="post" action="/reading/{{ item.id }}/remove"><button class="fb" type="submit">移出阅读列表（保留材料）</button></form>{% else %}<form method="post" action="/reading/{{ item.id }}/add"><button class="fb" type="submit">加入阅读列表</button></form>{% endif %}</div>
-    <form id="notes" method="post" action="/item/{{ item.id }}/reading" class="add-form">
-      <input type="hidden" name="state" value="read">
-      <div class="field"><label for="learning-notes">个人学习记录（可粘贴外部讨论结论；AI 不覆盖）</label>
-      <textarea id="learning-notes" name="notes" rows="7">{{ notes }}</textarea></div>
-      <div class="field"><label for="discussion-url">外部讨论链接（只保存引用，不自动读取私有对话）</label>
-      <input id="discussion-url" name="discussion_url" type="url" value="{{ discussion_url }}"></div>
-      <p><button class="fb primary" type="submit">登记已读并整理知识</button> <button class="fb" type="submit" formaction="/item/{{ item.id }}/notes">仅保存笔记</button></p>
-      <details><summary>整理选项</summary><label class="choice"><input type="checkbox" name="force" value="1"> 强制重新整理（额外调用模型；默认相同正文与笔记复用结果）</label></details>
-      <p class="meta">{{ hints.ingest() }}；仍受单次费用上限约束。失败保留已读与笔记，可重试。</p>
-    </form>
-    {% with kind="read-" ~ item.id, task=read_task, message=None, refresh_on_done=True %}{% include "_task.html" %}{% endwith %}
-    {% if material_page %}<p><a href="/wiki/page/{{ material_page.slug }}">打开整理页{% if material_page.knowledge_status == "draft" %}（机器草稿）{% endif %}</a>{% if material_page.knowledge_status != "draft" %} · <a href="/wiki/graph?focus={{ material_page.slug }}">在知识库图谱中定位</a>{% endif %}</p>{% endif %}
-    <details><summary>高级：只生成未读材料的机器草稿</summary><p class="meta">草稿不进入正式知识库，不代表你已读。</p><button class="fb" hx-post="/item/{{ item.id }}/wiki" hx-target="#task-wiki-{{ item.id }}" hx-swap="outerHTML">整理机器草稿</button>{% with kind="wiki-" ~ item.id, task=wiki_task, message=None %}{% include "_task.html" %}{% endwith %}</details>
+    <div class="toolbar">
+      {% if item.reading_state != "read" %}<form method="post" action="/item/{{ item.id }}/reading"><button class="fb primary" name="state" value="read">标为已读</button></form>{% endif %}
+      {% if queued %}<form method="post" action="/reading/{{ item.id }}/remove"><button class="fb" type="submit">移出阅读列表</button></form>{% elif item.reading_state != "read" %}<form method="post" action="/reading/{{ item.id }}/add"><button class="fb" type="submit">加入阅读列表</button></form>{% endif %}
+    </div>
+    <p class="help">可在原站或其他工具阅读。标为已读会移出阅读列表，不打开笔记，也不调用 AI。</p>
+    {% if notes_saved %}<p class="saved" role="status">笔记与讨论引用已保存到本地。</p>{% endif %}
+    {% if completed %}<p class="saved" role="status">补充材料已处理，未自动调用 AI。{% if item.reading_state == 'read' %}如需整理，请在下方预览并重新确认。{% endif %}</p>{% endif %}
+    <details id="notes"{% if notes_saved or edit_notes %} open{% endif %}>
+      <summary>个人笔记与讨论引用（可选）</summary>
+      <form method="post" action="/item/{{ item.id }}/notes" class="add-form">
+        <input type="hidden" name="revision" value="{{ reading_revision }}">
+        <div class="field"><label for="learning-notes">个人笔记</label><textarea id="learning-notes" name="notes" rows="7">{{ notes }}</textarea></div>
+        <div class="field"><label for="discussion-url">外部讨论链接（仅保存引用，不自动读取）</label><input id="discussion-url" name="discussion_url" type="url" value="{{ discussion_url }}"></div>
+        <p class="help">与讨论链接一起保存在本地；清空后保存可删除字段。保存不改变阅读状态，也不调用 AI。</p>
+        <button class="fb" type="submit">保存笔记与引用</button>
+      </form>
+    </details>
+    {% if material_page and not material_page.is_trashed %}<p><a href="/wiki/page/{{ material_page.slug }}">打开知识页</a></p>{% endif %}
+    {% if item.reading_state == "read" and not (material_page and material_page.is_trashed) %}
+    <details id="wiki-organize"{% if organize_requested or completed or (wiki_task and not wiki_task.dismissed) %} open{% endif %}>
+      <summary>AI 整理到知识库（可选）</summary>
+      <form method="post" action="/item/{{ item.id }}/wiki" class="add-form">
+        {% include "_ingest_options.html" %}
+        <button class="fb" type="submit">预览 AI 整理…</button>
+      </form>
+      {% with kind="wiki-" ~ item.id, task=wiki_task, message=None %}{% include "_task.html" %}{% endwith %}
+    </details>
+    {% endif %}
   </section>
   {% endif %}
   <details class="panel" id="original">
     <summary>原文与导入来源</summary>
-    <p class="toolbar">{% if item.url.startswith("http") %}<a class="fb" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">打开原文链接</a>{% if not lifecycle.trashed %}<button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML">重新抓取</button><span id="refetch-result" data-refetch></span>{% endif %}{% endif %}</p>
+    <p class="toolbar">{% if safe_item_url %}<a class="fb" href="{{ safe_item_url }}" target="_blank" rel="noopener noreferrer">打开原文链接</a>{% if not lifecycle.trashed %}<button type="button" class="fb" hx-post="/item/{{ item.id }}/refetch" hx-target="#refetch-result" hx-swap="innerHTML">重新抓取</button><span id="refetch-result" data-refetch></span>{% endif %}{% endif %}</p>
     <ul class="origin-list">{% for origin in origins %}<li>{{ origin.kind }} · <span class="break-anywhere">{{ origin.locator }}</span>{% if origin.source_id %} · 信源 {{ origin.source_id }}{% endif %}{% if origin.original_path %} · <a href="/vault/{{ origin.original_path }}">原文件</a>{% endif %}
       {% if origin.metadata and origin.metadata.get('acquisition') %}{% with acquisition=origin.metadata.acquisition %}{% include "_acquisition.html" %}{% endwith %}
       {% elif origin.metadata %}<p class="meta">请求版本：{{ origin.metadata.get("requested_version") or "未指定" }} · 实际取得版本：{{ origin.metadata.get("actual_version") or "未知" }}{% if origin.actual_source_url %} · <a href="{{ origin.actual_source_url }}" target="_blank" rel="noopener">实际获取地址</a>{% endif %}</p>{% endif %}

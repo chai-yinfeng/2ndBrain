@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
+import tempfile
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -144,6 +147,8 @@ def run_once(
             return RunReport()
 
         conn = db.connect()
+        added = 0
+        failed = []
         try:
             if not no_fetch:
                 with HttpClient(fetch_fs) as client:
@@ -172,12 +177,12 @@ def run_once(
             conn.close()
 
     r = report
+    r.fetch_added = added
+    r.fetch_failures = len(failed)
     rejected = "，".join(f"{k} {v}" for k, v in r.l0_rejected.most_common()) or "无"
     echo(f"L0：检查 {r.l0_checked} 条，排除 {sum(r.l0_rejected.values())} 条（{rejected}）")
     echo(f"L1：送入 {r.l1_selected} 条，完成 {r.l1_assessed} 条，失败 {r.l1_failed} 条")
     echo(f"L2：选中 {r.l2_selected} 条，完成 {r.l2_assessed} 条，失败 {r.l2_failed} 条")
-    if r.concepts_placed:
-        echo(f"wiki：到期概念 {r.concepts_placed} 个放入温故栏")
     if r.backfill_screened or r.backfill_picked:
         echo(
             f"回补：粗筛 {r.backfill_screened} 条，选中 {r.backfill_picked} 条，"
@@ -210,15 +215,25 @@ class IngestSummary:
     pages: int = 0  # wiki 现有页面数
     errors: list[str] = field(default_factory=list)
     cached: list[int] = field(default_factory=list)
+    items: list[dict] = field(default_factory=list)
 
 
-def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSummary:
-    """增量编入 wiki；相同正文与个人笔记直接复用，付费调用仍服从单次费用上限。"""
+def ingest_items(
+    ids: list[int], echo: Echo, *, force: bool = False, include_notes: bool = False,
+    require_read: bool = False, expected_backend: str | None = None,
+    expected_models: dict[str, str] | None = None,
+) -> IngestSummary:
+    """逐项复用已有模型流程与缓存，共享单次运行费用上限。"""
     from secondbrain.wiki.ingest import ingest_item, material_input_hash, promote_material
+    from secondbrain.wiki.store import WikiError
 
     summary = IngestSummary()
     config.load_env()
     settings, fs, _ = _settings()
+    if expected_backend is not None and expected_backend != config.llm_backend(settings):
+        raise OpsError("模型后端已变更，请重新预览并确认")
+    if expected_models is not None and expected_models != dict(fs.llm.models):
+        raise OpsError("模型已变更，请重新预览并确认")
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     if not ids:
         summary.pages = len(wiki.pages)
@@ -243,31 +258,47 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
             error.accounted = True
             raise error
 
+    def fail(item: dict, message: str) -> None:
+        echo(f"{FAIL} {item['title']}：{message}")
+        summary.errors.append(message)
+        summary.failures += 1
+        item.update(status="failed", error=message)
+
+    stop = None
     try:
         for iid in dict.fromkeys(ids):
             row = db.item_detail(conn, iid)
+            item = {"id": iid, "title": row["title"] if row else str(iid)}
+            summary.items.append(item)
+            if stop:
+                item.update(status="skipped", error=stop)
+                continue
             if row is None:
-                echo(f"{FAIL} 条目不存在：{iid}")
-                summary.failures += 1
+                fail(item, "条目不存在")
+                continue
+            if db.resolve_material_id(conn, iid) != iid:
+                fail(item, "材料已归并，请选择主材料")
                 continue
             if db.is_trashed(conn, iid):
-                message = f"{row['title']} 已回收，请先恢复后再整理"
-                echo(f"{FAIL} {message}")
-                summary.errors.append(message)
-                summary.failures += 1
+                fail(item, "材料已回收，请先恢复后再整理")
                 continue
-            notes = material_notes(iid)
+            if require_read and row["reading_state"] != "read":
+                fail(item, "材料未读，不能整理")
+                continue
+            notes = material_notes(iid) if include_notes else ""
             material = wiki.material_page(iid)
             if material is not None and material.meta.get("trashed"):
-                message = f"{row['title']} 的知识页已回收，请先恢复后再整理"
-                echo(f"{FAIL} {message}")
-                summary.errors.append(message)
-                summary.failures += 1
+                fail(item, "知识页已回收，请先恢复后再整理")
                 continue
+            supported_hashes = {material_input_hash(row, notes, include_notes=include_notes)}
+            if (not include_notes and material is not None
+                    and "input_includes_notes" not in material.meta):
+                # Legacy clean input can still be promoted locally without accessing the backend.
+                supported_hashes.add(material_input_hash(row, ""))
             compiled = (
                 row["processing_status"] == "processed"
                 and material is not None
-                and material.meta.get("input_hash") == material_input_hash(row, notes)
+                and material.meta.get("input_hash") in supported_hashes
             )
             if compiled and not force:
                 _require_active(conn, iid)
@@ -277,6 +308,7 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                         if slug not in summary.updated
                     ]
                 summary.cached.append(iid)
+                item["status"] = "cached"
                 echo(f"{row['title']}：整理结果未变，复用已有页面（无模型调用）")
                 continue
             if not compiled:
@@ -286,34 +318,30 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                 try:
                     _, backend = _backend(settings, fs)
                 except OpsError as exc:
-                    echo(f"{FAIL} {row['title']}：{exc}")
-                    summary.errors.append(str(exc))
-                    summary.failures += 1
-                    break
+                    fail(item, str(exc))
+                    stop = "后端不可用，未尝试"
+                    continue
                 profile_file, _ = config.ensure_profile()
                 profile = load_profile(profile_file)
             today = datetime.now().date()
             try:
                 _, estimate, _ = ingest_item(
                     conn, wiki, backend, profile, row, fs, today,
-                    estimate_only=True, user_notes=notes,
+                    estimate_only=True, user_notes=notes, include_notes=include_notes,
                 )
-            except LLMError as exc:
-                echo(f"{FAIL} {row['title']}：{exc}")
-                summary.errors.append(str(exc))
-                summary.failures += 1
+            except (LLMError, WikiError) as exc:
+                fail(item, str(exc))
                 continue
             echo(f"{row['title']}：预估 ${estimate:.4f}")
             if summary.cost + estimate > fs.run.max_cost_usd:
-                echo(f"{FAIL} 预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
-                summary.errors.append("预估费用超过 run.max_cost_usd 上限")
-                summary.failures += 1
-                break
+                fail(item, f"预估费用超过上限 run.max_cost_usd=${fs.run.max_cost_usd}，停止")
+                stop = "费用预算约束，未尝试"
+                continue
             before = summary.cost
             try:
                 result, _, _ = ingest_item(
                     conn, wiki, backend, profile, row, fs, today,
-                    on_usage=account, user_notes=notes,
+                    on_usage=account, user_notes=notes, include_notes=include_notes,
                 )
             except LLMError as exc:
                 if not getattr(exc, "accounted", False):
@@ -323,14 +351,17 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
                         error=str(exc), model=backend.model_name("strong"),
                     )
                     conn.commit()
-                summary.errors.append(str(exc))
-                echo(f"{FAIL} {row['title']}：{exc}")
-                summary.failures += 1
+                fail(item, str(exc))
                 # 用量未知时无法确认剩余预算；不继续发起付费调用。
                 if exc.usage is None or summary.cost >= fs.run.max_cost_usd:
-                    break
+                    stop = "无法确认剩余费用预算，未尝试"
+                continue
+            except (WikiError, OSError) as exc:
+                fail(item, str(exc))
                 continue
             cost = summary.cost - before
+            item.update(status="processed", created=result.created, updated=result.updated,
+                        rejected=result.rejected, cost=cost)
             summary.created += [s for s in result.created if s not in summary.created]
             summary.updated += [s for s in result.updated if s not in summary.updated]
             echo(f"  新建：{', '.join(result.created) or '无'}")
@@ -344,22 +375,66 @@ def ingest_items(ids: list[int], echo: Echo, *, force: bool = False) -> IngestSu
     return summary
 
 
-def material_notes(item_id: int, text: str | None = None) -> str:
-    """个人笔记独立保存在同一 vault，机器整理不写此文件。"""
+class ReadingConflict(OpsError):
+    """表单读取后笔记或讨论引用有更新。"""
+
+
+@dataclass(frozen=True)
+class ReadingRecord:
+    notes: str
+    discussion_url: str
+    revision: str
+
+
+def _reading_notes_path(item_id: int) -> Path:
+    return config.wiki_dir() / "notes" / f"material-{item_id}-notes.md"
+
+
+def _read_record(conn, item_id: int, path: Path) -> tuple[ReadingRecord, dict, bytes | None]:
+    fields = db.get_ai(conn, item_id, "reading_record") or {}
+    if path.with_name(f"material-{item_id}.md").exists():
+        open_wiki(config.wiki_dir(), config.raw_dir())  # Existing no-overwrite migration.
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raw = None
+    notes = (raw or b"").decode("utf-8")
+    url = fields.get("discussion_url") or ""
+    revision = hashlib.sha256(
+        repr((item_id, fields.get("revision"), url, raw)).encode("utf-8")
+    ).hexdigest()
+    return ReadingRecord(notes, url, revision), fields, raw
+
+
+def reading_record(item_id: int) -> ReadingRecord:
     conn = db.connect()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         if not db.item_exists(conn, item_id):
             raise OpsError(f"材料不存在：{item_id}")
-        if text is not None:
-            _require_active(conn, item_id)
+        return _read_record(conn, item_id, _reading_notes_path(item_id))[0]
     finally:
         conn.close()
-    wiki = open_wiki(config.wiki_dir(), config.raw_dir())
-    path = wiki.root / "notes" / f"material-{item_id}-notes.md"
+
+
+def _replace_notes(path: Path, raw: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(raw)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def material_notes(item_id: int, text: str | None = None) -> str:
+    """兼容原有笔记读写接口和 Markdown 路径。"""
     if text is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+        return save_reading_record(item_id, notes=text).notes
+    return reading_record(item_id).notes
 
 
 def _discussion_reference(value: str) -> str | None:
@@ -387,42 +462,88 @@ def _discussion_reference(value: str) -> str | None:
     return value
 
 
+def save_reading_record(
+    item_id: int,
+    *,
+    notes: str | None = None,
+    discussion_url: str | None = None,
+    revision: str | None = None,
+    mark_read: bool = False,
+    protect_legacy_write: bool = False,
+) -> ReadingRecord:
+    """本地保存记录；None 字段不修改，空字符串明确清空。"""
+    reference = _discussion_reference(discussion_url) if discussion_url is not None else None
+    conn = db.connect()
+    path = _reading_notes_path(item_id)
+    wrote_notes = False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not db.item_exists(conn, item_id):
+            raise OpsError(f"材料不存在：{item_id}")
+        _require_active(conn, item_id)
+        record, fields, raw = _read_record(conn, item_id, path)
+        modifies_record = notes is not None or discussion_url is not None
+        if (revision is not None and revision != record.revision) or (
+            protect_legacy_write and modifies_record and revision is None
+            and fields.get("versioned_edit")
+        ):
+            raise ReadingConflict("未保存：已有较新的阅读记录，请核对后再保存。")
+        now = datetime.now(UTC)
+        if modifies_record:
+            fields = {k: v for k, v in fields.items() if not k.startswith("_")}
+            if discussion_url is not None:
+                fields["discussion_url"] = reference
+            fields["revision"] = uuid.uuid4().hex
+            if revision is not None:
+                fields["versioned_edit"] = True
+            db.set_ai(conn, item_id, "reading_record", fields, None, now)
+        if notes is not None and notes != record.notes:
+            _replace_notes(path, notes.encode("utf-8"))
+            wrote_notes = True
+        record = _read_record(conn, item_id, path)[0]
+        if mark_read:
+            db.mark_read(conn, item_id, now)  # 同一次提交登记状态和讨论引用。
+        else:
+            conn.commit()
+        return record
+    except Exception:
+        if wrote_notes:
+            if raw is None:
+                path.unlink(missing_ok=True)
+            else:
+                _replace_notes(path, raw)
+        raise
+    finally:
+        conn.close()
+
+
 def register_read(
     item_id: int,
-    echo: Echo,
+    echo: Echo | None = None,
     *,
     notes: str | None = None,
     discussion_url: str | None = None,
     force: bool = False,
+    revision: str | None = None,
+    protect_legacy_write: bool = False,
 ) -> dict:
-    """登记外部阅读事实，再增量整理；整理失败不回滚已读或用户输入。"""
-    reference = _discussion_reference(discussion_url) if discussion_url is not None else None
-    conn = db.connect()
-    try:
-        if not db.item_exists(conn, item_id):
-            raise OpsError(f"材料不存在：{item_id}")
-        _require_active(conn, item_id)
-        db.mark_read(conn, item_id, datetime.now(UTC))
-        if discussion_url is not None:
-            db.set_ai(
-                conn, item_id, "reading_record", {"discussion_url": reference},
-                None, datetime.now(UTC),
-            )
-            conn.commit()
-    finally:
-        conn.close()
-    if notes is not None:
-        material_notes(item_id, notes)
-    try:
-        summary = ingest_items([item_id], echo, force=force)
-    except OpsError as exc:
-        echo(f"{FAIL} 知识整理失败：{exc}")
-        summary = IngestSummary(failures=1, errors=[str(exc)])
-    return {
-        "item_id": item_id,
-        "ingest": summary.__dict__,
-        "cached": item_id in summary.cached,
-    }
+    """仅登记外部阅读；兼容旧参数，整理须另行发起。"""
+    if notes is None and discussion_url is None and revision is None:
+        conn = db.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if not db.item_exists(conn, item_id):
+                raise OpsError(f"材料不存在：{item_id}")
+            _require_active(conn, item_id)
+            db.mark_read(conn, item_id, datetime.now(UTC))
+        finally:
+            conn.close()
+        return {"item_id": item_id, "revision": None, "ingest": None, "cached": False}
+    record = save_reading_record(
+        item_id, notes=notes, discussion_url=discussion_url, revision=revision, mark_read=True,
+        protect_legacy_write=protect_legacy_write,
+    )
+    return {"item_id": item_id, "revision": record.revision, "ingest": None, "cached": False}
 
 
 # ---------- 信源 trust 建议 ----------
@@ -816,6 +937,8 @@ class AddResult:
     message: str = ""
     acquisition: dict = field(default_factory=dict)
     bibliography: dict = field(default_factory=dict)
+    content_completeness: str = ""
+    capture_fallback: bool = False
 
 
 MAX_PDF_UPLOAD = 30 * 1024 * 1024
@@ -1371,6 +1494,7 @@ def add_manual(
     learning_notes: str | None = None,
     discussion_url: str | None = None,
     origin_source_id: str | None = None,
+    fallback_to_reference: bool = False,
 ) -> dict:
     """URL / 独立 PDF / 文本共用去重、补全、来源记录；默认不改变已有阅读状态。"""
     import hashlib
@@ -1380,6 +1504,8 @@ def add_manual(
     urls = validate_manual(urls, state, feedback, ingest, text, pdf)
     if reference_only and (not urls or text or pdf is not None):
         raise OpsError("网页引用只接受 URL；不抓取正文，请在登记阅读时提供学习笔记")
+    if fallback_to_reference and (len(urls) > 1 or state != "read" or ingest):
+        raise OpsError("快捷补救仅用于单份已读导入，整理必须另行授权")
     if learning_notes is not None or discussion_url is not None:
         if state != "read" or len(urls) > 1:
             raise OpsError("学习记录仅用于单份已读材料")
@@ -1412,6 +1538,8 @@ def add_manual(
             try:
                 refetch_note = ""
                 failed_acquisition = {}
+                capture_fallback = False
+                reuse_capture = False
                 if reference_only:
                     row, must_fetch = None, False
                     doi, arxiv_id = _url_ids(url)
@@ -1465,11 +1593,24 @@ def add_manual(
                                 url, client, fetch_fs, fallback, fallback_method
                             )
                         except ManualFetchError as exc:
-                            if row is None or fallback:
-                                raise
-                            refetch_note = f"{REFETCH_NO_GAIN}：{exc}"
                             failed_acquisition = exc.acquisition
+                            if row is None:
+                                if not fallback_to_reference or fallback:
+                                    raise
+                                doi, arxiv_id = _url_ids(url)
+                                fetched = ManualFetched(
+                                    RawEntry(
+                                        url=url, title=title or url, doi=doi, arxiv_id=arxiv_id,
+                                    ),
+                                    "", "none", manual_canonical(url), completeness="missing",
+                                )
+                                capture_fallback = True
+                                refetch_note = f"未取得正文，已保留原链接：{exc}"
+                            else:
+                                refetch_note = f"{REFETCH_NO_GAIN}：{exc}"
                     if fetched is None:
+                        # Repeating capture of the same locator is not a new origin.
+                        reuse_capture = fallback_to_reference and row["url"] == url
                         fetched = ManualFetched(
                             RawEntry(
                                 url=url, title=row["title"], author=row["author"],
@@ -1489,6 +1630,8 @@ def add_manual(
                         "method": fetched.method, "version": "unknown",
                         "attempts": failed_acquisition.get("attempts", []),
                     }
+                    if capture_fallback:
+                        fetched.acquisition["fallback_reason"] = refetch_note
                 if fallback:
                     fetched.content, fetched.method = fallback, fallback_method
                     fetched.pdf_data = pdf
@@ -1505,7 +1648,7 @@ def add_manual(
                         status=fetched.completeness, method=fallback_method, actual_url=None
                     )
                 kind = (
-                    "reference" if reference_only else "pdf" if pdf is not None
+                    "reference" if reference_only or capture_fallback else "pdf" if pdf is not None
                     else "text" if fallback else "url"
                 )
                 material = _material(fetched, fetch_fs, title=title, kind=kind)
@@ -1514,10 +1657,14 @@ def add_manual(
                 material.origin_source_id = origin_source_id
                 if origin_source_id:
                     material.origin_kind = "source_selection"
-                item_id, created, improved = db.persist_material(
-                    conn, material, datetime.now(UTC)
-                )
-                conn.commit()
+                if reuse_capture:
+                    item_id, created, improved = row["id"], False, False
+                    fetched.acquisition["reused_existing"] = True
+                else:
+                    item_id, created, improved = db.persist_material(
+                        conn, material, datetime.now(UTC)
+                    )
+                    conn.commit()
                 status = (
                     (f"新增（{fetched.note}）" if fetched.note else "新增") if created else
                     "已存在（补全正文）" if improved else "已存在"
@@ -1535,8 +1682,10 @@ def add_manual(
                 if feedback:
                     db.add_feedback(conn, item_id, feedback, None, datetime.now(UTC))
                 row = db.item_detail(conn, item_id)
-                result = AddResult(label, status, item_id, row["title"], message,
-                                   fetched.acquisition, fetched.entry.bibliography)
+                result = AddResult(
+                    label, status, item_id, row["title"], message, fetched.acquisition,
+                    fetched.entry.bibliography, row["content_completeness"], capture_fallback,
+                )
             except Exception as exc:
                 conn.rollback()
                 result = AddResult(label, "失败", message=str(exc),
@@ -1553,15 +1702,20 @@ def add_manual(
             client.close()
     summary = None
     ids = list(dict.fromkeys(r.item_id for r in results if r.item_id is not None))
-    if (state == "read" or ingest) and ids:
-        echo(f"编入 wiki：{len(ids)} 条")
-        if state == "read" and len(ids) == 1:
-            recorded = register_read(
-                ids[0], echo, notes=learning_notes, discussion_url=discussion_url
+    if state == "read" and len(ids) == 1 and (learning_notes or discussion_url):
+        try:
+            register_read(
+                ids[0], notes=learning_notes, discussion_url=discussion_url,
+                protect_legacy_write=True,
             )
-            summary = IngestSummary(**recorded["ingest"])
-        else:
-            summary = ingest_items(ids, echo)
+        except ReadingConflict as exc:
+            echo(f"{WARN} {exc}")
+            for result in results:
+                if result.item_id == ids[0]:
+                    result.message = str(exc)
+    if ingest and ids:
+        echo(f"编入 wiki：{len(ids)} 条")
+        summary = ingest_items(ids, echo)
     return {
         "results": [r.__dict__ for r in results],
         "ingest": summary.__dict__ if summary else None,

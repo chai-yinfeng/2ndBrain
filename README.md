@@ -1,6 +1,6 @@
 # Second Brain
 
-个人信源、稍后阅读与知识网络系统。主动关注博客/网站主页、选择值得读的材料，在原站或 ChatGPT 等外部环境阅读后登记，由 AI 增量整理进 Markdown 知识库。支持 URL、网站引用、PDF、文本与论文名；推荐保留为辅助能力。M13/M15 已验收，M14 的原生 Obsidian 剩余验收仍未完成。
+个人信源、稍后阅读与知识网络系统。主动关注博客/网站主页、选择值得读的材料，在原站或 ChatGPT 等外部环境阅读后登记，由 AI 增量整理进 Markdown 知识库。支持 URL、网站引用、PDF、文本与论文名；推荐保留为辅助能力。Web 图谱可独立使用，不需要安装 Obsidian。M13/M15 已验收，M14 的原生 Obsidian 可选兼容性验收仍未完成。
 
 架构见 [docs/design.md](docs/design.md)，路线图见 [docs/roadmap.md](docs/roadmap.md)。
 
@@ -45,9 +45,12 @@ uv run sb paper choose <search_id> <candidate_id>     # 有歧义时明确选择
 uv run sb reading list                               # 用户维护的稍后阅读清单
 uv run sb reading add <item_id>                       # 加入清单，不调用模型
 uv run sb reading remove <item_id>                    # 移出清单，保留材料
-uv run sb reading read <item_id> --notes-file notes.md # 登记外部阅读并自动整理
+uv run sb reading read <item_id>                      # 只登记外部阅读；不需要笔记或模型
+uv run sb reading read <item_id> --notes-file notes.md # 同时保存可选的本地学习记录
 uv run sb reading read <item_id> --discussion-url https://chatgpt.com/c/example
-uv run sb paper add "完整论文标题" --read             # 导入时直接登记阅读并整理
+uv run sb paper add "完整论文标题" --read             # 导入时仅登记阅读
+uv run sb wiki ingest 12 16 19                        # 显式整理指定材料，默认不发送独立笔记
+uv run sb wiki ingest --pending                       # 显式整理全部已读待整理材料
 uv run sb items show <item_id>                        # 原文、来源与阅读状态
 uv run sb items notes <item_id> --file notes.md        # 仅保存个人笔记，不调用模型
 uv run sb items manage hide 1 2                       # 从材料默认列表隐藏，知识不变
@@ -75,13 +78,15 @@ uv run sb wiki rewrite clear-history <稳定路径> --yes   # 清空回退点，
 uv run sb usage --since 7d                            # 模型用量和估算费用
 ```
 
-登记阅读不要求评价或先生成 L2。原文/学习笔记不变时复用已有整理，不新增模型调用；主动加 `--force` 才强制重做。正文不完整时可补全正文，或提交学习笔记单独整理，后者明确标记“仅基于用户学习笔记”，不会冒充读过原文。讨论链接只作引用保存，不会抓取 ChatGPT 私密会话；需要纳入整理的内容请粘贴到学习笔记。
+登记阅读不要求评价、填写笔记或调用模型。已读材料进入待整理，稍后可选一份或一批显式整理；默认不发送独立学习记录，确实希望整理笔记时可以主动选纳入（CLI：`--include-notes`）。未变化的输入复用既有结果，`--force` 才强制重做。正文不完整时可补正文，或显式依据学习笔记整理；不会冒充原文。讨论链接只本地保存，不自动抓取。按批提交不是将多篇材料合成一次模型调用。
+
+如果已经读完并希望立即整理，在首页打开「我读完了」，粘贴一条链接（也可粘贴带一条链接的分享文字），或选择论文名、PDF、正文。按钮会明确授权对取得的正文整理；普通「添加材料」和「标记已读」仍不会自动调用模型。原站失败时保留已读引用，可补正文或 PDF；只取得引用或摘要时不自动整理。若论文有多个可信候选先由你选择，模型失败也不撤销原件和已读记录。
 
 辅助能力仍可显式使用：`sb run --limit 30` / `sb digest show`（过滤和推荐）、`sb summary <id>` / `sb prereq <id>`（分析）、`sb wiki ingest <id>` 或导入的 `--ingest`（未读时生成草稿）、`sb wiki ingest --pending`（重试已登记阅读但未完成整理的材料）。草稿用 `sb wiki graph --drafts` 或 Web 图谱 `?drafts=1` 查看，不进入默认正式网络或相关知识参考；回收页不会被此选项重新显示。
 
 `sb serve` 默认只监听 127.0.0.1（`--host` / `--port` 可改）。
 
-个人记录不要长期放在 `/tmp`。本机已确认的持久工作区为 `~/Library/Application Support/SecondBrain`，包含 `data/brain.db`、`data/web_tasks.db`、`data/wiki`（原件和笔记也在其中）、画像与 `config/`。迁移应停服整体复制并校验，不要重新导入或只移动数据库；已授权迁移的恢复副本位于该目录的 `migration-backups/`。
+个人记录不要长期放在 `/tmp`。本机已确认的持久工作区为 `~/Library/Application Support/SecondBrain`，包含 `data/brain.db`、`data/web_tasks.db`、`data/wiki`（原件和笔记也在其中）、画像与 `config/`。迁移应停服整体备份并校验，不要重新导入或只移动数据库；历史迁移的恢复副本位于该目录的 `migration-backups/`。
 
 在主仓库 `2ndbrain` 的 `main` 中启动并使用持久目录（不安装或修改 launchd）：
 
@@ -94,7 +99,19 @@ uv run sb serve --port 8765
 
 凭据沿用启动进程的环境变量，或在 Web 服务配置中设置到该工作区的 env 文件；迁移不会复制原项目 `.env` 的密钥。普通 `uv run sb serve` 不带上述覆盖时仍使用项目默认路径，不会自动切到个人工作区。
 
-M13–M15 的代码已从 `m13-m15-material-network` 快进整合到 `main`。以后从主仓库启动；个人工作区不随源码移动，也不要把仓库内旧 `data/` 或旧来源配置覆盖到个人工作区。
+### 备份与恢复个人工作区
+
+先停止所有写入（Web、CLI、定时任务和外部编辑器）。在当前个人工作区环境中运行：
+
+```bash
+uv run sb workspace backup "$HOME/Documents/secondbrain-backup-2026-11-24" --offline
+uv run sb workspace restore "$HOME/Documents/secondbrain-backup-2026-11-24" \
+  "$HOME/Documents/secondbrain-restored" --offline
+```
+
+目标目录必须不存在，父目录必须已存在。`--offline` 表示你已经停写，不会自动停服。备份包含两份 SQLite（任务库存在时）、知识 vault、原件、笔记与配置，生成完整性清单；恢复会校验并写入新目录，不会切换当前服务或升级数据库。恢复后使用新的 `data/`、`config/` 启动隔离实例核对，密钥与定时配置单独配置。备份仍包含个人资料，请妥善保存。旧 LaunchAgent 不自动修改；新生成的配置固定当前工作区路径，不复制 API key。
+
+M13–M15 的代码已从 `m13-m15-material-network` 整合到 `main`。以后从主仓库启动；个人工作区不随源码移动，也不要把仓库内旧 `data/` 或旧来源配置覆盖到个人工作区。
 
 `migration-backups/from-temp-20261118-041702` 保留迁移前完整副本。恢复前先停服；旧副本的来源配置含已退役类型，恢复data时应保留迁移后的正式sources配置，或先按ADR 0026转换两项类型，不能直接用旧配置启动新版代码。
 
@@ -107,8 +124,8 @@ Web 上的其他页面：
 - `/`：信源、阅读列表、知识库三个主入口；`/materials` 是材料存档，可按阅读、正文完整度、整理状态和可见范围筛选，批量隐藏、回收及恢复。已读绿色、阅读中蓝色、未读黄色/琥珀色，颜色与文字同时保留。隐藏不影响知识；回收不物理删除材料、原件或笔记。
 - `/sources`：手动输入主页，优先复用已关注配置和既有适配规则，再做 RSS、HTML 列表、sitemap 通用发现。网络失败、合法空结果和手动浏览明确区分，失败不覆盖已关注配置。关注本身不导入文章、不启动推荐；不再提供临时参考目录。
 - 已关注支持最近导入、首字母排序，以及列表／封面卡片切换，偏好保存在浏览器，不改配置顺序。名称和封面打开设置，右侧主页去原站。设置、识别、选文、采集检查与修复都在可关闭窗口中，长结果不挤压列表；关闭不取消后台任务。封面在设置中显式更新，优先网页封面、其次站点图标、最后名称首字母；展示本地安全缓存，不调用模型。
-- `/later`：自己维护的稍后清单；可打开原站、移出清单，或进入详情补充学习记录后登记阅读。
-- `/add`：链接、论文、PDF、文本共用稍后阅读、仅存档、外部已读登记；已读时可填写学习笔记和讨论链接。论文身份不明确时等待选择，保留输入，不冒充已经导入。任务入口可找回进度、结果和历史候选，详细日志默认折叠，不持续堆在表单下；服务重启后未完成任务标中断，不自动重放。
+- `/later`：自己维护的稍后清单；可打开原站、登记已读或移出清单。只在想记录自己的理解时进入详情填写笔记或讨论引用。
+- `/add`：链接、论文、PDF、文本共用稍后阅读、仅存档、外部已读登记。即使选已读，默认也不展开笔记，更不调用 AI 整理。论文身份不明确时等待选择，保留输入，不冒充已经导入。任务入口可找回进度、结果和历史候选，详细日志默认折叠，不持续堆在表单下；服务重启后未完成任务标中断，不自动重放。
 - 条目详情页：个人学习笔记、讨论引用、登记阅读、复用/强制整理、来源及完整性；机器分析与推荐反馈折叠为辅助功能。
 - `/wiki`：正式知识库、未完成整理的材料及高级视图；默认索引省略重复“已登记”，内部recorded仍仅表示来源登记过阅读，不代表概念已掌握。`/wiki/sync` 先预览再确认材料回收/恢复、已读材料正文或笔记变更；回收/恢复只管理来源状态，内容更新共用增量整理和费用上限，不强制重写整库。`/wiki/graph` 直接浏览图谱；人工关联和笔记保留。
 - `/ops`：设置与管理，包含用量、运行方式、API key 状态/配置、模型及画像入口；`/recommendations` 与 `/history` 保留为辅助推荐与历史。

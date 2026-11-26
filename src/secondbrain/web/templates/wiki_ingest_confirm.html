@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}确认 AI 整理 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><div><h1>确认 AI 整理</h1><p class="meta">已选 {{ rows|length }} 份已读材料。当前只是预览，尚未调用模型。</p></div></header>
+<section class="panel">
+  <p>所选后端：<strong>{{ backend }}</strong>{% if backend == 'fake' %}（本地模拟，不对外发送）{% else %} · 整理 {{ models.strong }}，长文分段 {{ models.cheap }}{% endif %}。</p>
+  <p>对未命中缓存的材料，提供本地保存的正文（或摘要）、标题、来源元数据、知识目录、相关页面摘录及关系。长文逐段处理，不把多份材料合成一次调用。</p>
+  {% if include_notes %}<p>已允许提供所选材料的个人笔记及相关知识页的个人笔记区和人工关系说明；整理结果可能包含笔记内容。</p>{% else %}<p>不提供独立个人笔记、可识别的笔记区或人工关系说明。正文及以前生成的知识内容仍可能包含已写入其中的个人信息。</p>{% endif %}
+  <p>不会发送或自动打开另行保存的讨论引用。节选不等同于全文。</p>
+  <ul>{% for row in rows %}<li><a href="/item/{{ row.id }}">{{ row.title }}</a>{% if row.content_completeness != 'full' %} · {{ {'partial':'正文不完整','abstract':'仅摘要','missing':'无正文'}.get(row.content_completeness, '正文状态未知') }}{% endif %}</li>{% endfor %}</ul>
+  <p class="meta">{{ hints.ingest() }}，本批次共用 ${{ max_cost }} 上限。{% if force %}已要求忽略缓存。{% else %}相同输入可复用缓存。{% endif %} 未完成项单独列出。</p>
+</section>
+<form method="post" action="{{ action }}" class="toolbar"><input type="hidden" name="token" value="{{ token }}"><button class="fb primary" type="submit" name="confirm" value="yes">确认并开始整理</button><a class="fb" href="{{ cancel }}">取消</a></form>
+{% endblock %}

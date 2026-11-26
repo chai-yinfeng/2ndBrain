@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}我读完了 · Second Brain{% endblock %}
+{% block content %}
+<header class="page-header"><div><h1>我读完了</h1><p class="meta">保存一份材料并登记已读；有可用正文时，按下方授权整理知识。</p></div><a class="fb" href="/add">仅添加材料</a></header>
+<nav class="toolbar" aria-label="输入方式">
+  <a class="fb{% if mode == 'url' %} primary{% endif %}" href="/quick-capture"{% if mode == 'url' %} aria-current="page"{% endif %}>链接、正文或 PDF</a>
+  <a class="fb{% if mode == 'paper' %} primary{% endif %}" href="/quick-capture?mode=paper"{% if mode == 'paper' %} aria-current="page"{% endif %}>论文名</a>
+</nav>
+<section class="panel form-panel">
+  {% if error %}<p class="refresh" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/quick-capture" enctype="multipart/form-data" class="add-form">
+    <input type="hidden" name="token" value="{{ token }}">
+    {% if mode == 'paper' %}
+    <div class="field"><label for="capture-query">论文名，可附作者、年份或会议</label><input id="capture-query" name="query" maxlength="1000" required value="{{ values.get('query', '') }}"></div>
+    <p class="meta">只按论文名查找。遇到同名或版本歧义，需要先选择候选；补全文可在导入后进行。</p>
+    {% else %}
+    <div class="field"><label for="capture-url">单个 URL，或一段含唯一 URL 的分享文字</label><textarea id="capture-url" name="url" rows="3">{{ values.get('url', '') }}</textarea></div>
+    <p class="meta">分享文字只用来提取链接，不会当作正文。抓不到正文时，可保留原链接并登记已读；不填链接时须提供正文或 PDF。</p>
+    <details{% if values.get('text') or values.get('title') %} open{% endif %}>
+      <summary>粘贴正文或上传 PDF（也可给链接补全文）</summary>
+      <div class="field"><label for="capture-title">标题（可选）</label><input id="capture-title" name="title" value="{{ values.get('title', '') }}"></div>
+      <div class="field"><label for="capture-text">粘贴材料正文（不是个人笔记）</label><textarea id="capture-text" name="text" rows="7">{{ values.get('text', '') }}</textarea></div>
+      <div class="field"><label for="capture-pdf">或上传 PDF（最多 30 MB）</label><input id="capture-pdf" name="pdf" type="file" accept="application/pdf,.pdf"></div>
+    </details>
+    {% endif %}
+    <div class="panel">
+      <h2>授权 AI 整理</h2>
+      <p>所选后端：<strong>{{ backend }}</strong>{% if backend == 'fake' %}（本地模拟，不对外发送）{% else %} · 整理 {{ models.strong }}，长文分段 {{ models.cheap }}{% endif %}。</p>
+      <p>先保存材料、登记已读。有全文或部分正文且未命中缓存时，才向此后端提供存下的正文、标题、来源元数据、知识目录、相关页面摘录及关系。仅有摘要或无正文时不调用 AI；正文片段不等于全文。</p>
+      <p>不发送独立个人笔记、可识别的笔记区或人工关系说明；不发送或打开另存的讨论引用。正文和已有知识内容仍可能含有写入其中的个人信息。</p>
+      <p class="meta">本次整理费用上限 ${{ max_cost }}，相同输入可复用缓存。</p>
+    </div>
+    <div class="toolbar"><button class="fb primary" type="submit" name="confirm" value="yes">保存、登记已读并授权 AI 整理</button></div>
+  </form>
+</section>
+{% endblock %}

@@ -1,5 +1,6 @@
 """M11（ADR 0018）：手动添加文章（已读 / 准备读）——CLI `sb add` 与 Web `/add`。全部离线。"""
 
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -208,6 +209,7 @@ def test_web_add_page_and_task(env):
     client.post("/add", data={"urls": f"{POST}\n{DOWN}\n", "state": "read", "feedback": "gained"})
     task = client.app.state.tasks.get("manual_add")
     task.thread.join(10)
+    assert task.status == "partial", task.error
     status = client.get("/tasks/manual_add").text
     assert 'data-add-status="新增"' in status and 'data-add-status="失败"' in status
     assert "Continuous batching in practice" in status
@@ -215,8 +217,26 @@ def test_web_add_page_and_task(env):
     assert 'data-source="manual"' not in sources  # 虚拟信源不出现在信源页
     conn = db.connect()
     assert conn.execute("SELECT id FROM sources WHERE id = 'manual'").fetchone() is None
-    item = conn.execute("SELECT id FROM items").fetchone()[0]
+    row, = conn.execute("SELECT id, url, reading_state FROM items").fetchall()
+    assert row["url"] == POST and row["reading_state"] == "read"
+    assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
     conn.close()
+    item = row["id"]
     detail = client.get(f"/item/{item}").text
-    assert client.get(f"/wiki/page/material-{item}").status_code == 200
     assert f'hx-post="/summary/{item}"' in detail and f'hx-post="/prereq/{item}"' in detail
+    page = f"/wiki/page/material-{item}"
+    assert client.get(page).status_code == 404
+    url = f"/item/{item}/wiki"
+    preview = client.post(url)
+    assert preview.status_code == 200
+    token = re.search(r'name="token" value="([^"]+)"', preview.text)
+    assert token is not None
+    assert client.app.state.tasks.get(f"wiki-{item}") is None
+    assert client.get(page).status_code == 404
+    response = client.post(url, data={"confirm": "yes", "token": token[1]}, follow_redirects=False)
+    assert response.status_code == 303
+    wiki_task = client.app.state.tasks.get(f"wiki-{item}")
+    wiki_task.thread.join(10)
+    assert wiki_task.status == "done", wiki_task.lines
+    assert client.get(page).status_code == 200
+    assert task.status == "partial"

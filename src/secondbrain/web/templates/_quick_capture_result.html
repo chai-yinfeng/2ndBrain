@@ -1,0 +1,30 @@
+<section class="panel" aria-label="快捷登记结果">
+  {% if result.capture_url %}<p class="meta break-anywhere">原链接：<a href="{{ result.capture_url }}" target="_blank" rel="noopener noreferrer">{{ result.capture_url }}</a></p>{% endif %}
+  {% for row in result.results %}
+    <p>{{ row.status }}{% if row.message %} · {{ row.message }}{% endif %}</p>
+    {% with acquisition=row.acquisition %}{% include "_acquisition.html" %}{% endwith %}
+  {% endfor %}
+  {% if result.capture_item_id %}
+    <p><a class="fb" href="/item/{{ result.capture_item_id }}">打开原材料</a> {% if result.capture_read %}已登记阅读完成。{% else %}已保存材料；阅读完成尚未确认。{% endif %}</p>
+    {% if result.capture_fallback %}<p>抓取失败，已保留原链接；该引用不等于取得全文。</p>{% endif %}
+    {% if result.capture_completeness == 'abstract' %}<p>未取得全文，仅有摘要；未调用 AI。</p>
+    {% elif result.capture_completeness == 'missing' %}<p>未取得正文；未调用 AI。</p>
+    {% elif result.capture_completeness == 'partial' %}<p>未取得全文，当前只有部分正文，整理不代表覆盖全文。</p>{% endif %}
+    {% if result.capture_completeness in ('missing', 'abstract', 'partial') %}<p><a href="/item/{{ result.capture_item_id }}#complete">补充正文或上传 PDF</a>。补全文不会自动整理；之后可在材料详情重新确认。</p>{% endif %}
+    {% if result.ingest and result.ingest.cached %}<p>已复用整理缓存，未调用模型。</p>{% endif %}
+    {% if result.capture_ai == 'done' and not result.ingest.cached %}<p>AI 整理完成。</p>{% endif %}
+    {% if result.capture_ai == 'failed' or (result.capture_ai == 'pending' and not task.running) %}<p class="refresh">AI 整理尚未完成；材料与已读记录均已保留。</p>{% endif %}
+    {% if result.ingest %}
+      {% for error in result.ingest.errors %}<p class="refresh">{{ error }}</p>{% endfor %}
+      {% for slug in result.ingest.created + result.ingest.updated %}<a href="/wiki/page/{{ slug }}">{{ wiki_title(slug) }}</a> {% endfor %}
+    {% endif %}
+    {% if result.capture_completeness in ('full', 'partial') and not task.running %}
+      <p><a href="/item/{{ result.capture_item_id }}?organize=1#wiki-organize">前往材料详情重新确认与整理</a></p>
+    {% endif %}
+  {% elif not task.running and task.status not in ('waiting', 'resolved') %}
+    {% if result.capture_choice_of %}<p><a href="/task-history/{{ result.capture_choice_of }}">返回论文候选并重试</a></p>
+    {% elif result.capture_url %}<p><a href="/quick-capture?url={{ result.capture_url|urlencode }}">保留原链接，粘贴正文 / 上传 PDF 并重新确认</a></p>
+    {% elif result.capture_mode == 'paper' %}<p><a href="/quick-capture?mode=paper">重新输入论文名</a> · <a href="/quick-capture">改用链接</a></p>
+    {% else %}<p><a href="/quick-capture">返回快捷入口重新提交</a></p>{% endif %}
+  {% endif %}
+</section>

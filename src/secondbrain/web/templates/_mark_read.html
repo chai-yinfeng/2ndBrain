@@ -1,0 +1,5 @@
+<form method="post" action="/item/{{ item_id }}/reading">
+  <input type="hidden" name="return_to" value="{{ return_to }}">
+  {% if return_to == 'materials' %}{% for name, value in [('q',query),('reading',reading),('processing',processing),('completeness',completeness),('view',view)] %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}{% endif %}
+  <button type="submit" class="fb small" name="state" value="read">标为已读</button>
+</form>

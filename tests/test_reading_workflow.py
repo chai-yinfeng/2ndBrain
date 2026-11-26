@@ -156,7 +156,7 @@ def test_subscription_fetch_and_default_manual_import_do_not_autoqueue(workflow,
         conn.close()
 
 
-def test_manual_later_only_enqueues_and_manual_read_compiles_by_default(workflow):
+def test_manual_read_is_local_unless_ingest_explicitly_requested(workflow):
     later = ops.add_manual([], lambda _: None, text=BODY, state="later")
     item_id = later["results"][0]["item_id"]
     conn = db.connect()
@@ -166,8 +166,10 @@ def test_manual_later_only_enqueues_and_manual_read_compiles_by_default(workflow
     finally:
         conn.close()
     read = ops.add_manual([], lambda _: None, text=BODY, state="read")
-    assert read["ingest"]["failures"] == 0
-    assert calls()
+    assert read["ingest"] is None
+    assert calls() == []
+    explicit = ops.add_manual([], lambda _: None, text=BODY, state="read", ingest=True)
+    assert explicit["ingest"]["failures"] == 0 and calls()
     conn = db.connect()
     try:
         assert db.reading_list_items(conn) == []
@@ -188,8 +190,9 @@ def test_register_read_notes_reference_and_unchanged_cache_need_no_key(workflow,
         lambda *_a, **_kw: pytest.fail("登记外部讨论只保存链接，不抓取聊天"),
     )
     first = ops.register_read(item_id, lambda _: None, notes=notes, discussion_url=reference)
-    assert not first["cached"] and first["ingest"]["failures"] == 0
-    assert first["ingest"]["cost"] > 0
+    assert first["ingest"] is None and calls() == []
+    summary = ops.ingest_items([item_id], lambda _: None, include_notes=True, require_read=True)
+    assert not summary.failures and summary.cost > 0
     assert any(
         "我的结论：先比较 KV cache 与 activation cache。" in messages[-1]["content"]
         for messages, _, _ in backend.calls
@@ -205,7 +208,8 @@ def test_register_read_notes_reference_and_unchanged_cache_need_no_key(workflow,
         assert db.get_ai(conn, item_id, "reading_record")["discussion_url"] == reference
         wiki = open_wiki(config.wiki_dir(), config.raw_dir())
         assert (
-            wiki.pages[f"material-{item_id}"].meta["input_hash"] == material_input_hash(row, notes)
+            wiki.pages[f"material-{item_id}"].meta["input_hash"]
+            == material_input_hash(row, notes, include_notes=True)
         )
     finally:
         conn.close()
@@ -216,8 +220,9 @@ def test_register_read_notes_reference_and_unchanged_cache_need_no_key(workflow,
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(ops, "_backend", forbidden_backend)
     second = ops.register_read(item_id, lambda _: None, discussion_url=reference + "-updated")
-    assert second["cached"] and second["ingest"]["cost"] == 0
-    assert ops.ingest_items([item_id, item_id], lambda _: None).failures == 0
+    assert second["ingest"] is None
+    reused = ops.ingest_items([item_id, item_id], lambda _: None, include_notes=True)
+    assert reused.cached == [item_id]
     assert calls() == before
     assert ops.material_notes(item_id) == notes
     conn = db.connect()
@@ -235,8 +240,12 @@ def test_unread_compilation_is_promoted_without_new_calls_or_mastery_change(work
     assert wiki.pages[f"material-{item_id}"].meta["knowledge_status"] == "draft"
     mastery = {slug: page.meta.get("mastery") for slug, page in wiki.pages.items()}
     monkeypatch.setattr(ops, "_backend", lambda *_: pytest.fail("promote 不能调用后端"))
-    result = ops.register_read(item_id, lambda _: None)
-    assert result["cached"] and result["ingest"]["cost"] == 0
+    ops.register_read(item_id)
+    assert open_wiki(config.wiki_dir(), config.raw_dir()).pages[
+        f"material-{item_id}"
+    ].knowledge_status == "draft"
+    result = ops.ingest_items([item_id], lambda _: None)
+    assert result.cached == [item_id] and result.cost == 0
     wiki = open_wiki(config.wiki_dir(), config.raw_dir())
     assert wiki.pages[f"material-{item_id}"].meta["knowledge_status"] == "recorded"
     assert {slug: page.meta.get("mastery") for slug, page in wiki.pages.items()} == mastery
@@ -246,23 +255,28 @@ def test_unread_compilation_is_promoted_without_new_calls_or_mastery_change(work
 def test_changed_notes_body_and_force_recompile_but_stable_input_does_not(workflow):
     _, backend, _ = workflow
     item_id = add_material(completeness="partial")
-    ops.register_read(item_id, lambda _: None, notes="First personal conclusion.")
+    ops.register_read(item_id, notes="First personal conclusion.")
+
+    def organize(force=False):
+        return ops.ingest_items([item_id], lambda _: None, force=force, include_notes=True)
+
+    organize()
     first_count = len(backend.calls)
     assert first_count > 0
     ops.material_notes(item_id, "An updated personal conclusion.")
-    assert not ops.register_read(item_id, lambda _: None)["cached"]
+    assert not organize().cached
     assert len(backend.calls) > first_count
     second_count = len(backend.calls)
     add_material(body=BODY + " More complete source body.", completeness="full")
-    assert not ops.register_read(item_id, lambda _: None)["cached"]
+    assert not organize().cached
     assert len(backend.calls) > second_count
     third_count = len(backend.calls)
-    assert ops.register_read(item_id, lambda _: None)["cached"]
+    assert organize().cached
     assert len(backend.calls) == third_count
-    assert not ops.register_read(item_id, lambda _: None, force=True)["cached"]
+    assert not organize(force=True).cached
     assert len(backend.calls) > third_count
     force_count = len(backend.calls)
-    ops.ingest_items([item_id, item_id], lambda _: None, force=True)
+    ops.ingest_items([item_id, item_id], lambda _: None, force=True, include_notes=True)
     assert len(backend.calls) == force_count + 1
     assert ops.material_notes(item_id) == "An updated personal conclusion."
 
@@ -275,7 +289,8 @@ def test_budget_rejection_keeps_read_notes_and_can_retry(workflow):
     conn.close()
     filters.run.max_cost_usd = 0
     result = ops.register_read(item_id, lambda _: None, notes="已在外部学过；费用失败也保留。")
-    assert result["ingest"]["failures"] == 1 and not result["cached"]
+    assert result["ingest"] is None
+    assert ops.ingest_items([item_id], lambda _: None).failures == 1
     assert backend.calls == [] and calls() == []
     conn = db.connect()
     try:
@@ -286,15 +301,15 @@ def test_budget_rejection_keeps_read_notes_and_can_retry(workflow):
     finally:
         conn.close()
     filters.run.max_cost_usd = 100
-    assert ops.register_read(item_id, lambda _: None)["ingest"]["failures"] == 0
+    assert ops.ingest_items([item_id], lambda _: None).failures == 0
     assert ops.material_notes(item_id) == "已在外部学过；费用失败也保留。"
     before = calls()
     filters.run.max_cost_usd = 0
-    assert ops.register_read(item_id, lambda _: None)["cached"]
-    forced = ops.register_read(item_id, lambda _: None, force=True)
-    assert forced["ingest"]["failures"] == 1
+    assert ops.ingest_items([item_id], lambda _: None).cached
+    forced = ops.ingest_items([item_id], lambda _: None, force=True)
+    assert forced.failures == 1
     assert calls() == before
-    assert ops.register_read(item_id, lambda _: None)["cached"]
+    assert ops.ingest_items([item_id], lambda _: None).cached
     assert calls() == before
 
 
@@ -304,8 +319,8 @@ def test_failed_calls_record_usage_and_read_survives_retry(workflow, known_usage
     item_id = add_material()
     backend.fail_at = 1
     backend.failure_usage = Usage("workflow-test", 10, 0, 10, 3) if known_usage else None
-    result = ops.register_read(item_id, lambda _: None)
-    assert result["ingest"]["failures"] == 1
+    ops.register_read(item_id)
+    assert ops.ingest_items([item_id], lambda _: None).failures == 1
     record, = calls()
     assert record["usage_known"] == int(known_usage) and record["error"] == "离线模型失败"
     conn = db.connect()
@@ -315,7 +330,7 @@ def test_failed_calls_record_usage_and_read_survives_retry(workflow, known_usage
     finally:
         conn.close()
     backend.fail_at = None
-    assert ops.register_read(item_id, lambda _: None)["ingest"]["failures"] == 0
+    assert ops.ingest_items([item_id], lambda _: None).failures == 0
     assert len(calls()) == 2
 
 
@@ -335,8 +350,8 @@ def test_actual_budget_overrun_accounts_once_and_retains_read(workflow):
     item_id = add_material()
     filters.run.max_cost_usd = 1
     backend.actual_tokens = 100_000_000
-    result = ops.register_read(item_id, lambda _: None)
-    assert result["ingest"]["failures"] == 1
+    ops.register_read(item_id)
+    assert ops.ingest_items([item_id], lambda _: None).failures == 1
     record, = calls()
     assert record["cost_usd"] > 1 and "run.max_cost_usd" in record["error"]
     assert record["usage_known"] == 1
@@ -356,7 +371,8 @@ def test_backend_configuration_failure_does_not_undo_registration(workflow, monk
 
     monkeypatch.setattr(ops, "_backend", missing_backend)
     result = ops.register_read(item_id, lambda _: None, notes="My retained notes")
-    assert result["ingest"]["failures"] == 1 and not result["cached"]
+    assert result["ingest"] is None
+    assert ops.ingest_items([item_id], lambda _: None).failures == 1
     assert ops.material_notes(item_id) == "My retained notes"
     conn = db.connect()
     try:

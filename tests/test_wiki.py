@@ -169,7 +169,8 @@ def test_ingest_pending_creates_pages_index_log(env, conn):
     assert again.exit_code == 0, again.output
     assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == calls_before
     explicit = runner.invoke(cli_app, ["wiki", "ingest", str(item)])
-    assert "已编入 wiki" in explicit.output
+    assert "复用已有页面（无模型调用）" in explicit.output
+    assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == calls_before
     assert len(_wiki(env).pages) == 3
 
 

@@ -5,15 +5,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from pathlib import Path
 
+from secondbrain import config
 from secondbrain.models import PricingSchedule
 
 LABEL = "com.secondbrain.run"
@@ -67,6 +70,19 @@ def utc_checks(local: time, schedule: PricingSchedule, year: int | None = None) 
     return checks
 
 
+def workspace_environment() -> dict[str, str]:
+    """Persist resolved paths, not the contents of the caller's environment or credential file."""
+    paths = {
+        "SB_DATA_DIR": str(config.data_dir().resolve()),
+        "SB_CONFIG_DIR": str(config.config_dir().resolve()),
+        "SB_ENV_FILE": str(config.env_file().resolve()),
+    }
+    backend = os.environ.get("SB_LLM_BACKEND")
+    if backend in config.KNOWN_LLM_BACKENDS:
+        paths["SB_LLM_BACKEND"] = backend
+    return paths
+
+
 def build_plist(local: time, project_root: Path, log_dir: Path, uv: str) -> bytes:
     payload = {
         "Label": LABEL,
@@ -75,7 +91,11 @@ def build_plist(local: time, project_root: Path, log_dir: Path, uv: str) -> byte
         "StartCalendarInterval": {"Hour": local.hour, "Minute": local.minute},
         "StandardOutPath": str(log_dir / "run.log"),
         "StandardErrorPath": str(log_dir / "run.err.log"),
-        "EnvironmentVariables": {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
+        "EnvironmentVariables": {
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            **workspace_environment(),
+            "SB_SCHEDULED_RUN": "1",
+        },
         "RunAtLoad": False,
     }
     return plistlib.dumps(payload)
@@ -96,6 +116,41 @@ class ScheduleStatus:
     path: Path
     at: time | None = None  # 每天运行的本地时间
     loaded: bool | None = None  # launchctl 是否已加载（未安装时为 None）
+    workspace_matches: bool = False
+    data_dir: str | None = None
+    last_result: dict | None = None
+
+
+def record_result(status: str) -> None:
+    """仅记录非敏感结果，不含日志、异常内容、标题或环境变量。"""
+    path = config.data_dir() / "scheduled-run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        delete=False,
+    ) as tmp:
+        staging = Path(tmp.name)
+        try:
+            json.dump({"status": status, "at": datetime.now(UTC).isoformat()}, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+
+
+def _last_result() -> dict | None:
+    try:
+        data = json.loads((config.data_dir() / "scheduled-run.json").read_text(encoding="utf-8"))
+        state = data["status"]
+        if state not in {"success", "partial", "empty", "locked", "failed"}:
+            return None
+        at = datetime.fromisoformat(data["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"status": state, "at": at.astimezone().strftime("%Y-%m-%d %H:%M")}
 
 
 def status(runner: Runner | None = None) -> ScheduleStatus:
@@ -105,12 +160,26 @@ def status(runner: Runner | None = None) -> ScheduleStatus:
     if not path.exists():
         return ScheduleStatus(False, path)
     try:
-        interval = plistlib.loads(path.read_bytes()).get("StartCalendarInterval") or {}
+        payload = plistlib.loads(path.read_bytes())
+        env = payload.get("EnvironmentVariables") or {}
+        interval = payload.get("StartCalendarInterval") or {}
         at = time(int(interval["Hour"]), int(interval["Minute"]))
-    except (plistlib.InvalidFileException, KeyError, ValueError, TypeError):
-        at = None
+    except (plistlib.InvalidFileException, KeyError, ValueError, TypeError, AttributeError):
+        env, at = {}, None
+    expected = workspace_environment()
+    keys = ("SB_DATA_DIR", "SB_CONFIG_DIR", "SB_ENV_FILE")
+    matches = isinstance(env, dict) and all(env.get(key) == expected[key] for key in keys)
+    data_dir = env.get("SB_DATA_DIR") if isinstance(env, dict) else None
     result = runner(["launchctl", "list", LABEL], capture_output=True, check=False)
-    return ScheduleStatus(True, path, at, result.returncode == 0)
+    return ScheduleStatus(
+        True,
+        path,
+        at,
+        result.returncode == 0,
+        matches,
+        data_dir if isinstance(data_dir, str) else None,
+        _last_result() if matches else None,
+    )
 
 
 def install(local: time, project_root: Path, log_dir: Path, runner: Runner | None = None) -> Path:

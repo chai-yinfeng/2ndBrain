@@ -16,7 +16,10 @@
     {% with result=task.result %}{% include "_paper_result.html" %}{% endwith %}
     </details>
   {% endif %}
-  {% if task.result and not task.running and not kind.startswith("paper-") %}
+  {% if task.result.quick_capture %}
+    {% with result=task.result %}{% include "_quick_capture_result.html" %}{% endwith %}
+  {% endif %}
+  {% if task.result and not task.running and not kind.startswith("paper-") and not task.result.quick_capture %}
     <details open><summary>查看 / 收起任务结果</summary>
     {% if kind.startswith("read-") %}
       {% set summary=task.result.ingest %}
@@ -34,7 +37,10 @@
     {% elif kind == "wiki_ingest" or kind.startswith("wiki-") %}
       <p>新建：{% for s in task.result.created %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
       <p>更新：{% for s in task.result.updated %}<a href="/wiki/page/{{ s }}">{{ wiki_title(s) }}</a>{% if not loop.last %}、{% endif %}{% else %}无{% endfor %}</p>
-      <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
+      <p class="meta">已记录费用 ${{ "%.4f" | format(task.result.cost) }}{% if task.result.failures %} · 失败 {{ task.result.failures }} 条{% endif %}</p>
+      {% if task.result.get('items') %}<ul>{% for item in task.result['items'] %}
+        <li><a href="/item/{{ item.id }}">{{ item.title }}</a> · {{ {'processed':'已整理','cached':'复用缓存（未调用模型）','failed':'失败','skipped':'未尝试'}.get(item.status, item.status) }}{% if item.error %}：{{ item.error }}{% endif %}{% for warning in item.rejected %}<p class="meta">未采用：{{ warning }}</p>{% endfor %}</li>
+      {% endfor %}</ul>{% endif %}
     {% elif kind == "run" %}
       <p class="meta">估算费用 ${{ "%.4f" | format(task.result.cost) }} · <a href="/recommendations">查看每日推荐</a></p>
     {% elif kind == "manual_add" %}

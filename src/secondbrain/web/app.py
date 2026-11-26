@@ -343,14 +343,6 @@ def _active_sources() -> int:
         return 0
 
 
-def _ingest_task(task: Task) -> dict:
-    with _conn() as conn:
-        ids = pending_items(conn, _wiki())
-    task.log(f"待编进 wiki：{len(ids)} 条")
-    s = ops.ingest_items(ids, task.log)
-    return {"created": s.created, "updated": s.updated, "cost": s.cost, "failures": s.failures}
-
-
 class CostHints:
     """按钮旁的费用提示：按当前配置的模型与价格表估算（高峰全价，非高峰 × off_peak_multiplier）。"""
 
@@ -461,7 +453,6 @@ def _editable_sources() -> tuple[Path, list[SourceConfig]]:
 # 后台任务：kind → (标题, 函数)
 TASKS = {
     "run": ("立即运行（与 sb run 相同）", _run_task),
-    "wiki_ingest": ("编进 wiki", _ingest_task),
 }
 
 
@@ -541,6 +532,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     tasks = TaskRegistry(config.data_dir() / "web_tasks.db")
     tasks.recover_papers(db.db_path().resolve())
     app.state.tasks = tasks
+    ingest_previews: dict[str, dict] = {}
+    capture_previews: dict[str, dict] = {}
 
     def task_fragment(
         request: Request, kind: str, message: str | None = None, refresh: bool = False
@@ -797,7 +790,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 (item_id,),
             ).fetchall()
             queued = any(r["id"] == item_id for r in db.reading_list_items(conn))
-            reading_record = db.get_ai(conn, item_id, "reading_record") or {}
+        reading_record = ops.reading_record(item_id)
         prereqs = (l2 or {}).get("prerequisites", [])
         return templates.TemplateResponse(
             request,
@@ -822,75 +815,156 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "incomplete": incomplete,
                 "hints": CostHints(_settings()),
                 "origins": origins,
-                "notes": ops.material_notes(item_id),
+                "notes": reading_record.notes,
                 "material_page": _wiki().material_page(item_id),
                 "wiki_task": tasks.get(f"wiki-{item_id}"),
                 "queued": queued,
-                "read_task": tasks.get(f"read-{item_id}"),
-                "discussion_url": reading_record.get("discussion_url") or "",
+                "discussion_url": reading_record.discussion_url,
+                "reading_revision": reading_record.revision,
+                "notes_saved": request.query_params.get("notes_saved") == "1",
+                "edit_notes": request.query_params.get("edit_notes") == "1",
+                "organize_requested": request.query_params.get("organize") == "1",
+                "completed": request.query_params.get("completed") == "1",
+                "safe_item_url": safe_url(row["url"]),
             },
         )
 
+    def record_form(form, name: str) -> str | None:
+        value = form.get(name)
+        return _normalize_newlines(value) if isinstance(value, str) else None
+
+    def reading_problem(request, item_id, exc, notes, discussion_url, *, conflict=False):
+        if not conflict:
+            raise HTTPException(422, str(exc)) from exc
+        return templates.TemplateResponse(request, "reading_conflict.html", {
+            "item_id": item_id, "message": str(exc), "notes": notes,
+            "discussion_url": discussion_url,
+        }, status_code=409)
+
     @app.post("/item/{item_id}/reading")
-    async def material_reading(
-        request: Request, item_id: int, state: str = Form(...), notes: str | None = Form(None),
-        discussion_url: str | None = Form(None), force: bool = Form(False),
-    ) -> RedirectResponse:
+    async def material_reading(request: Request, item_id: int, state: str = Form(...)):
         if state not in {"unread", "reading", "read"}:
             raise HTTPException(400, "阅读状态必须为 unread / reading / read")
         with _conn() as conn:
             if not db.item_exists(conn, item_id):
                 raise HTTPException(404, "材料不存在")
+            if db.is_trashed(conn, item_id):
+                raise HTTPException(409, "材料已回收，请先恢复")
             if state != "read":
                 db.set_reading_state(conn, item_id, state)
+        form = await request.form()
+        notes, discussion_url = (record_form(form, name) for name in ("notes", "discussion_url"))
         if state == "read":
-            form = await request.form()
-            if "notes" in form:
-                notes = _normalize_newlines(str(form["notes"]))
-            if "discussion_url" in form:
-                discussion_url = str(form["discussion_url"]).strip()
-            if discussion_url and safe_url(discussion_url) is None:
-                raise HTTPException(400, "讨论链接只接受 http(s)，不会自动读取私有对话")
-
-            def run(task: Task) -> dict:
-                return ops.register_read(
-                    item_id, task.log, notes=notes, discussion_url=discussion_url, force=force
-                )
-
             try:
-                tasks.start(f"read-{item_id}", "登记阅读并整理知识", run)
-            except TaskRunning:
-                pass
-        return RedirectResponse(f"/item/{item_id}#register-read", status_code=303)
+                ops.register_read(
+                    item_id, notes=notes, discussion_url=discussion_url,
+                    revision=record_form(form, "revision"), protect_legacy_write=True,
+                )
+            except ops.ReadingConflict as exc:
+                return reading_problem(request, item_id, exc, notes, discussion_url, conflict=True)
+            except ops.OpsError as exc:
+                return reading_problem(request, item_id, exc, notes, discussion_url)
+        if form.get("return_to") == "home":
+            return RedirectResponse("/", status_code=303)
+        if form.get("return_to") == "later":
+            return RedirectResponse("/later", status_code=303)
+        if form.get("return_to") == "materials":
+            return RedirectResponse(materials_location(form), status_code=303)
+        saved = state == "read" and (notes is not None or discussion_url is not None)
+        result = "?notes_saved=1#notes" if saved else "#register-read"
+        return RedirectResponse(f"/item/{item_id}{result}", status_code=303)
 
     @app.post("/item/{item_id}/notes")
-    async def material_notes_save(request: Request, item_id: int) -> RedirectResponse:
+    async def material_notes_save(request: Request, item_id: int):
         form = await request.form()
-        if "notes" not in form or not isinstance(form["notes"], str):
+        notes, discussion_url = (record_form(form, name) for name in ("notes", "discussion_url"))
+        if notes is None:
             raise HTTPException(422, "需要 notes 字段；未修改已有笔记")
-        notes = form["notes"]
         try:
-            ops.material_notes(item_id, _normalize_newlines(notes))
+            ops.save_reading_record(
+                item_id, notes=notes, discussion_url=discussion_url,
+                revision=record_form(form, "revision"), protect_legacy_write=True,
+            )
+        except ops.ReadingConflict as exc:
+            return reading_problem(request, item_id, exc, notes, discussion_url, conflict=True)
         except ops.OpsError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        return RedirectResponse(f"/item/{item_id}#notes", status_code=303)
+            return reading_problem(request, item_id, exc, notes, discussion_url)
+        return RedirectResponse(f"/item/{item_id}?notes_saved=1#notes", status_code=303)
+
+    def ingest_destination() -> tuple[str, FilterSettings]:
+        config.load_env()
+        settings, fs, _ = ops._settings()
+        return config.llm_backend(settings), fs
+
+    async def confirm_ingest(request: Request, item_id: int | None = None):
+        form = await request.form()
+        kind = f"wiki-{item_id}" if item_id is not None else "wiki_ingest"
+        action = f"/item/{item_id}/wiki" if item_id is not None else "/tasks/wiki_ingest"
+        page_url = f"/item/{item_id}" if item_id is not None else "/wiki"
+        destination = page_url + "#wiki-organize"
+        backend, fs = ingest_destination()
+        if form.get("confirm") == "yes":
+            token = str(form.get("token") or "")
+            preview = ingest_previews.get(token)
+            if not preview or preview["kind"] != kind:
+                raise HTTPException(409, "确认已过期，请返回重新预览")
+            if preview["backend"] != backend or preview["models"] != dict(fs.llm.models):
+                raise HTTPException(409, "模型后端或模型已变更，请重新预览并确认")
+            if ops.is_running():
+                raise HTTPException(409, "有其他运行或整理任务，请完成后再确认")
+            ids = preview["ids"]
+
+            def run(task: Task) -> dict:
+                with ops.run_lock():
+                    result = ops.ingest_items(
+                        ids, task.log, require_read=True, include_notes=preview["include_notes"],
+                        force=preview["force"], expected_backend=backend,
+                        expected_models=preview["models"],
+                    )
+                return result.__dict__
+
+            try:
+                tasks.start(kind, "AI 整理已读材料", run)
+            except TaskRunning as exc:
+                raise HTTPException(409, str(exc)) from exc
+            ingest_previews.pop(token, None)
+            return RedirectResponse(destination, status_code=303)
+
+        try:
+            ids = [item_id] if item_id is not None else list(dict.fromkeys(
+                int(value) for value in form.getlist("item_ids")
+            ))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, "材料选择无效") from exc
+        if not ids or len(ids) > 100 or any(iid <= 0 or iid > 2**63 - 1 for iid in ids):
+            raise HTTPException(422, "请勾选 1 至 100 份已读材料")
+        wiki = _wiki()
+        rows = []
+        with _conn() as conn:
+            for iid in ids:
+                row = db.item_detail(conn, iid)
+                page = wiki.material_page(iid)
+                if (row is None or db.resolve_material_id(conn, iid) != iid
+                        or row["reading_state"] != "read" or db.is_trashed(conn, iid)
+                        or (page is not None and page.is_trashed)):
+                    raise HTTPException(409, "所选材料已变化；请只选择未回收、未归并的已读材料")
+                rows.append(row)
+        token = uuid.uuid4().hex
+        preview = {
+            "kind": kind, "ids": ids, "backend": backend, "models": dict(fs.llm.models),
+            "include_notes": form.get("include_notes") == "1", "force": form.get("force") == "1",
+        }
+        if len(ingest_previews) >= 64:
+            ingest_previews.pop(next(iter(ingest_previews)))
+        ingest_previews[token] = preview
+        return templates.TemplateResponse(request, "wiki_ingest_confirm.html", {
+            **preview, "rows": rows, "token": token, "action": action, "cancel": destination,
+            "hints": CostHints(fs), "max_cost": fs.run.max_cost_usd,
+        })
 
     @app.post("/item/{item_id}/wiki", response_class=HTMLResponse)
-    def material_wiki(request: Request, item_id: int) -> HTMLResponse:
-        with _conn() as conn:
-            if not db.item_exists(conn, item_id):
-                raise HTTPException(404, "材料不存在")
-        kind = f"wiki-{item_id}"
-
-        def run(task: Task) -> dict:
-            result = ops.ingest_items([item_id], task.log)
-            return result.__dict__
-
-        try:
-            tasks.start(kind, "整理材料入 wiki", run)
-        except TaskRunning as exc:
-            return task_fragment(request, kind, str(exc))
-        return task_fragment(request, kind)
+    async def material_wiki(request: Request, item_id: int):
+        return await confirm_ingest(request, item_id)
 
     @app.get("/history", response_class=HTMLResponse)
     def history(request: Request) -> HTMLResponse:
@@ -912,6 +986,165 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
                 "filter_query": f"&{query}" if query else "",
             },
         )
+
+    def capture_authorization() -> dict:
+        backend, fs = ingest_destination()
+        return {"backend": backend, "models": dict(fs.llm.models), "max_cost": fs.run.max_cost_usd}
+
+    def capture_form(request: Request, mode: str, *, error: str = "", values=None):
+        auth = capture_authorization()
+        token = uuid.uuid4().hex
+        if len(capture_previews) >= 64:
+            capture_previews.pop(next(iter(capture_previews)))
+        capture_previews[token] = {"mode": mode, "auth": auth}
+        return templates.TemplateResponse(request, "quick_capture.html", {
+            **auth, "mode": mode, "token": token, "error": error,
+            "values": values if values is not None else request.query_params,
+        }, status_code=422 if error else 200)
+
+    @app.get("/quick-capture", response_class=HTMLResponse)
+    async def quick_capture_page(request: Request):
+        mode = "paper" if request.query_params.get("mode") == "paper" else "url"
+        return capture_form(request, mode)
+
+    def finish_capture(result: dict, item_id: int | None, task: Task, auth: dict) -> dict:
+        result.update(task.result, ingest=None, capture_item_id=item_id)
+        task.result = result
+        task.save()  # AI 失败、进程重启时，仍保留导入结果和原材料。
+        if item_id is None:
+            return result
+        ops.register_read(item_id)
+        result["capture_read"] = True
+        task.save()
+
+        def completeness() -> str:
+            with _conn() as conn:
+                row = db.item_detail(conn, item_id)
+                if not row or not (row["original_text"] or "").strip():
+                    return "missing"
+                return row["content_completeness"]
+
+        result["capture_completeness"] = content = completeness()
+        result["capture_ai"] = "pending" if content in {"full", "partial"} else "skipped"
+        task.save()
+        if result["capture_ai"] == "skipped":
+            return result
+        try:
+            with ops.run_lock():
+                result["capture_completeness"] = content = completeness()
+                if content not in {"full", "partial"}:
+                    result["capture_ai"] = "skipped"
+                    return result
+                if capture_authorization() != auth:
+                    raise ops.OpsError("模型后端、模型或费用上限已变更，请在材料详情重新确认")
+                summary = ops.ingest_items(
+                    [item_id], task.log, require_read=True, include_notes=False,
+                    expected_backend=auth["backend"], expected_models=auth["models"],
+                )
+        except Exception:
+            result["capture_ai"] = "failed"
+            raise
+        result["ingest"] = summary.__dict__
+        result["capture_ai"] = "failed" if summary.failures else "done"
+        return result
+
+    @app.post("/quick-capture", response_class=HTMLResponse)
+    async def quick_capture_submit(request: Request):
+        from secondbrain import capture, papers
+
+        async with request.form() as form:
+            token = str(form.get("token") or "")
+            preview = capture_previews.get(token)
+            if form.get("confirm") != "yes" or not preview:
+                raise HTTPException(409, "请打开「我读完了」并明确授权后再提交")
+            mode, auth = preview["mode"], preview["auth"]
+            shared = str(form.get("url") or "").strip()
+            query = str(form.get("query") or "").strip()
+            title = str(form.get("title") or "").strip() or None
+            text = str(form.get("text") or "").strip() or None
+            upload, pdf = form.get("pdf"), None
+            if mode == "url" and upload is not None and not isinstance(upload, str):
+                if upload.filename:
+                    pdf = await upload.read(ops.MAX_PDF_UPLOAD + 1)
+            if capture_previews.pop(token, None) is not preview:
+                raise HTTPException(409, "确认已使用，请重新打开「我读完了」")
+            if capture_authorization() != auth:
+                raise HTTPException(409, "后端、模型或费用上限已变更，请重新打开「我读完了」确认")
+            url = ""
+            try:
+                if mode == "paper":
+                    if not 1 <= len(query) <= 1000 or any(ord(c) < 32 for c in query):
+                        raise ValueError("请输入有效论文名（1–1000 字符，不含换行或控制字符）")
+                    if re.search(r"https?://", query, flags=re.I):
+                        raise ValueError("论文名模式不接受链接；请切换到链接模式")
+                else:
+                    url = capture.parse_shared_url(shared) if shared else ""
+                    ops.validate_manual([url] if url else [], "read", None, False, text, pdf)
+                    if pdf is not None and (
+                        len(pdf) > ops.MAX_PDF_UPLOAD or not pdf.startswith(b"%PDF")
+                    ):
+                        raise ops.OpsError("只接受 30MB 以内的 PDF 文件")
+            except (ops.OpsError, ValueError) as exc:
+                return capture_form(request, mode, error=str(exc), values=form)
+
+        initial_result = {"quick_capture": auth, "capture_mode": mode}
+        if mode == "paper":
+            kind = f"paper-quick-{uuid.uuid4().hex}"
+            label = f"我读完了 · 论文：{query}"
+
+            def run(task: Task) -> dict:
+                with _http_client(_fetch_settings()) as client:
+                    result = papers.import_by_name(query, task.log, ingest=False, client=client)
+                return finish_capture(result, result.get("material_id"), task, auth)
+        else:
+            kind = f"capture-{uuid.uuid4().hex}"
+            label = "我读完了 · 链接"
+            initial_result["capture_url"] = url
+
+            def run(task: Task) -> dict:
+                with _http_client(_fetch_settings()) as client:
+                    result = capture.import_url_or_content(
+                        shared, task.log, title=title, text=text, pdf=pdf, client=client,
+                    )
+                added = (result.get("results") or [{}])[0]
+                return finish_capture(result, added.get("item_id"), task, auth)
+
+        task = tasks.start(kind, label, run, initial_result=initial_result)
+        return RedirectResponse(f"/task-history/{task.id}", status_code=303)
+
+    @app.post("/quick-capture/papers/{task_id}/choose", response_class=HTMLResponse)
+    async def quick_capture_paper_choose(request: Request, task_id: str):
+        from secondbrain import papers
+
+        form = await request.form()
+        candidate_id = str(form.get("candidate_id") or "")
+        prior = tasks.get(task_id)
+        if (prior is None or prior.id != task_id or not prior.kind.startswith("paper-quick-")
+                or prior.status != "waiting"):
+            raise HTTPException(409, "未找到等待选择的已授权快捷任务")
+        auth = prior.result.get("quick_capture")
+        search_id = prior.result.get("search_id")
+        if (not auth or not search_id or not candidate_id
+                or not any(c["id"] == candidate_id for c in prior.result.get("candidates", []))):
+            raise HTTPException(409, "候选不属于该已授权快捷任务")
+        kind = f"paper-quick-choice-{task_id}"
+        previous_choice = tasks.get(kind)
+        if previous_choice and (
+            previous_choice.running or previous_choice.result.get("material_id")
+        ):
+            return RedirectResponse(f"/task-history/{previous_choice.id}", status_code=303)
+
+        def run(task: Task) -> dict:
+            with _http_client(_fetch_settings()) as client:
+                result = papers.choose_candidate(
+                    search_id, candidate_id, task.log, ingest=False, client=client,
+                )
+            return finish_capture(result, result.get("material_id"), task, auth)
+
+        task = tasks.start(kind, "我读完了 · 导入已选论文", run, initial_result={
+            "quick_capture": auth, "capture_choice_of": task_id,
+        })
+        return RedirectResponse(f"/task-history/{task.id}", status_code=303)
 
     @app.get("/add", response_class=HTMLResponse)
     def add_page(request: Request) -> HTMLResponse:
@@ -965,12 +1198,10 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         if material_id and options["state_requested"] == "unread":
             archive_materials([material_id])
         if material_id and options["state_requested"] == "read":
-            registered = ops.register_read(
-                material_id, task.log, notes=options["learning_notes"] or None,
-                discussion_url=options["discussion_url"] or None,
+            ops.register_read(
+                material_id, notes=options["learning_notes"] or None,
+                discussion_url=options["discussion_url"] or None, protect_legacy_write=True,
             )
-            result["ingest"] = registered["ingest"]
-            result["cached"] = registered["cached"]
         return result
 
     @app.post("/papers/add", response_class=HTMLResponse)
@@ -1030,7 +1261,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         state = str(form.get("state") or "later")
         title = str(form.get("title") or "").strip() or None
         feedback = (str(form.get("feedback") or "") or None) if state == "read" else None
-        ingest = bool(form.get("ingest"))
+        ingest = False  # Web 导入统一只保存材料；AI 由独立的确认流程发起。
         text = str(form.get("text") or "").strip() or None
         reference_only = bool(form.get("reference_only"))
         learning_notes = str(form.get("learning_notes") or "") or None
@@ -1412,6 +1643,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
 
     @app.post("/tasks/{kind}", response_class=HTMLResponse)
     async def task_start(request: Request, kind: str) -> HTMLResponse:
+        if kind == "wiki_ingest":
+            return await confirm_ingest(request)
         if kind not in TASKS:
             raise HTTPException(404, "未知的任务")
         form = await request.form()
@@ -1435,7 +1668,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
     @app.get("/tasks/{kind}", response_class=HTMLResponse)
     def task_status(request: Request, kind: str, refresh: str | None = None) -> HTMLResponse:
         known = (
-            kind in TASKS or kind in {"manual_add", "wiki-sync"}
+            kind in TASKS or kind in {"manual_add", "wiki-sync", "wiki_ingest"}
             or re.fullmatch(r"(summary|wiki|read)-\d+", kind)
             or (kind.startswith(("paper-", "rewrite-")) and tasks.get(kind) is not None)
             or (
@@ -1929,13 +2162,13 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
         if (kind and kind not in KIND_TITLES) or view not in {"active", "trash", "all"}:
             raise HTTPException(400, "未知知识页筛选条件")
         with _conn() as conn:
-            pending_read = conn.execute(
-                "SELECT id, title, processing_status FROM items"
-                " WHERE reading_state = 'read' AND processing_status != 'processed'"
-                " AND NOT EXISTS (SELECT 1 FROM material_lifecycle m"
-                " WHERE m.item_id = items.id AND m.trashed = 1)"
-                " ORDER BY id DESC"
-            ).fetchall()
+            read_rows = [row for row in conn.execute(
+                "SELECT i.id, i.title, i.processing_status FROM items i"
+                " LEFT JOIN material_lifecycle m ON m.item_id = i.id"
+                " WHERE i.reading_state = 'read' AND COALESCE(m.trashed, 0) = 0"
+                " AND i.id NOT IN (SELECT alias_id FROM material_aliases)"
+                " ORDER BY (i.processing_status = 'processed'), i.read_at DESC, i.id DESC"
+            ) if not ((page := wiki.material_page(row["id"])) and page.is_trashed)]
             entries = []
             available_kinds = set()
             for page in wiki.pages.values():
@@ -1957,7 +2190,8 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             "wiki.html",
             {"entries": entries, "count": len(entries), "query": query, "kind": kind,
              "view": view, "available_kinds": available_kinds,
-             "notice": request.query_params.get("notice", ""), "pending_read": pending_read},
+             "notice": request.query_params.get("notice", ""), "read_rows": read_rows,
+              "ingest_task": tasks.get("wiki_ingest")},
         )
 
     @app.post("/wiki/manage", response_class=HTMLResponse)
@@ -2120,6 +2354,7 @@ def create_app(extra_hosts: tuple[str, ...] = ()) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         return templates.TemplateResponse(request, "wiki_sync.html", {
             "plan": plan, "task": tasks.get("wiki-sync"), "hints": CostHints(_settings()),
+            "backend": ingest_destination()[0],
         })
 
     @app.post("/wiki/sync", response_class=HTMLResponse)

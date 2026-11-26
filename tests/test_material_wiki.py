@@ -140,7 +140,10 @@ def test_unread_material_ingests_without_feedback_l2_or_recommendation(material_
     assert related_knowledge(wiki, [row], 500, 2000) == ""
     from secondbrain import ops
 
-    ops.register_read(item_id, lambda _: None)
+    ops.register_read(item_id)
+    wiki.reload_pages()
+    assert related_knowledge(wiki, [row], 500, 2000) == ""
+    assert ops.ingest_items([item_id], lambda _: None, require_read=True).cached == [item_id]
     wiki.reload_pages()
     assert "KV cache（concept）" in related_knowledge(wiki, [row], 500, 2000)
 

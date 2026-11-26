@@ -86,6 +86,9 @@
 <section class="panel form-panel" id="schedule" data-mode="{{ 'auto' if sched.installed else 'manual' }}">
   <h2>定时运行</h2>
   {% if sched.installed %}
+    {% if sched.data_dir %}<p class="meta">定时任务的数据目录：<code>{{ sched.data_dir }}</code></p>{% endif %}
+    {% if sched.workspace_matches is sameas false %}<p class="refresh" role="status">此定时任务的数据目录与当前工作区不同或无法确认；不会在这里显示其他工作区的运行结果。</p>{% endif %}
+    {% if sched.workspace_matches and sched.last_result %}<p class="meta">最近定时运行：{{ {'success':'成功','partial':'部分完成','empty':'无内容','locked':'已有任务运行','failed':'失败'}.get(sched.last_result.status, '状态未知') }} · {{ sched.last_result.at }}</p>{% endif %}
     <p>当前：<b>每天 {{ sched.at.strftime("%H:%M") if sched.at else "（时间无法解析）" }} 自动运行</b> · LaunchAgent {{ "已加载" if sched.loaded else "未加载" }}</p>
     <button type="button" class="fb" hx-post="/ops/schedule/uninstall" hx-target="#schedule-result" hx-confirm="改为手动：卸载每日自动运行（launchctl unload，并删除 plist）？">改为手动</button>
     <span class="meta">之后在首页点「开始今日过滤」手动运行；有运行在进行时会拒绝，避免终止它。</span>

@@ -89,6 +89,20 @@ def settle(app):
         assert not task.running
 
 
+def confirm_material_wiki(client, app, item_id):
+    url = f"/item/{item_id}/wiki"
+    kind = f"wiki-{item_id}"
+    preview = client.post(url)
+    assert preview.status_code == 200
+    token = re.search(r'name="token" value="([^"]+)"', preview.text)
+    assert token is not None
+    assert app.state.tasks.get(kind) is None
+    response = client.post(url, data={"confirm": "yes", "token": token[1]}, follow_redirects=False)
+    assert response.status_code == 303
+    settle(app)
+    return app.state.tasks.get(kind)
+
+
 def test_cli_ambiguous_choose_saved_identity_and_repeat(paper_env):
     paper_env["ambiguous"] = True
     runner = CliRunner()
@@ -184,11 +198,22 @@ def test_cli_and_web_full_material_wiki_without_read_feedback(paper_env):
         settle(app)
         page = client.get(response.headers["location"])
         assert 'data-paper-status="imported"' in page.text
-        assert f'/item/{first["id"]}' in page.text
-        assert f'/wiki/page/material-{first["id"]}' in page.text
-        assert f'/wiki/graph?focus=material-{first["id"]}' in page.text
-        assert client.get(f'/item/{first["id"]}').status_code == 200
-        assert client.get(f'/wiki/page/material-{first["id"]}').status_code == 200
+        imported, = rows()
+        assert imported["id"] == first["id"] and imported["content_completeness"] == "full"
+        assert imported["reading_state"] == "read" and imported["read_at"] is not None
+        item_id = imported["id"]
+        wiki_page = f"/wiki/page/material-{item_id}"
+        graph = f"/wiki/graph?focus=material-{item_id}"
+        assert f"/item/{item_id}" in page.text
+        assert wiki_page in page.text  # CLI 创建的草稿仍然存在，导入已读不会发布它
+        assert graph not in page.text
+        assert client.get(f"/item/{item_id}").status_code == 200
+        assert client.get(wiki_page).status_code == 200
+
+        wiki_task = confirm_material_wiki(client, app, item_id)
+        assert wiki_task.status == "done", wiki_task.lines
+        assert wiki_task.result["cached"] == [item_id]
+        assert graph in client.get(response.headers["location"]).text
     assert len(rows()) == 1
     conn = db.connect()
     try:
@@ -215,13 +240,31 @@ def test_web_preserves_material_and_reports_failed_wiki_processing(paper_env, mo
     with TestClient(app) as client:
         response = client.post("/papers/add", data={"query": TITLE, "state": "read"})
         settle(app)
-        response = client.get(response.url)
-        assert "尚未完成" in response.text
-        assert "材料仍已保存" in response.text
-        assert rows()[0]["reading_state"] == "read"
+        page = client.get(response.url)
+        assert 'data-paper-status="imported"' in page.text
+        assert 'data-task-status="done"' in page.text
+        imported, = rows()
+        assert imported["reading_state"] == "read" and imported["read_at"] is not None
+        item_id = imported["id"]
+        wiki_page = f"/wiki/page/material-{item_id}"
+        assert client.get(wiki_page).status_code == 404
+        with closing(db.connect()) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+
+        wiki_task = confirm_material_wiki(client, app, item_id)
+        assert wiki_task.status == "partial", wiki_task.lines
+        assert wiki_task.result["failures"] == 1
+        task_page = client.get(f"/task-history/{wiki_task.id}").text
+        assert 'data-task-status="partial"' in task_page
+        assert "知识整理服务暂不可用" in task_page
+        saved, = rows()
+        assert (saved["id"], saved["content"]) == (item_id, imported["content"])
+        assert (saved["reading_state"], saved["read_at"]) == ("read", imported["read_at"])
+        assert client.get(wiki_page).status_code == 404
+        assert 'data-task-status="done"' in client.get(response.url).text
 
 
-def test_web_ambiguous_selection_retains_requested_wiki_processing(paper_env):
+def test_web_ambiguous_selection_retains_read_state_before_explicit_wiki(paper_env):
     paper_env["full"] = True
     paper_env["ambiguous"] = True
     app = create_app()
@@ -232,12 +275,27 @@ def test_web_ambiguous_selection_retains_requested_wiki_processing(paper_env):
         assert 'name="state" value="read" checked' in response.text
         task = next(task for task in app.state.tasks._tasks.values() if task.result)
         result = task.result
+        candidate_id = result["candidates"][0]["id"]
+        assert rows() == []
         chosen = client.post("/papers/choose", data={
-            "search_id": result["search_id"],
-            "candidate_id": result["candidates"][0]["id"], "state": "read",
+            "search_id": result["search_id"], "candidate_id": candidate_id, "state": "read",
         })
         settle(app)
-        assert "/wiki/page/material-" in client.get(chosen.url).text
+        page = client.get(chosen.url)
+        assert 'data-paper-status="imported"' in page.text
+        imported, = rows()
+        item_id = imported["id"]
+        assert imported["reading_state"] == "read" and imported["read_at"] is not None
+        assert f"/item/{item_id}" in page.text
+        assert f'data-candidate-id="{candidate_id}"' in page.text
+        wiki_page = f"/wiki/page/material-{item_id}"
+        assert wiki_page not in page.text
+        assert client.get(wiki_page).status_code == 404
+
+        wiki_task = confirm_material_wiki(client, app, item_id)
+        assert wiki_task.status == "done", wiki_task.lines
+        assert wiki_page in client.get(chosen.url).text
+        assert client.get(wiki_page).status_code == 200
 
 
 def test_web_waiting_choice_survives_restart_with_learning_record(paper_env):

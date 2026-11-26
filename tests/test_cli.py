@@ -20,6 +20,30 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return data
 
 
+def test_cli_backup_and_restore_isolated_workspace(isolated_env: Path, tmp_path: Path) -> None:
+    from contextlib import closing
+
+    from secondbrain import db
+
+    with closing(db.connect()):
+        pass
+    note = isolated_env / "wiki" / "notes" / "lesson.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("只在本地保留的学习记录", encoding="utf-8")
+    backup = tmp_path / "backup"
+    restored = tmp_path / "restored"
+    refused = runner.invoke(app, ["workspace", "backup", str(backup)])
+    assert refused.exit_code == 1 and not backup.exists()
+    result = runner.invoke(app, ["workspace", "backup", str(backup), "--offline"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["workspace", "restore", str(backup), str(restored), "--offline"])
+    assert result.exit_code == 0, result.output
+    assert (restored / "data" / note.relative_to(isolated_env)).read_bytes() == note.read_bytes()
+    assert (restored / "config" / "settings.example.yaml").is_file()
+    repeated = runner.invoke(app, ["workspace", "restore", str(backup), str(restored), "--offline"])
+    assert repeated.exit_code == 1
+
+
 def test_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

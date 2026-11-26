@@ -9,6 +9,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -38,6 +39,8 @@ app.add_typer(profile_app, name="profile")
 app.add_typer(wiki_app, name="wiki")
 app.add_typer(paper_app, name="paper")
 app.add_typer(reading_app, name="reading")
+workspace_app = typer.Typer(help="停服后备份和恢复个人工作区。", no_args_is_help=True)
+app.add_typer(workspace_app, name="workspace")
 wiki_app.add_typer(rewrite_app, name="rewrite")
 
 OK, FAIL, WARN = "✓", "✗", "!"
@@ -88,7 +91,7 @@ def _paper_result(result: dict, ingest: bool, *, read: bool = False) -> None:
         if result["status"] == "ambiguous":
             typer.echo(
                 f"  sb paper choose {result['search_id']} {candidate['id']}"
-                + (" --read" if read else " --ingest" if ingest else "")
+                + (" --read" if read else "") + (" --ingest" if ingest else "")
             )
     if result.get("material_id"):
         item_id = result["material_id"]
@@ -111,7 +114,7 @@ def _paper_result(result: dict, ingest: bool, *, read: bool = False) -> None:
 def paper_add(
     query: str = typer.Argument(..., help="论文标题或名称"),
     ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
-    read: bool = typer.Option(False, "--read", help="已在外部读过，登记并整理知识"),
+    read: bool = typer.Option(False, "--read", help="已在外部读过；默认仅登记，不调用模型"),
 ) -> None:
     """检索论文；身份不明确时只列出候选，不自动导入。"""
     from secondbrain import ops, papers
@@ -119,7 +122,9 @@ def paper_add(
     try:
         result = papers.import_by_name(query, typer.echo, ingest=ingest and not read)
         if read and result.get("material_id"):
-            result["ingest"] = ops.register_read(result["material_id"], typer.echo)["ingest"]
+            ops.register_read(result["material_id"])
+            if ingest:
+                result["ingest"] = vars(ops.ingest_items([result["material_id"]], typer.echo))
     except (ValueError, ops.OpsError) as exc:
         typer.echo(f"✗ {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -131,7 +136,7 @@ def paper_choose(
     search_id: str,
     candidate_id: str,
     ingest: bool = typer.Option(False, "--ingest", help="独立整理入 wiki，不标记已读"),
-    read: bool = typer.Option(False, "--read", help="已在外部读过，登记并整理知识"),
+    read: bool = typer.Option(False, "--read", help="已在外部读过；默认仅登记，不调用模型"),
 ) -> None:
     """从已保存的检索结果中选择；不会重新搜索或接收候选 URL。"""
     from secondbrain import ops, papers
@@ -141,7 +146,9 @@ def paper_choose(
             search_id, candidate_id, typer.echo, ingest=ingest and not read
         )
         if read and result.get("material_id"):
-            result["ingest"] = ops.register_read(result["material_id"], typer.echo)["ingest"]
+            ops.register_read(result["material_id"])
+            if ingest:
+                result["ingest"] = vars(ops.ingest_items([result["material_id"]], typer.echo))
     except (ValueError, ops.OpsError) as exc:
         typer.echo(f"✗ {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -309,24 +316,53 @@ def reading_remove(item_id: int) -> None:
 def reading_read(
     item_id: int, notes_file: str | None = typer.Option(None, "--notes-file"),
     discussion_url: str | None = typer.Option(None, "--discussion-url"),
-    force: bool = typer.Option(False, "--force"),
 ) -> None:
-    """登记外部已读；增量整理，正文和笔记未变时不重复付费。"""
-    from pathlib import Path
-
+    """只登记外部已读并保存可选本地记录；不调用模型。"""
     from secondbrain import ops
 
     try:
         notes = Path(notes_file).read_text(encoding="utf-8") if notes_file else None
-        result = ops.register_read(
-            item_id, typer.echo, notes=notes, discussion_url=discussion_url, force=force
-        )
+        ops.register_read(item_id, notes=notes, discussion_url=discussion_url)
     except (OSError, ops.OpsError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    message = "；复用已有整理，无新增模型调用" if result["cached"] else ""
-    typer.echo(f"#{item_id} 已登记阅读{message}")
-    if result["ingest"]["failures"]:
-        raise typer.Exit(code=1)
+    typer.echo(f"#{item_id} 已登记阅读（未调用模型）；需要时运行 sb wiki ingest --pending")
+
+
+@workspace_app.command("backup")
+def workspace_backup(
+    destination: Path,
+    offline: bool = typer.Option(
+        False, "--offline", help="确认 Web、CLI、定时任务及外部编辑器均已停写"
+    ),
+) -> None:
+    """备份当前 data 与 config，生成完整性清单；不覆盖已存在目标。"""
+    from secondbrain.workspace import WorkspaceError, backup_workspace
+
+    try:
+        path = backup_workspace(
+            config.data_dir(), config.config_dir(), destination, offline=offline,
+        )
+    except (WorkspaceError, OSError) as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"{OK} 已备份并校验：{path}")
+
+
+@workspace_app.command("restore")
+def workspace_restore(
+    backup: Path,
+    destination: Path,
+    offline: bool = typer.Option(False, "--offline", help="确认工作区及其外部编辑器均已停写"),
+) -> None:
+    """验证备份并恢复到新的独立目录；不改运行配置或现有工作区。"""
+    from secondbrain.workspace import WorkspaceError, restore_workspace
+
+    try:
+        path = restore_workspace(backup, destination, offline=offline)
+    except (WorkspaceError, OSError) as exc:
+        typer.echo(f"{FAIL} {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"{OK} 已恢复并校验：{path}（启动时显式指向其中的 data/ 和 config/）")
 
 
 @app.command()
@@ -697,13 +733,31 @@ def run(
     与 Web /ops 的"立即运行"、定时任务共用一把锁（data/run.lock），已在运行时直接退出。"""
     from secondbrain import ops
 
+    def remember(status: str) -> None:
+        if os.environ.get("SB_SCHEDULED_RUN") != "1":
+            return
+        try:
+            schedule.record_result(status)
+        except OSError:
+            typer.echo("! 无法保存定时运行状态，请检查工作区写入权限。", err=True)
+
     try:
         report = ops.run_once(typer.echo, limit=limit, no_fetch=no_fetch, all_time=all_time)
     except ops.OpsError as exc:
+        remember("locked" if isinstance(exc, ops.RunLocked) else "failed")
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc
+    except Exception:
+        remember("failed")
+        raise
     if report.aborted:
+        remember("failed")
         raise typer.Exit(code=1)
+    has_work = bool(report.fetch_added or report.l0_checked or report.lanes)
+    if report.fetch_failures or report.l1_failed or report.l2_failed or report.errors:
+        remember("partial" if has_work else "failed")
+    else:
+        remember("success" if has_work else "empty")
 
 
 def _flat(text: str) -> str:
@@ -1046,7 +1100,7 @@ def deep(
 @app.command()
 def add(
     urls: Annotated[list[str] | None, typer.Argument(help="文章 URL；本地 PDF/文本可省略")] = None,
-    read: bool = typer.Option(False, "--read/--later", help="登记已读并整理；默认加入稍后清单"),
+    read: bool = typer.Option(False, "--read/--later", help="只登记已读；默认加入稍后清单"),
     title: str | None = typer.Option(None, "--title", help="本地材料标题"),
     feedback: str | None = typer.Option(
         None, "--feedback", help="读后反馈（仅 --read）：gained | too_easy | too_hard | worthless"
@@ -1304,30 +1358,28 @@ def wiki_graph(
 
 @wiki_app.command("ingest")
 def wiki_ingest(
-    item_id: int | None = typer.Argument(None, help="要编入 wiki 的条目 id"),
+    item_ids: Annotated[list[int] | None, typer.Argument(help="要编入 wiki 的材料 ID")] = None,
     pending: bool = typer.Option(
         False, "--pending", help="整理已登记阅读且尚未完成整理的材料"
     ),
     force: bool = typer.Option(False, "--force", help="已编入过的条目也重新编入"),
+    include_notes: bool = typer.Option(
+        False, "--include-notes", help="允许将个人学习记录发送给模型"
+    ),
 ) -> None:
-    """把条目编进 wiki：strong 模型输出受限的页面操作，由代码校验后写入 data/wiki。"""
+    """显式调用模型整理知识；默认不发送独立的个人学习记录。"""
     from secondbrain import ops
     from secondbrain.wiki.ingest import pending_items
 
-    if (item_id is None) == (not pending):
-        raise typer.BadParameter("请给出 item_id，或使用 --pending（二选一）")
+    if bool(item_ids) == pending:
+        raise typer.BadParameter("请给出材料 ID，或使用 --pending（二选一）")
     wiki = _open_wiki()
     conn = db.connect()
     try:
         if pending:
             ids = pending_items(conn, wiki)
         else:
-            done = db.ingested_ids(conn)
-            row = db.item_detail(conn, item_id)
-            if item_id in done and row["processing_status"] == "processed" and not force:
-                typer.echo(f"{WARN} #{item_id} 已编入 wiki（如需重新编入加 --force）")
-                return
-            ids = [item_id]
+            ids = list(dict.fromkeys(item_ids or []))
         typer.echo(f"wiki：{wiki.root}（{len(wiki.pages)} 个页面）")
         if not ids:
             typer.echo("没有需要整理的已读材料")
@@ -1335,7 +1387,9 @@ def wiki_ingest(
     finally:
         conn.close()
     try:
-        summary = ops.ingest_items(ids, typer.echo, force=force)
+        summary = ops.ingest_items(
+            ids, typer.echo, force=force, include_notes=include_notes, require_read=pending,
+        )
     except ops.OpsError as exc:
         typer.echo(f"{FAIL} {exc}", err=True)
         raise typer.Exit(code=1) from exc

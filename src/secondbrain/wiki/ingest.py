@@ -61,7 +61,9 @@ def _material_text(row: sqlite3.Row) -> tuple[str, str]:
     return row["summary"] or "", "abstract" if row["summary"] else "missing"
 
 
-def material_input_hash(row: sqlite3.Row, notes: str) -> str:
+def material_input_hash(
+    row: sqlite3.Row, notes: str, *, include_notes: bool | None = None
+) -> str:
     """仅散列实际编译输入；阅读登记不使相同内容再次付费。"""
     text, completeness = _material_text(row)
     value = {
@@ -69,6 +71,10 @@ def material_input_hash(row: sqlite3.Row, notes: str) -> str:
         "source": row["source_id"], "text": text,
         "content_completeness": completeness, "user_notes": notes,
     }
+    if include_notes is not None:
+        value["include_notes"] = include_notes
+        if not include_notes:
+            value["user_notes"] = ""
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -147,8 +153,31 @@ def related_pages(wiki: Wiki, payload: dict, s: FilterSettings) -> list[Page]:
     return wiki.mentioned_in(text, s.wiki.related_pages)
 
 
+_MARKDOWN_HEADING = re.compile(r"(?m)^ {0,3}(#{1,6})[ \t]+(.+)$")
+_PRIVATE_HEADINGS = {
+    "个人笔记", "学习笔记", "个人学习记录", "外部讨论", "讨论引用", "personal notes", "人工关系",
+}
+
+
+def _without_private_sections(body: str) -> str:
+    pieces = []
+    private_level, start = None, 0
+    for heading in _MARKDOWN_HEADING.finditer(body):
+        level = len(heading[1])
+        if private_level is not None:
+            if level > private_level:
+                continue
+            private_level, start = None, heading.start()
+        if heading[2].strip().rstrip("#").strip().casefold() in _PRIVATE_HEADINGS:
+            pieces.append(body[start:heading.start()])
+            private_level = level
+    if private_level is None:
+        pieces.append(body[start:])
+    return "".join(pieces)
+
+
 def ingest_messages(
-    wiki: Wiki, payload: dict, related: list[Page], s: FilterSettings
+    wiki: Wiki, payload: dict, related: list[Page], s: FilterSettings, *, include_notes: bool = True
 ) -> list[dict]:
     system = (PROMPTS_DIR / "wiki_ingest.md").read_text(encoding="utf-8")
     related = [page for page in related if page.is_visible]
@@ -166,7 +195,9 @@ def ingest_messages(
             "source_warning": (
                 "来源已变化，机器内容待复核" if p.material_sync_status == "review" else None
             ),
-            "excerpt": p.body[: s.wiki.related_page_chars],
+            "excerpt": (p.body if include_notes else _without_private_sections(p.body))[
+                :s.wiki.related_page_chars
+            ],
         }
         for p in related
     ]
@@ -176,16 +207,20 @@ def ingest_messages(
         relevant.append(material)
     guidance = []
     remaining = 6000
-    for page in relevant:
+    for page in relevant if include_notes else []:
         match = re.search(r"(?ms)^## 个人笔记\s*\n(.*?)(?=^## |\Z)", page.body)
         if match and remaining > 0:
             text = match[1].strip()[:min(1200, remaining)]
             guidance.append({"slug": page.slug, "user_notes": text})
             remaining -= len(text)
+    relations = relation_context(wiki, relevant)
+    if not include_notes:
+        for relation in relations:
+            relation.pop("reason", None)
     user = "请把以下材料整理进 wiki，按规定格式输出 json：\n" + json.dumps(
         {
             "item": payload, "index": index, "related_pages": pages,
-            "human_relations": relation_context(wiki, relevant),
+            "human_relations": relations,
             "human_guidance": guidance,
         }, ensure_ascii=False
     )
@@ -256,6 +291,7 @@ def apply_plan(
     provenance: list[dict] | None = None,
     user_notes: str | None = None,
     bibliography: dict | None = None,
+    include_notes: bool | None = None,
 ) -> IngestResult:
     """保守追加并重建索引；Markdown 为事实来源，不覆盖个人内容或回收页。"""
     wiki.reload_pages()
@@ -284,7 +320,9 @@ def apply_plan(
         material.meta["material_kind"] = classify_material(row, bibliography)
     if recorded:
         material.meta["knowledge_status"] = "recorded"
-    material.meta["input_hash"] = material_input_hash(row, notes)
+    material.meta["input_hash"] = material_input_hash(row, notes, include_notes=include_notes)
+    if include_notes is not None:
+        material.meta["input_includes_notes"] = include_notes
     if provenance is not None:
         material.meta["provenance"] = provenance
     _, completeness = _material_text(row)
@@ -484,6 +522,7 @@ def ingest_item(
     estimate_only: bool = False,
     on_usage: Callable[[str, Usage], None] | None = None,
     user_notes: str | None = None,
+    include_notes: bool | None = None,
 ) -> tuple[IngestResult | None, float, list[dict]]:
     """返回 (result, 保守费用预留, 汇总阶段消息)；预估时 result=None、分块正文待生成。
 
@@ -498,7 +537,7 @@ def ingest_item(
     material = wiki.material_page(row["id"])
     if material is not None and material.is_trashed:
         raise WikiError("知识页已回收，请先恢复再整理")
-    learning_notes = _user_notes(wiki, row["id"], user_notes)
+    learning_notes = "" if include_notes is False else _user_notes(wiki, row["id"], user_notes)
     payload = item_payload(row, None, s, user_notes=learning_notes)
     if material is not None:
         payload["material_slug"] = material.slug
@@ -537,7 +576,7 @@ def ingest_item(
                 "只输出 ChunkNotes JSON，不要把提要声称为完整原文。"
             )
             map_inputs.append(messages)
-    messages = ingest_messages(wiki, payload, related, s)
+    messages = ingest_messages(wiki, payload, related, s, include_notes=include_notes is not False)
     # JSON 字符的最坏转义为六字节；每段另留段号和分隔符空间，绝不按原文长度猜提要长度。
     notes_bytes = len(chunks) * (MAX_MAP_NOTES_CHARS + 64) * 6
     estimate = estimate_ingest_cost(
@@ -573,7 +612,9 @@ def ingest_item(
                 raise error
             notes.append(note)
         payload["text"] = notes_text(notes)
-        messages = ingest_messages(wiki, payload, related, s)
+        messages = ingest_messages(
+            wiki, payload, related, s, include_notes=include_notes is not False
+        )
     plan, usage = complete(messages, WikiPlan, "strong", "WIKI")
     if db.is_trashed(conn, row["id"]):
         error = LLMError("整理期间材料已回收，未写入知识页；请恢复后重新整理")
@@ -590,7 +631,7 @@ def ingest_item(
     wiki.write_raw(row["id"], row["title"], row["url"] or "", content)
     result = apply_plan(
         wiki, plan, row, profile, today,
-        provenance=provenance, user_notes=learning_notes,
+        provenance=provenance, user_notes=learning_notes, include_notes=include_notes,
         bibliography=db.material_bibliography(conn, row["id"]),
     )
     result.usage = usage

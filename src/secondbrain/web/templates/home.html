@@ -3,18 +3,18 @@
 {% block content %}
 <div class="page-header">
   <div><p class="eyebrow">个人工作空间</p><h1>从感兴趣，到理解</h1><p class="meta">收集值得读的内容，学习之后，留下一张自己的知识网络。</p></div>
-  <a class="fb primary" href="/add">添加材料</a>
+  <div class="toolbar"><a class="fb primary" href="/quick-capture">我读完了</a><a class="fb" href="/add">添加材料</a></div>
 </div>
 <div class="stats-grid">
   <a class="stat-card" href="/later"><span>稍后阅读</span><strong>{{ later }}</strong><small>由你选择，不自动填充</small></a>
   <a class="stat-card" href="/sources"><span>关注信源</span><strong>{{ sources_count }}</strong><small>持续发现值得读的内容</small></a>
-  <a class="stat-card" href="/wiki"><span>知识页面</span><strong>{{ pages }}</strong><small>登记阅读后增量整理</small></a>
+  <a class="stat-card" href="/wiki"><span>知识页面</span><strong>{{ pages }}</strong><small>按需用 AI 整理</small></a>
 </div>
 <div class="panel-header"><h2>接下来想读</h2><a class="fb ghost small" href="/later">查看阅读列表 →</a></div>
 <div class="compact-list">
 {% for row in rows %}<article class="list-row" data-item-id="{{ row.id }}">
   <div class="row-main"><h3><a href="/item/{{ row.id }}">{{ row.title }}</a></h3><p class="meta">等待你的一次阅读或讨论</p></div>
-  <div class="row-actions"><a class="fb small" href="/item/{{ row.id }}#register-read">登记阅读</a></div>
+  <div class="row-actions">{% if row.url %}<a class="fb ghost small" href="{{ row.url }}" target="_blank" rel="noopener noreferrer">打开原文</a>{% endif %}{% with item_id=row.id, return_to="home" %}{% include "_mark_read.html" %}{% endwith %}</div>
 </article>{% else %}<div class="empty"><h3>阅读列表还是空的</h3><p>从关注的信源挑选文章，或添加链接、论文、PDF 和文本。</p><a class="fb" href="/sources">浏览信源</a></div>{% endfor %}
 </div>
 <p class="meta section-note">所有已保存内容都在<a href="/materials">材料存档 · {{ count }} 份</a>中。阅读和讨论可以留在外部，回来登记即可。</p>

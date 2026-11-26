@@ -80,9 +80,10 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
     item_ids = set(rows)
     for iid, row in rows.items():
         notes = _notes(wiki, iid)
-        digest = material_input_hash(row, notes)
         state = states.get(iid, {})
         material = wiki.material_page(iid)
+        notes_mode = material.meta.get("input_includes_notes") if material else False
+        digest = material_input_hash(row, notes, include_notes=notes_mode)
         compiled = (
             material is not None and material.meta.get("input_hash") == digest
             and not (row["reading_state"] == "read" and material.knowledge_status == "draft")
@@ -94,7 +95,7 @@ def _snapshot(conn, wiki: Wiki) -> tuple[dict, dict]:
         )
         lifecycle_pending = state.get("revision", 0) != state.get("synced_revision", 0)
         inputs[iid] = {
-            "hash": digest, "reading_state": row["reading_state"],
+            "hash": digest, "notes_mode": notes_mode, "reading_state": row["reading_state"],
             "processing_status": row["processing_status"],
             "origins": [dict(origin) for origin in db.material_origins(conn, iid)],
         }
@@ -194,8 +195,10 @@ def apply_sync(token: str, echo: Callable[[str], None]) -> dict:
                         raise SyncConflict("材料状态已变化，请重新预览")
                     row = db.item_detail(conn, iid)
                     if row is None or (
-                        material_input_hash(row, _notes(wiki, iid))
-                        != snapshot["inputs"][iid]["hash"]
+                        material_input_hash(
+                            row, _notes(wiki, iid),
+                            include_notes=snapshot["inputs"][iid]["notes_mode"],
+                        ) != snapshot["inputs"][iid]["hash"]
                     ):
                         raise SyncConflict("材料或学习笔记已变化，请重新预览")
                     for entry in change["pages"]:
@@ -277,14 +280,22 @@ def apply_sync(token: str, echo: Callable[[str], None]) -> dict:
                     failure(iid, SyncConflict("同步期间材料状态变化，仍保留待同步"))
                     continue
                 row = db.item_detail(conn, iid)
-                digest = material_input_hash(row, _notes(wiki, iid)) if row is not None else None
-                if digest != snapshot["inputs"][iid]["hash"]:
+                notes = _notes(wiki, iid)
+                original = snapshot["inputs"][iid]
+                digest = material_input_hash(
+                    row, notes, include_notes=original["notes_mode"],
+                ) if row is not None else None
+                if digest != original["hash"]:
                     failure(iid, SyncConflict("同步期间材料或笔记变化，仍保留待同步"))
                     continue
                 if change["needs_ingest"]:
                     material = wiki.material_page(iid)
-                    if (material is None or material.meta.get("input_hash") != digest
-                            or row["processing_status"] != "processed"):
+                    if material is None or row["processing_status"] != "processed":
+                        continue
+                    compiled_hash = material_input_hash(
+                        row, notes, include_notes=material.meta.get("input_includes_notes"),
+                    )
+                    if material.meta.get("input_hash") != compiled_hash:
                         continue
                 if expected and not db.acknowledge_lifecycle(conn, iid, change["revision"]):
                     failure(iid, SyncConflict("材料状态版本已变化，仍保留待同步"))

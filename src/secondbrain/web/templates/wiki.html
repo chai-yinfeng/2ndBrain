@@ -25,6 +25,21 @@
 </article>
 {% else %}<p class="empty panel">没有匹配的知识页。</p>{% endfor %}
 </section>
-{% if pending_read and view == "active" %}<details class="panel"><summary>已登记，待整理（{{ pending_read|length }}）</summary><ul class="wiki-link-list">{% for item in pending_read %}<li><a href="/item/{{ item.id }}#register-read">{{ item.title }}</a></li>{% endfor %}</ul></details>{% endif %}
+{% if view == "active" %}
+<details id="wiki-organize" class="panel"{% if ingest_task and not ingest_task.dismissed %} open{% endif %}>
+  <summary>选择已读材料，交给 AI 整理（{{ read_rows|length }}）</summary>
+  {% if read_rows %}<form method="post" action="/tasks/wiki_ingest" class="add-form">
+    <fieldset><legend>勾选本次整理的材料</legend>
+      {% for row in read_rows %}<div class="choice">
+        <label><input type="checkbox" name="item_ids" value="{{ row.id }}"> {{ row.title }}</label>
+        <span class="meta">{{ '已整理' if row.processing_status == 'processed' else '待整理' }}</span> · <a href="/item/{{ row.id }}">详情</a>
+      </div>{% endfor %}
+    </fieldset>
+    {% include "_ingest_options.html" %}
+    <button class="fb" type="submit">预览所选材料…</button>
+  </form>{% else %}<p class="help">还没有可整理的已读材料。</p>{% endif %}
+  {% with kind="wiki_ingest", task=ingest_task, message=None %}{% include "_task.html" %}{% endwith %}
+</details>
+{% endif %}
 <details class="panel"><summary>知识库维护</summary><p class="help">检查断链、孤立页、元数据与目录，不修改正文、不调用模型。</p><button type="button" class="fb" hx-post="/wiki/lint" hx-target="#lint-result" hx-swap="outerHTML">检查知识库</button><div id="lint-result"></div><p><a href="/wiki/graph?drafts=1">查看草稿与待复核内容的图谱</a></p></details>
 {% endblock %}
